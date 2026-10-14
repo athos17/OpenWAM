@@ -32,3 +32,10 @@ color_jitter:
   contrast: 0.2
   saturation: 0.2
   hue: 0.0
+
+# ── Offline encoder caches (scripts/precompute/build_encode_cache.py) ─────────
+# Verified cache dirs holding the frozen UMT5 context / Wan VAE latents that the
+# online path would compute. null = encode online (default). The latent cache
+# requires color_jitter disabled.
+latent_cache_dir: null
+text_cache_dir: null

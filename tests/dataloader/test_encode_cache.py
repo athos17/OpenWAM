@@ -120,11 +120,14 @@ def _write_cache(out: Path, kind: str, dataset, row_shape, rows_fn, side: dict, 
     for i in range(NUM_SHARDS):
         start, end = ec.shard_bounds(n, i, NUM_SHARDS)
         path = out / ec.shard_name(i, NUM_SHARDS)
-        mm = np.memmap(path, dtype=np.int16, mode="w+", shape=(end - start, *row_shape))
-        for r in range(start, end):
-            mm[r - start] = rows_fn(r).view(torch.int16).numpy()
-        mm.flush()
-        del mm
+        if end == start:  # empty shard
+            path.write_bytes(b"")
+        else:
+            mm = np.memmap(path, dtype=np.int16, mode="w+", shape=(end - start, *row_shape))
+            for r in range(start, end):
+                mm[r - start] = rows_fn(r).view(torch.int16).numpy()
+            mm.flush()
+            del mm
         ec.write_shard_record(
             out,
             i,

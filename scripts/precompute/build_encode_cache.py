@@ -58,9 +58,21 @@ def build_dataset(cfg):
     from openwam.dataloader.registry import build_dataset as _build
 
     dataset = _build(cfg.dataloader, split="train")
-    if type(dataset).__name__ != "MultiTaskRoboTwinDataset":
-        raise ValueError("encode cache supports dataloader=robotwin only")
+    if type(dataset).__name__ != "MultiTaskRoboTwinDataset" and not hasattr(dataset, "encode_cache_window_table"):
+        raise ValueError(f"{type(dataset).__name__} does not implement the encode-cache protocol")
     return dataset
+
+
+def check_window(dataset, windows, row: int, sample: dict) -> None:
+    """The sample produced for global index ``row`` must be exactly that window."""
+    if "window_index" in sample:  # protocol readers report the index they served
+        ok = int(sample["window_index"]) == row
+    else:  # MultiTaskRoboTwinDataset: (sub-dataset, episode, start)
+        d, e, s = windows[row]
+        sub = dataset._sub_datasets[d]
+        ok = (sample["episode_path"], sample["start_frame"]) == (sub._episode_files[e], int(s))
+    if not ok:
+        raise ValueError(f"window order mismatch at row {row}")
 
 
 def build_model(cfg, device):
@@ -165,8 +177,12 @@ def encode_text_shard(args, cfg, dataset, vb, out: Path):
             )
             if (b - start) // BATCH % 50 == 0:
                 log(f"text shard {args.shard}: {b - start + len(batch)}/{end - start} ({time.time() - t0:.0f}s)")
-    rows.flush()
-    del rows
+    if rows is None:  # empty shard (more shards than prompts)
+        part.write_bytes(b"")
+        dim = vb.text_encoder.dim if hasattr(vb.text_encoder, "dim") else 4096
+    else:
+        rows.flush()
+        del rows
     part.replace(out / name)
     np.save(out / f"seq_lens-{args.shard:02d}.npy", np.asarray(lens[start:end], dtype=np.int32))
     ec.write_shard_record(
@@ -219,10 +235,7 @@ def encode_latent_shard(args, cfg, dataset, vb, out: Path):
     with torch.no_grad():
         for batch in loader:
             for k, sample in enumerate(batch):
-                d, e, s = windows[done + k]
-                sub = dataset._sub_datasets[d]
-                if (sample["episode_path"], sample["start_frame"]) != (sub._episode_files[e], int(s)):
-                    raise ValueError(f"window order mismatch at row {done + k}")
+                check_window(dataset, windows, done + k, sample)
             latents = online_latents(vb, padded([s["video"] for s in batch]))
             if latents.dtype != torch.bfloat16:
                 raise ValueError(f"unexpected latent dtype {latents.dtype}")
@@ -238,6 +251,8 @@ def encode_latent_shard(args, cfg, dataset, vb, out: Path):
                 log(f"latent shard {args.shard}: {done - start}/{end - start} ({rate:.1f} windows/s)")
     if done != end:
         raise ValueError(f"latent shard {args.shard} wrote {done - start} rows, expected {end - start}")
+    if rows is None:
+        raise ValueError(f"latent shard {args.shard} is empty; use fewer shards")
     rows.flush()
     del rows
     part.replace(out / name)

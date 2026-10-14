@@ -130,8 +130,14 @@ def instructions_digest(sub_datasets) -> str:
     return digest([[ds_idx, ds._instructions] for ds_idx, ds in enumerate(sub_datasets)])
 
 
+# Datasets other than MultiTaskRoboTwinDataset opt in by implementing the
+# ``encode_cache_*`` protocol (see LeRobotV3Reader); the functions below dispatch.
+
+
 def latent_signature(dataset) -> dict:
     """Everything that determines the VAE input pixels of every window."""
+    if hasattr(dataset, "encode_cache_latent_signature"):
+        return dataset.encode_cache_latent_signature()
     subs = dataset._sub_datasets
     first = subs[0]
     return {
@@ -154,6 +160,8 @@ def latent_signature(dataset) -> dict:
 
 
 def text_signature(dataset) -> dict:
+    if hasattr(dataset, "encode_cache_text_signature"):
+        return dataset.encode_cache_text_signature()
     subs = dataset._sub_datasets
     return {
         "dataset": "MultiTaskRoboTwinDataset",
@@ -165,12 +173,16 @@ def text_signature(dataset) -> dict:
 
 
 def window_table(dataset) -> np.ndarray:
+    if hasattr(dataset, "encode_cache_window_table"):
+        return dataset.encode_cache_window_table()
     rows = [(d, e, s) for d, ds in enumerate(dataset._sub_datasets) for e, s in ds._window_index]
     return np.asarray(rows, dtype=np.int32).reshape(-1, 3)
 
 
 def candidate_prompt_list(dataset) -> list:
     """Every prompt string ``_get_prompt`` can return for this dataset, sorted."""
+    if hasattr(dataset, "encode_cache_prompts"):
+        return dataset.encode_cache_prompts()
     from openwam.dataloader.robotwin import candidate_prompts
 
     out = set()
@@ -320,6 +332,9 @@ class _ShardedRows:
 
     def _open(self):
         if self._pid != os.getpid():
+            # Empty shards (more shards than rows, e.g. one prompt over 8 GPUs) map to
+            # None; searchsorted below always resolves to the last shard starting at or
+            # before the row, which is the non-empty one holding it.
             self._maps = [
                 np.memmap(
                     self._dir / r["file"],
@@ -327,6 +342,8 @@ class _ShardedRows:
                     mode="r",
                     shape=(r["row_end"] - r["row_start"], *self._row_shape),
                 )
+                if r["row_end"] > r["row_start"]
+                else None
                 for r in self._shards
             ]
             self._pid = os.getpid()
@@ -405,14 +422,13 @@ def verify_encoder_weights(cfg, architecture) -> None:
 
 def offload_cached_encoders(cfg, architecture) -> list:
     """Move encoders whose outputs come from caches off the GPU. Returns moved names."""
-    dl = cfg.get("dataloader", {})
-    vb = architecture.video_backbone
+    dl = cfg.get("dataloader", {}) if cfg is not None else {}
     moved = []
     if dl.get("text_cache_dir"):
-        vb.text_encoder.to("cpu")
+        architecture.video_backbone.text_encoder.to("cpu")
         moved.append("text_encoder")
     if dl.get("latent_cache_dir"):
-        vb.vae.to("cpu")
+        architecture.video_backbone.vae.to("cpu")
         moved.append("vae")
     if moved and torch.cuda.is_available():
         torch.cuda.empty_cache()
