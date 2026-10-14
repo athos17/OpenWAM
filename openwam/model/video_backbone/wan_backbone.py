@@ -758,31 +758,50 @@ class WanBase(VideoBackbone):
         """
         device = self.device
         dtype = self.dtype
+        # Offline caches (``cached_latents`` / ``cached_text``) carry the exact
+        # tensors encode_video / encode_text would return for these samples.
+        cached_latents = kw.get("cached_latents")
+        cached_text = kw.get("cached_text")
 
+        if cached_latents is None:
+            frame_h, frame_w, frame_n = frames[0][0].size[1], frames[0][0].size[0], len(frames[0])
+        else:
+            from openwam.model.video_backbone.wan.variants.ti2v import TI2VVariant
+
+            if not isinstance(self._variant, TI2VVariant) or self.video_encoder is not None:
+                raise ValueError("cached VAE latents are only supported for the native-VAE TI2V variant")
+            (frame_h, frame_w), frame_n = kw["video_hw"], kw["num_video_frames"]
         height, width, num_frames = check_resize_height_width(
-            frames[0][0].size[1],
-            frames[0][0].size[0],
-            len(frames[0]),
+            frame_h,
+            frame_w,
+            frame_n,
             height_division_factor=self._height_division_factor,
             width_division_factor=self._width_division_factor,
             time_division_factor=self._time_division_factor,
             time_division_remainder=self._time_division_remainder,
         )
 
-        batch_size = len(frames)
-        context, seq_lens = wan_encode.encode_text(
-            text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
-        )
-
-        all_input_videos = []
-        for clip_frames in frames:
-            all_input_videos.append(
-                wan_encode.preprocess_video(
-                    clip_frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
-                )
+        batch_size = len(text)
+        if cached_text is None:
+            context, seq_lens = wan_encode.encode_text(
+                text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
             )
-        stacked_inputs = torch.cat(all_input_videos, dim=0)
-        input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
+        else:
+            context, seq_lens = wan_encode.load_cached_text(*cached_text, device=self.device)
+
+        if cached_latents is None:
+            all_input_videos = []
+            for clip_frames in frames:
+                all_input_videos.append(
+                    wan_encode.preprocess_video(
+                        clip_frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
+                    )
+                )
+            stacked_inputs = torch.cat(all_input_videos, dim=0)
+            input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
+        else:
+            stacked_inputs = None
+            input_latents = wan_encode.load_cached_latents(cached_latents, device=self.device)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
         # Variant-specific first-frame / control conditioning lives in

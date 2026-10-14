@@ -901,12 +901,23 @@ class BaseWAMArchitecture(ABC, nn.Module):
         all_proprio_masks: list = []
         all_action_masks: list = []
         all_video_masks: list = []
+        all_cached_latents: list = []
+        all_text_embeds: list = []
+        all_text_lens: list = []
 
         for sample in samples:
             all_frames.append(sample["video"])
             all_prompts.append(sample["prompt"])
             all_vace_videos.append(sample.get("vace_video"))
-            all_ref_images.append(sample.get("first_frame_image"))
+            # Cached-latent samples carry no pixels; their first-frame condition
+            # is latent[:, 0] (TI2V), so any non-None marker keeps it enabled.
+            if sample.get("first_frame_from_latent"):
+                all_ref_images.append("latent[:, 0]")
+            else:
+                all_ref_images.append(sample.get("first_frame_image"))
+            all_cached_latents.append(sample.get("latent"))
+            all_text_embeds.append(sample.get("text_embed"))
+            all_text_lens.append(sample.get("text_len"))
 
             action = sample.get("action")
             if action is not None:
@@ -963,12 +974,39 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if any(ref_flags) and not all(ref_flags):
             raise ValueError("Mixed reference images in batch: all samples must be consistent.")
 
+        cache_kwargs = {}
+        for name, values in (("latent", all_cached_latents), ("text_embed", all_text_embeds)):
+            present = [v is not None for v in values]
+            if any(present) and not all(present):
+                raise ValueError(f"Mixed cached/online '{name}' in batch: all samples must be consistent.")
+        if all_cached_latents[0] is not None:
+            cache_kwargs["cached_latents"] = all_cached_latents
+            cache_kwargs["video_hw"] = samples[0]["video_hw"]
+            cache_kwargs["num_video_frames"] = samples[0]["num_video_frames"]
+        if all_text_embeds[0] is not None:
+            cache_kwargs["cached_text"] = (all_text_embeds, all_text_lens)
+
         preprocessed = self.preprocess(
             frames=all_frames,
             text=all_prompts,
             vace_videos=all_vace_videos,
             ref_images=all_ref_images if ref_flags[0] else None,
+            **cache_kwargs,
         )
+
+        from openwam.train.utils import debug_dump
+
+        if debug_dump.enabled("inputs"):
+            debug_dump.dump(
+                "inputs",
+                {
+                    "samples": [[s.get("episode_path"), s.get("start_frame")] for s in samples],
+                    "prompts": all_prompts,
+                    "input_latents_sha256": debug_dump.tensor_sha256(preprocessed["input_latents"]),
+                    "context_sha256": debug_dump.tensor_sha256(preprocessed["context"]),
+                    "seq_lens": preprocessed["seq_lens"].tolist(),
+                },
+            )
 
         action_data = torch.cat(all_actions, dim=0) if all_actions[0] is not None else None
 
@@ -1126,6 +1164,20 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 a_sigma_bc = action_sigmas.unsqueeze(-1)
             noisy_actions = action_scheduler.add_noise(actions, action_noise, a_sigma_bc)
             action_target = action_scheduler.training_target(actions, action_noise)
+
+        from openwam.train.utils import debug_dump
+
+        if debug_dump.enabled("noise"):
+            debug_dump.dump(
+                "noise",
+                {
+                    "video_timestep_ids": video_timestep_ids.tolist(),
+                    "action_timestep_ids": action_timestep_ids.tolist() if action_timestep_ids is not None else None,
+                    "video_noise_sha256": debug_dump.tensor_sha256(video_noise),
+                    "action_noise_sha256": debug_dump.tensor_sha256(action_noise) if noisy_actions is not None else None,
+                    "actions_sha256": debug_dump.tensor_sha256(actions) if actions is not None else None,
+                },
+            )
 
         # --- Joint forward pass ---
         forward_inputs = dict(inputs)
