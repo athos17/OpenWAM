@@ -34,6 +34,25 @@ def encode_text(prompts: list, *, tokenizer, text_encoder, device) -> Tuple[Tens
     return context, seq_lens
 
 
+def load_cached_text(embeds: list, seq_lens: list, *, device, max_length: int = 512) -> Tuple[Tensor, Tensor]:
+    """Rebuild ``encode_text``'s ``(context, seq_lens)`` from cached rows.
+
+    Each cached row holds the first ``seq_len`` context positions; every later
+    position is exactly zero online, so zero-padding to ``max_length`` restores
+    the online tensor bit for bit.
+    """
+    dim = embeds[0].shape[-1]
+    context = torch.zeros(len(embeds), max_length, dim, dtype=embeds[0].dtype, device=device)
+    for i, (row, n) in enumerate(zip(embeds, seq_lens)):
+        context[i, :n] = row[:n].to(device, non_blocking=True)
+    return context, torch.tensor(seq_lens, dtype=torch.long).to(device)
+
+
+def load_cached_latents(latents: list, *, device) -> Tensor:
+    """Stack cached ``(C, T, H, W)`` VAE latents into the ``encode_video`` batch."""
+    return torch.stack([x.to(device, non_blocking=True) for x in latents], dim=0)
+
+
 def encode_text_for_inference(
     prompt, *, vace_cache, prompt_embed_cache, tokenizer, text_encoder, device
 ) -> Tuple[Tensor, Tensor]:

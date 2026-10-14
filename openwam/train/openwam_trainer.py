@@ -164,6 +164,11 @@ class OpenWAMTrainer:
         for name in self.architecture.freeze_modules(freeze_list):
             logger.info("Frozen: %s", name)
 
+        # Offline encoder caches must come from these exact frozen weights.
+        from openwam.dataloader.utils.encode_cache import verify_encoder_weights
+
+        verify_encoder_weights(cfg, self.architecture)
+
         # Initialize all schedulers (video + action) inside architecture
         self.architecture.init_training_schedulers(1000)
 
@@ -532,6 +537,11 @@ class OpenWAMTrainer:
         # Propagate device down through architecture; frozen modules (T5/VAE) idempotent move.
         arch.set_dtype_device(arch.dtype, self.accelerator.device)
         arch.move_frozen_to_device(self.accelerator.device)
+        # Encoders replaced by offline caches are never called; keep them on CPU.
+        from openwam.dataloader.utils.encode_cache import offload_cached_encoders
+
+        for name in offload_cached_encoders(self.cfg, arch):
+            logger.info("Offloaded cached encoder to CPU: %s", name)
         logger.info(
             "architecture wrapped (%s), device=%s",
             type(self.architecture).__name__,
