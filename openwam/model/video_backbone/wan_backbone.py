@@ -877,44 +877,65 @@ class WanBase(VideoBackbone):
         """
         device = self.device
         dtype = self.dtype
+        # Offline caches (``cached_latents`` / ``cached_text``) carry the exact
+        # tensors encode_video / encode_text would return for these samples.
+        cached_latents = kw.get("cached_latents")
+        cached_text = kw.get("cached_text")
 
+        if cached_latents is None:
+            frame_h, frame_w, frame_n = frames[0][0].size[1], frames[0][0].size[0], len(frames[0])
+        else:
+            from openwam.model.video_backbone.wan.variants.ti2v import TI2VVariant
+
+            if not isinstance(self._variant, TI2VVariant) or self.video_encoder is not None:
+                raise ValueError("cached VAE latents are only supported for the native-VAE TI2V variant")
+            (frame_h, frame_w), frame_n = kw["video_hw"], kw["num_video_frames"]
         height, width, num_frames = check_resize_height_width(
-            frames[0][0].size[1],
-            frames[0][0].size[0],
-            len(frames[0]),
+            frame_h,
+            frame_w,
+            frame_n,
             height_division_factor=self._height_division_factor,
             width_division_factor=self._width_division_factor,
             time_division_factor=self._time_division_factor,
             time_division_remainder=self._time_division_remainder,
         )
 
-        batch_size = len(frames)
+        batch_size = len(text)
+        text_padding = getattr(self, "_text_padding", "max_length")
         with self._timed("encode_text"):
-            context, seq_lens = wan_encode.encode_text(
-                text,
-                tokenizer=self._tokenizer,
-                text_encoder=self.text_encoder,
-                device=self.device,
-                padding=getattr(self, "_text_padding", "max_length"),
-                dedup=getattr(self, "_text_dedup", False),
-            )
+            if cached_text is None:
+                context, seq_lens = wan_encode.encode_text(
+                    text,
+                    tokenizer=self._tokenizer,
+                    text_encoder=self.text_encoder,
+                    device=self.device,
+                    padding=text_padding,
+                    dedup=getattr(self, "_text_dedup", False),
+                )
+            else:
+                context, seq_lens = wan_encode.load_cached_text(*cached_text, device=self.device, padding=text_padding)
 
-        # Runs on the host while the text encoder executes: nothing above syncs, and
-        # the batch upload is pinned + non-blocking.
-        with self._timed("preprocess_video"):
-            stacked_inputs = wan_encode.preprocess_video_batch(
-                frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device,
-                uint8_clips=kw.get("frames_uint8"),
-            )
-        with (
-            self._timed("encode_video"),
-            _cudnn_autotune(getattr(self, "_vae_cudnn_benchmark", False)),
-            wan_vae.vae_fusion(getattr(self, "_vae_fused_norm", False)),
-        ):
-            vae_inputs = stacked_inputs
-            if getattr(self, "_vae_channels_last", False):
-                vae_inputs = stacked_inputs.contiguous(memory_format=torch.channels_last_3d)
-            input_latents = wan_encode.encode_video(vae_inputs, vae=self.vae, encoder=self.video_encoder)
+        if cached_latents is None:
+            # Runs on the host while the text encoder executes: nothing above syncs, and
+            # the batch upload is pinned + non-blocking.
+            with self._timed("preprocess_video"):
+                stacked_inputs = wan_encode.preprocess_video_batch(
+                    frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device,
+                    uint8_clips=kw.get("frames_uint8"),
+                )
+            with (
+                self._timed("encode_video"),
+                _cudnn_autotune(getattr(self, "_vae_cudnn_benchmark", False)),
+                wan_vae.vae_fusion(getattr(self, "_vae_fused_norm", False)),
+            ):
+                vae_inputs = stacked_inputs
+                if getattr(self, "_vae_channels_last", False):
+                    vae_inputs = stacked_inputs.contiguous(memory_format=torch.channels_last_3d)
+                input_latents = wan_encode.encode_video(vae_inputs, vae=self.vae, encoder=self.video_encoder)
+        else:
+            stacked_inputs = None
+            with self._timed("encode_video"):
+                input_latents = wan_encode.load_cached_latents(cached_latents, device=self.device)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
         # Variant-specific first-frame / control conditioning lives in

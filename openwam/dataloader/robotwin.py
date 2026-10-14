@@ -250,6 +250,42 @@ def _resolve_prompt(
     return format_prompt_for_inference(base_prompt)
 
 
+def candidate_prompts(
+    instructions: dict,
+    ep_file: str,
+    split: str,
+    task_name: str,
+) -> list:
+    """Every prompt :func:`_resolve_prompt` can return for this episode.
+
+    Mirrors ``_resolve_prompt`` branch for branch, with the train-split
+    ``random.choice(pool)`` expanded to the whole pool. Used to build and to
+    validate the offline text-embedding cache.
+    """
+    ep_basename = os.path.basename(ep_file)
+    ep_num = ep_basename.replace("episode", "").replace(".hdf5", "")
+    instr_key = f"episode{ep_num}.json"
+
+    bases = []
+    if instr_key in instructions:
+        instr = instructions[instr_key]
+        if isinstance(instr, dict):
+            pool = instr.get("seen") or instr.get("unseen") or []
+            if pool:
+                bases = list(pool) if split == "train" else [pool[0]]
+            elif "instruction" in instr:
+                bases = [instr["instruction"]]
+        elif isinstance(instr, str):
+            bases = [instr]
+        elif isinstance(instr, list) and len(instr) > 0:
+            bases = [instr[0] if isinstance(instr[0], str) else str(instr[0])]
+
+    if not bases or any(b is None for b in bases):
+        bases = [b for b in bases if b is not None] + [f"The bimanual robot is performing a {task_name} task."]
+
+    return [format_prompt_for_inference(b) for b in bases]
+
+
 class RoboTwinDataset(BaseDataset):
     """RoboTwin 2.0 HDF5 dataset for bimanual robot video-action training.
 
@@ -744,7 +780,7 @@ class RoboTwinDataset(BaseDataset):
             return self._read_eef_actions(f, start, end)
         return f["joint_action/vector"][start:end].astype(np.float32)
 
-    def _build_sample(self, ep_idx: int, start: int) -> dict:
+    def _build_sample(self, ep_idx: int, start: int, decode_video: bool = True) -> dict:
         """Assemble a single sample at (ep_idx, start).
 
         - ``num_frames``: raw HDF5 window length (state/action rate).
@@ -752,6 +788,10 @@ class RoboTwinDataset(BaseDataset):
         - State/action stay at raw rate.
         - ``proprio = raw_actions[0:1]`` (time dim kept).
         - ``action = raw_actions[1:num_frames]`` (length ``num_frames-1``).
+
+        ``decode_video=False`` (offline latent cache) skips the JPEG read/decode
+        and returns ``video=None``; everything else — including the single
+        ``random.choice`` in ``_get_prompt`` — runs unchanged and in the same order.
         """
         path = self._episode_files[ep_idx]
         ep_len = self._episode_lengths[ep_idx]
@@ -769,7 +809,9 @@ class RoboTwinDataset(BaseDataset):
             )
 
         with h5py.File(path, "r") as f:
-            if self.multiview:
+            if not decode_video:
+                raw_frames = None
+            elif self.multiview:
                 raw_frames = self._read_multiview_frames(f, self.cameras, start, actual_raw_end)
             else:
                 raw_frames = self._read_camera_frames(f, self.target_camera, start, actual_raw_end)
@@ -778,7 +820,8 @@ class RoboTwinDataset(BaseDataset):
         # Pad to full window if the episode ended early
         if actual_raw_len < self._raw_window_len:
             pad_len = self._raw_window_len - actual_raw_len
-            raw_frames = raw_frames + [raw_frames[-1]] * pad_len
+            if raw_frames is not None:
+                raw_frames = raw_frames + [raw_frames[-1]] * pad_len
             raw_actions = np.concatenate(
                 [raw_actions, np.repeat(raw_actions[-1:], pad_len, axis=0)],
                 axis=0,
@@ -797,9 +840,12 @@ class RoboTwinDataset(BaseDataset):
             raw_actions, unify_dim_mask = map_to_unify(raw_actions.astype(np.float32), self._unify_dst_index, UNIFY_DIM)
 
         # Video: subsampled. State/action: raw rate.
-        sampled_video = [raw_frames[i] for i in self._video_sample_indices]
-        if not self.multiview:
-            sampled_video = [crop_and_resize(frame, self.height, self.width) for frame in sampled_video]
+        if raw_frames is None:
+            sampled_video = None
+        else:
+            sampled_video = [raw_frames[i] for i in self._video_sample_indices]
+            if not self.multiview:
+                sampled_video = [crop_and_resize(frame, self.height, self.width) for frame in sampled_video]
 
         proprio_np = raw_actions[0:1].astype(np.float32)
         action_np = raw_actions[1 : self.num_frames].astype(np.float32)
@@ -842,7 +888,7 @@ class RoboTwinDataset(BaseDataset):
         return {
             "video": sampled_video,
             "vace_video": None,
-            "first_frame_image": [sampled_video[0]],
+            "first_frame_image": [sampled_video[0]] if sampled_video is not None else None,
             "action": action_tensor,
             "action_mask": action_mask,
             "video_mask": video_mask,
@@ -938,6 +984,8 @@ class MultiTaskRoboTwinDataset(BaseDataset):
             unify_action_map=_get("unify_action_map", None),
             unify_state_map=_get("unify_state_map", None),
             color_jitter=_get("color_jitter", None),
+            latent_cache_dir=_get("latent_cache_dir", None),
+            text_cache_dir=_get("text_cache_dir", None),
         )
 
     def __init__(
@@ -948,6 +996,8 @@ class MultiTaskRoboTwinDataset(BaseDataset):
         tasks: Optional[list] = None,
         normalization_stats_path: Optional[str] = None,
         action_mode: str = "joint",
+        latent_cache_dir: Optional[str] = None,
+        text_cache_dir: Optional[str] = None,
         **kwargs,
     ):
         super().__init__()
@@ -1145,6 +1195,22 @@ class MultiTaskRoboTwinDataset(BaseDataset):
 
         print(f"  Total samples: {self._total_length} (across {len(self._sub_datasets)} sub-datasets)")
 
+        # ---- Optional offline encoder caches (see dataloader/utils/encode_cache.py) ----
+        self._latent_cache = None
+        self._text_cache = None
+        if latent_cache_dir:
+            from openwam.dataloader.utils.encode_cache import LatentCache
+
+            if any(ds._color_jitter is not None for ds in self._sub_datasets):
+                raise ValueError("latent_cache_dir requires color_jitter disabled: cached pixels are fixed")
+            self._latent_cache = LatentCache(latent_cache_dir, self)
+            print(f"  Latent cache: {latent_cache_dir} ({self._latent_cache.meta['num_rows']} windows)")
+        if text_cache_dir:
+            from openwam.dataloader.utils.encode_cache import TextCache
+
+            self._text_cache = TextCache(text_cache_dir, self)
+            print(f"  Text cache: {text_cache_dir} ({self._text_cache.meta['num_rows']} prompts)")
+
     @property
     def action_dim(self) -> int:
         return self._action_dim_value
@@ -1172,4 +1238,19 @@ class MultiTaskRoboTwinDataset(BaseDataset):
                 lo = mid + 1
         ds_idx = lo
         local_idx = idx if ds_idx == 0 else idx - self._cumulative_lengths[ds_idx - 1]
-        return self._sub_datasets[ds_idx][local_idx]
+        if self._latent_cache is None and self._text_cache is None:
+            return self._sub_datasets[ds_idx][local_idx]
+        if self._latent_cache is None:
+            sample = self._sub_datasets[ds_idx][local_idx]
+        else:
+            sub = self._sub_datasets[ds_idx]
+            ep_idx, start = sub._window_index[local_idx]
+            sample = sub._build_sample(ep_idx, start, decode_video=False)
+            sample["latent"] = self._latent_cache.get(idx)
+            # The TI2V first-frame condition is latent[:, 0] of the cached clip.
+            sample["first_frame_from_latent"] = True
+            sample["video_hw"] = (sub.height, sub.width)
+            sample["num_video_frames"] = sub.num_video_frames
+        if self._text_cache is not None:
+            sample["text_embed"], sample["text_len"] = self._text_cache.get(sample["prompt"])
+        return sample
