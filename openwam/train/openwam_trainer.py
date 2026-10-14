@@ -540,7 +540,7 @@ class OpenWAMTrainer:
         # Encoders replaced by offline caches are never called; keep them on CPU.
         from openwam.dataloader.utils.encode_cache import offload_cached_encoders
 
-        for name in offload_cached_encoders(self.cfg, arch):
+        for name in offload_cached_encoders(getattr(self, "cfg", None), arch):
             logger.info("Offloaded cached encoder to CPU: %s", name)
         logger.info(
             "architecture wrapped (%s), device=%s",

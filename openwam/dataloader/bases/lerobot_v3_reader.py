@@ -209,9 +209,16 @@ class LeRobotV3Reader(BaseDataset):
         # Optional data-budget knobs (None = use the full bucket).
         max_hours: Optional[float] = None,
         subsample_seed: int = 42,
+        # Optional offline encoder caches (openwam/dataloader/utils/encode_cache.py):
+        # verified dirs holding the frozen VAE latents / UMT5 context the online
+        # path would compute for this bucket. Single-bucket mode only.
+        latent_cache_dir: Optional[str] = None,
+        text_cache_dir: Optional[str] = None,
         **_unused: Any,
     ):
         self._dataset_dir = Path(dataset_dir)
+        self._latent_cache_dir = latent_cache_dir
+        self._text_cache_dir = text_cache_dir
         self._dataset_id = dataset_id or self._dataset_dir.name
         self._num_frames = int(num_frames)
         self._video_stride = max(1, int(video_stride))
@@ -448,6 +455,81 @@ class LeRobotV3Reader(BaseDataset):
             self._multiview,
             self._normalize_mode,
         )
+        self._init_encode_caches()
+
+    # ----- offline encoder caches -------------------------------------------
+
+    def _init_encode_caches(self) -> None:
+        """Open + validate the optional latent / text caches against this bucket."""
+        self._latent_cache = None
+        self._text_cache = None
+        if self._latent_cache_dir:
+            from openwam.dataloader.utils.encode_cache import LatentCache
+
+            if self._color_jitter is not None or self._head_camera_choices is not None:
+                raise ValueError(
+                    f"{self.DATASET_NAME}({self._dataset_id}): latent_cache_dir requires color_jitter and "
+                    "head_camera_choices disabled — cached pixels must be a pure function of the window"
+                )
+            self._latent_cache = LatentCache(self._latent_cache_dir, self)
+            logger.info("%s(%s): latent cache %s", self.DATASET_NAME, self._dataset_id, self._latent_cache_dir)
+        if self._text_cache_dir:
+            from openwam.dataloader.utils.encode_cache import TextCache
+
+            self._text_cache = TextCache(self._text_cache_dir, self)
+            logger.info("%s(%s): text cache %s", self.DATASET_NAME, self._dataset_id, self._text_cache_dir)
+
+    def encode_cache_window_table(self) -> np.ndarray:
+        """(N, 2) int32 ``(episode_local, offset)`` per sample index, as ``_getitem_impl`` resolves it."""
+        n_starts = np.diff(self._cum_n_starts)
+        ep = np.repeat(np.arange(len(n_starts), dtype=np.int64), n_starts)
+        pos = np.arange(self._n_total, dtype=np.int64) - self._cum_n_starts[ep]
+        offset = self._ep_valid_start[ep] + pos * self._window_stride
+        return np.stack([ep, offset], axis=1).astype(np.int32)
+
+    def encode_cache_latent_signature(self) -> dict:
+        """Everything that determines the VAE input pixels of every window."""
+        from openwam.dataloader.utils.encode_cache import digest, sha256_file
+
+        root = self._dataset_dir
+        videos = sorted(p for p in (root / "videos").rglob("*") if p.is_file())
+        meta = [root / "meta" / "info.json", *sorted((root / "meta" / "episodes").rglob("*.parquet"))]
+        return {
+            "dataset": type(self).__name__,
+            "dataset_id": self._dataset_id,
+            "num_frames": self._num_frames,
+            "video_sample_indices": self._video_sample_indices.tolist(),
+            "height": self._height,
+            "width": self._width,
+            "multiview": self._multiview,
+            "camera_layout": list(self._camera_layout),
+            "cameras": [self._head_camera, self._left_wrist_camera, self._right_wrist_camera],
+            "head_camera_choices": self._head_camera_choices,
+            "window_stride": self._window_stride,
+            "split": self._split,
+            "color_jitter": self._color_jitter is not None,
+            "video_inventory_sha256": digest([(str(p.relative_to(root)), p.stat().st_size) for p in videos]),
+            "episode_meta_sha256": digest([(str(p.relative_to(root)), sha256_file(p)) for p in meta]),
+            "num_windows": len(self),
+        }
+
+    def encode_cache_prompts(self) -> list:
+        """Every prompt ``_resolve_prompt`` can return for this bucket, sorted."""
+        if self.PROMPT_SOURCE == "episode_annotated":
+            raise NotImplementedError(f"{self.DATASET_NAME}: text cache supports task_index prompts only")
+        return sorted({t.strip() for t in self._task_idx_to_text.values() if t.strip()})
+
+    def encode_cache_text_signature(self) -> dict:
+        from openwam.dataloader.utils.encode_cache import TEXT_MAX_LENGTH, digest
+
+        return {
+            "dataset": type(self).__name__,
+            "dataset_id": self._dataset_id,
+            "split": self._split,
+            "prompt_source": self.PROMPT_SOURCE,
+            "prompts_sha256": digest(self.encode_cache_prompts()),
+            "max_length": TEXT_MAX_LENGTH,
+        }
 
     def _select_episodes_by_hours(self, target_hours: float, seed: int) -> None:
         """Select whole episodes against a post-filter, effective-hour budget.
@@ -877,7 +959,12 @@ class LeRobotV3Reader(BaseDataset):
 
         # 5) video — decode head (+ optional wrist) frames into the canvas
         real_local_indices = self._video_sample_indices[self._video_sample_indices < actual_raw_len]
-        if self._color_jitter is not None:
+        latent_cache = getattr(self, "_latent_cache", None)
+        text_cache = getattr(self, "_text_cache", None)
+        if latent_cache is not None:
+            # Cached VAE latent replaces the decode; jitter/head sampling are off (checked at init).
+            video = None
+        elif self._color_jitter is not None:
             # Same jitter factors across the whole clip (temporal consistency).
             video, exclusion_masks = self._decode_window_video(
                 row,
@@ -895,7 +982,7 @@ class LeRobotV3Reader(BaseDataset):
             video = self._decode_window_video(row, ep_local, offset, real_local_indices, idx)
         video_mask = torch.from_numpy(self._video_sample_indices < actual_raw_len)
 
-        return {
+        sample = {
             "video": video,
             "vace_video": None,
             "first_frame_image": [video[0]] if video else [],
@@ -905,7 +992,20 @@ class LeRobotV3Reader(BaseDataset):
             "proprio": torch.from_numpy(proprio).float(),
             "proprio_mask": torch.from_numpy(proprio_mask),
             "prompt": prompt,
+            # Effective sample index (``_safe_get`` may have advanced it): lets cache
+            # builders check that every row really holds the window they think it does.
+            "window_index": idx,
         }
+        if latent_cache is not None:
+            sample["latent"] = latent_cache.get(idx)
+            # The TI2V first-frame condition is latent[:, 0] of the cached clip.
+            sample["first_frame_image"] = None
+            sample["first_frame_from_latent"] = True
+            sample["video_hw"] = (self._height, self._width)
+            sample["num_video_frames"] = self._num_video_frames
+        if text_cache is not None:
+            sample["text_embed"], sample["text_len"] = text_cache.get(prompt)
+        return sample
 
     # ----- action / proprio finalization -----------------------------------
 
@@ -1152,6 +1252,8 @@ class LeRobotV3Reader(BaseDataset):
         "unify_action_map",
         "unify_state_map",
         "color_jitter",
+        "latent_cache_dir",
+        "text_cache_dir",
     )
 
     @classmethod
@@ -1201,6 +1303,8 @@ class LeRobotV3Reader(BaseDataset):
         sub_dirs = sorted(d for d in root.iterdir() if d.is_dir() and (d / "meta" / "info.json").is_file())
         if not sub_dirs:
             raise FileNotFoundError(f"{cls.__name__}: no sub-buckets with meta/info.json under {root}")
+        if common.get("latent_cache_dir") or common.get("text_cache_dir"):
+            raise NotImplementedError(f"{cls.__name__}: offline encoder caches support single-bucket mode only")
         logger.info("%s.from_config: root mode, %d buckets under %s", cls.__name__, len(sub_dirs), root)
         base_seed = int(_get(config, "seed", 42))
         total_hours = _get(config, "total_hours")
