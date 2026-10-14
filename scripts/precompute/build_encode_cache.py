@@ -364,6 +364,18 @@ def compare(a, b) -> dict:
     }
 
 
+def aligned_group(rng, shards) -> list:
+    """Row indices of one encode-pass batch (B=48 grouping inside a non-empty shard)."""
+    shard = rng.choice([r for r in shards if r["row_end"] > r["row_start"]])
+    j = rng.randrange(0, max(1, (shard["row_end"] - shard["row_start"] + BATCH - 1) // BATCH))
+    return list(range(shard["row_start"] + j * BATCH, min(shard["row_start"] + (j + 1) * BATCH, shard["row_end"])))
+
+
+def random_group(rng, n: int) -> list:
+    """A shuffled batch: distinct rows when possible, otherwise drawn with replacement."""
+    return rng.sample(range(n), BATCH) if n >= BATCH else [rng.randrange(n) for _ in range(BATCH)]
+
+
 def cmd_check(args, overrides):
     import random
 
@@ -389,11 +401,9 @@ def cmd_check(args, overrides):
             for mode in ("aligned", "shuffled"):
                 for _ in range(args.groups):
                     if mode == "aligned":  # same grouping as the encode pass
-                        shard = rng.choice(cache.meta["shards"])
-                        j = rng.randrange(0, max(1, (shard["row_end"] - shard["row_start"]) // BATCH))
-                        idx = list(range(shard["row_start"] + j * BATCH, min(shard["row_start"] + (j + 1) * BATCH, shard["row_end"])))
-                    else:
-                        idx = rng.sample(range(len(prompts)), BATCH)
+                        idx = aligned_group(rng, cache.meta["shards"])
+                    else:  # with replacement when there are fewer rows than a batch
+                        idx = random_group(rng, len(prompts))
                     batch = [prompts[i] for i in idx]
                     context, seq_lens = online_text(vb, padded(batch))
                     embeds = [cache.get(p) for p in batch]
@@ -410,11 +420,9 @@ def cmd_check(args, overrides):
             for mode in ("aligned", "shuffled"):
                 for _ in range(args.groups):
                     if mode == "aligned":
-                        shard = rng.choice(cache.meta["shards"])
-                        j = rng.randrange(0, max(1, (shard["row_end"] - shard["row_start"]) // BATCH))
-                        idx = list(range(shard["row_start"] + j * BATCH, min(shard["row_start"] + (j + 1) * BATCH, shard["row_end"])))
+                        idx = aligned_group(rng, cache.meta["shards"])
                     else:
-                        idx = rng.sample(range(len(dataset)), BATCH)
+                        idx = random_group(rng, len(dataset))
                     samples = [dataset[i] for i in idx]
                     online = online_latents(vb, padded([s["video"] for s in samples]))[: len(idx)]
                     cached = torch.stack([cache.get(i) for i in idx]).to(device)
