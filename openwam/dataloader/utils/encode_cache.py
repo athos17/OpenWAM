@@ -198,7 +198,7 @@ def candidate_prompt_list(dataset) -> list:
 
 
 # Shard-record fields every shard (on every node) must agree on.
-SHARD_CONSENSUS_KEYS = ("signature_sha256", "encoder_fingerprint", "tokenizer_sha256", "row_shape", "num_rows")
+SHARD_CONSENSUS_KEYS = ("signature_sha256", "encoder_fingerprint", "tokenizer_sha256", "row_shape", "num_rows", "encode_batch")
 
 
 def write_shard_record(cache_dir, index: int, count: int, row_start: int, row_end: int, path, extra=None) -> dict:

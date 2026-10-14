@@ -32,7 +32,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-BATCH = 48  # training per-GPU batch: identical call shape for the encoders
+BATCH = 48  # encoder call batch (--batch): use the training per-GPU batch for bit-exact online parity
 
 
 def log(msg: str) -> None:
@@ -198,6 +198,7 @@ def encode_text_shard(args, cfg, dataset, vb, out: Path):
             "tokenizer_sha256": ec.tree_digest(Path(cfg.training.finetune_ckpt_path) / "tokenizer"),
             "row_shape": [lmax, dim],
             "num_rows": len(prompts),
+            "encode_batch": BATCH,
             "encode_seconds": time.time() - t0,
         },
     )
@@ -269,6 +270,7 @@ def encode_latent_shard(args, cfg, dataset, vb, out: Path):
             "tokenizer_sha256": None,
             "row_shape": row_shape,
             "num_rows": len(dataset),
+            "encode_batch": BATCH,
             "encode_seconds": time.time() - t0,
         },
     )
@@ -330,7 +332,7 @@ def cmd_finalize(args, overrides):
             side_files={name: ec.sha256_file(out / name) for name in side},
             extra={
                 "built_by": "scripts/precompute/build_encode_cache.py",
-                "batch": BATCH,
+                "batch": records[0].get("encode_batch", BATCH),
                 "encode_seconds_per_shard": [r["encode_seconds"] for r in records],
                 "hosts": sorted({r["host"] for r in records}),
             },
@@ -377,6 +379,7 @@ def random_group(rng, n: int) -> list:
 
 
 def cmd_check(args, overrides):
+    global BATCH
     import random
 
     import torch
@@ -394,6 +397,7 @@ def cmd_check(args, overrides):
     with torch.no_grad():
         if "text" in args.kinds:
             cache = ec.TextCache(Path(args.out) / "text", dataset)
+            BATCH = cache.meta.get("batch", BATCH)  # recompute with the cache's own call shape
             prompts = json.loads((Path(args.out) / "text" / "prompts.json").read_text())
             if ec.text_encoder_fingerprint(vb) != cache.meta["encoder_fingerprint"]:
                 raise ValueError("text encoder weights differ from the cache")
@@ -414,6 +418,7 @@ def cmd_check(args, overrides):
                     log(f"text {mode}: {entry}")
         if "latent" in args.kinds:
             cache = ec.LatentCache(Path(args.out) / "latent", dataset)
+            BATCH = cache.meta.get("batch", BATCH)
             if ec.vae_fingerprint(vb) != cache.meta["encoder_fingerprint"]:
                 raise ValueError("VAE weights differ from the cache")
             report["latent"] = []
@@ -469,7 +474,11 @@ def main():
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--groups", type=int, default=2, help="check: batches per mode and kind")
     ap.add_argument("--seed", type=int, default=0, help="check: batch selection seed")
+    ap.add_argument("--batch", type=int, default=48,
+                    help="encoder call batch; the VAE is batch-size sensitive, so match the training per-GPU batch")
     args = ap.parse_args(argv)
+    global BATCH
+    BATCH = args.batch
     if not 0 <= args.shard < args.num_shards:
         ap.error("--shard must be in [0, --num-shards)")
     {"encode": cmd_encode, "finalize": cmd_finalize, "verify": cmd_verify, "check": cmd_check}[args.command](
