@@ -4,6 +4,11 @@ defaults:
   - _self_
 
 training:
+  rtc:
+    enabled: false
+    max_delay_steps: 16          # Inclusive; must be < num_frames - 1
+    delay_distribution: uniform
+
   # --- Debug ---
   debug: false                    # Debug mode: max_steps=20, save@10, constant LR
 

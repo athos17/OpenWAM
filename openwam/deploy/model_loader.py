@@ -229,6 +229,9 @@ def load_from_checkpoint_dir(
     # actually using (normalizer stats selection, binary dims, torso masking all derive from the
     # training cfg at this point).
     architecture.repr_contract = repr_contract_from_cfg(cfg)
+    from openwam.model.training_rtc import rtc_config
+
+    architecture.training_rtc = rtc_config(OmegaConf.select(cfg, "training.rtc", default=None))
 
     logger.info("Model loaded successfully on %s", device)
     return cfg, architecture
@@ -248,6 +251,15 @@ def repr_contract_from_cfg(cfg: DictConfig) -> dict:
     contract = {
         "representation": str(OmegaConf.select(cfg, "dataloader.action_mode", default="joint")),
     }
+    if OmegaConf.select(cfg, "dataloader.type", default=None) == "marvin" and contract["representation"] == "eef":
+        # MarvinDataset fixes this physical-space layout before the 62 -> 80
+        # training scatter. Existing checkpoints need not repeat these fields.
+        # Infer only from the saved training dataset, never deploy overrides.
+        contract.update(
+            raw_action_dim=62,
+            rot6d_convention="column",
+            action_layout="left_eef9,left_hand22,right_eef9,right_hand22",
+        )
     if dims:
         contract["binary_action_dims"] = [int(d) for d in dims]
     if gripper_convention is not None:
@@ -416,6 +428,12 @@ class _CommandAwareNormalizer:
             y[..., d] = np.where(x[..., d] > 0.5, 1.0, -1.0)
         return y
 
+    def normalize_action(self, x):
+        y = np.array(self._action_inner.normalize_action(np.asarray(x)))
+        for d in self._binary_dims:
+            y[..., d] = np.asarray(x)[..., d]
+        return y
+
     def normalize(self, x):
         return self._proprio_inner.normalize(x)
 
@@ -478,6 +496,13 @@ class _UnifyAwareNormalizer:
             return arr.copy() if self._inner is None else self._inner.unnormalize(arr)
         raw = self._unmap_from_unify(arr, self._action_dst_index)
         return raw if self._inner is None else self._inner.unnormalize(raw)
+
+    def normalize_action(self, x):
+        arr = np.asarray(x, dtype=np.float32)
+        if self._inner is not None:
+            arr = self._inner.normalize_action(arr)
+        unified, _mask = self._map_to_unify(arr, self._action_dst_index, self._unify_dim)
+        return unified
 
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
     def normalize(self, x):

@@ -17,7 +17,7 @@ inference:
   variance_shift_alpha: 1.0   # denoise_mode=async: lead curve shift; >= 1
   linear_offset: 0.0          # denoise_mode=async: lag start delay; 0 <= value < 1
 
-  inference_mode: sync       # executor: sync | async; separate from denoise_mode
+  inference_mode: sync       # executor: sync | async | training_rtc; separate from denoise_mode
   inference_horizon: null       # sync/async: actions executed per generated chunk; null = full chunk
   inference_delay_steps: null # inference_mode=async only: expected latency in action steps
 

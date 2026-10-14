@@ -153,6 +153,17 @@ class Normalizer(InvertibleModalityTransform):
 
         return ((x - self._normalize_offset) * self._normalize_scale).astype(np.float32)
 
+    def normalize_action(self, x: np.ndarray) -> np.ndarray:
+        """Normalize a committed action with ACTION, never proprio, statistics."""
+        if self.mode == NormMode.BINARY:
+            return (x > self.binary_threshold).astype(np.float32)
+        if self._scale is None:
+            return np.asarray(x, dtype=np.float32)
+        if self.mode in (NormMode.MIN_MAX, NormMode.Q99):
+            mode = "min-max" if self.mode == NormMode.MIN_MAX else "quantile"
+            return apply_normalization(x, self._mode_stats, mode).astype(np.float32)
+        return ((x - self._offset) * self._scale).astype(np.float32)
+
     def unnormalize(self, x: np.ndarray) -> np.ndarray:
         """Reverse normalization."""
         if self.mode == NormMode.BINARY:

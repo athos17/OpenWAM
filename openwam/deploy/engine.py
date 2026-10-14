@@ -332,8 +332,27 @@ class JointInferenceEngine(BaseInferenceEngine):
             )
         )
 
+        rtc_kwargs = {}
+        if "action_prefix" in conditions:
+            import numpy as np
+
+            from openwam.model.training_rtc import rtc_config
+
+            rtc = rtc_config(getattr(self.architecture, "training_rtc", None))
+            if not rtc.enabled:
+                raise ValueError("RTC requires a checkpoint trained with training.rtc.enabled=true")
+            prefix = np.asarray(conditions["action_prefix"], dtype=np.float32)
+            length = int(conditions["prefix_length"])
+            padded = np.zeros((1, action_num_frames - 1, self.architecture.action_dim), dtype=np.float32)
+            if length:
+                normalizer = self.architecture.normalizer
+                normalized = prefix if normalizer is None else normalizer.normalize_action(prefix)
+                padded[0, :length] = normalized
+            rtc_kwargs = {"action_prefix": padded, "prefix_length": length}
+
         generate_kwargs = self._filter_architecture_generate_kwargs(
             {
+                **rtc_kwargs,
                 "schedule": schedule,
                 "prompt": conditions.get("prompt", ""),
                 "vace_video": conditions.get("vace_video", None),

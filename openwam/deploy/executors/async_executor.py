@@ -22,7 +22,7 @@ from openwam.deploy.engine import BaseInferenceEngine
 
 logger = logging.getLogger(__name__)
 
-VALID_EXECUTION_MODES = ("sync", "async")
+VALID_EXECUTION_MODES = ("sync", "async", "training_rtc")
 EXECUTION_CLI_NUMERIC_OVERRIDES = ("inference_horizon", "inference_delay_steps")
 
 
@@ -77,7 +77,7 @@ def _coerce_optional_int(value, name: str) -> Optional[int]:
 
 
 def normalize_execution_config(exec_cfg=None) -> ExecutionConfig:
-    """Normalize into :class:`ExecutionConfig`; only "sync"/"async" are accepted."""
+    """Normalize sync, async prefetch, or client-clocked training_rtc configuration."""
     if exec_cfg is None:
         return ExecutionConfig()
 
@@ -95,7 +95,7 @@ def normalize_execution_config(exec_cfg=None) -> ExecutionConfig:
     if inference_horizon is not None and inference_horizon <= 0:
         raise ValueError("inference_horizon must be positive")
 
-    if mode == "sync" and inference_delay_steps is not None:
+    if mode != "async" and inference_delay_steps is not None:
         raise ValueError("inference_delay_steps requires inference_mode='async'")
 
     if mode == "async":
@@ -151,7 +151,7 @@ def apply_execution_cli_overrides(root_cfg, args):
     if inference_delay_steps is not None:
         OmegaConf.update(root_cfg, "inference.inference_delay_steps", inference_delay_steps, merge=False)
 
-    if mode == "sync":
+    if mode in ("sync", "training_rtc"):
         # Keep the mode-independent horizon, but clear the async-only delay so
         # an async-tuned yaml can switch to sync with one flag.
         OmegaConf.update(root_cfg, "inference.inference_delay_steps", None, merge=False)

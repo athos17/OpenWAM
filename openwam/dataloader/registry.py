@@ -78,6 +78,7 @@ def _register_builtins():
     from openwam.dataloader.ebench import EBenchDataset
     from openwam.dataloader.interndata_a1 import InternDataA1Dataset
     from openwam.dataloader.libero import LiberoDataset
+    from openwam.dataloader.marvin import MarvinDataset
     from openwam.dataloader.mixture import MixtureDataset
     from openwam.dataloader.muka_franka import MukaFrankaDataset
     from openwam.dataloader.oxe_droid import OxeDroidDataset
@@ -96,6 +97,7 @@ def _register_builtins():
     register_dataset("robocoin")(MultiRobotCOINDataset)
     register_dataset("ebench")(EBenchDataset)
     register_dataset("libero")(LiberoDataset)
+    register_dataset("marvin")(MarvinDataset)
     register_dataset("muka_franka")(MukaFrankaDataset)
     register_dataset("oxe_droid")(OxeDroidDataset)
     register_dataset("robocasa365")(MultiTaskRoboCasa365Dataset)
