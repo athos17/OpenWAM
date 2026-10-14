@@ -421,7 +421,17 @@ def ec_load_text(embeds, device):
     return wan_encode.load_cached_text([e for e, _ in embeds], [n for _, n in embeds], device=device)
 
 
+def raise_nofile_limit():
+    """DataLoader workers pass every tensor through a file descriptor; 1024 is too few."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < hard:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+
+
 def main():
+    raise_nofile_limit()
     argv = sys.argv[1:]
     overrides = []
     if "--" in argv:
