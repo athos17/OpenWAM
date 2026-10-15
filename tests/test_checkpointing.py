@@ -319,3 +319,41 @@ def test_setup_output_dir_verifies_stats_before_reusing_resume_run(tmp_path, mon
     assert output_path == str(run_dir)
     assert resume_state_dir == str(state_dir)
     assert calls == [(str(run_dir), trainer.dataset)]
+
+
+# --- finish_training: keep_resume_state_at_end ---
+
+
+def _finish(tmp_path, monkeypatch, keep_state: bool):
+    from types import SimpleNamespace
+
+    from omegaconf import OmegaConf
+
+    import openwam.train.openwam_trainer as trainer_mod
+
+    for step in (1000, 2000):
+        (tmp_path / f"checkpoint_step_{step}.safetensors").write_bytes(b"w")
+        (tmp_path / f"accel_state_step_{step}").mkdir()
+    calls = []
+    monkeypatch.setattr(trainer_mod, "save_weights", lambda acc, arch, out, step, final: (Path(out) / f"checkpoint_step_{step}.safetensors").write_bytes(b"w"))
+    monkeypatch.setattr(trainer_mod, "save_full_state", lambda acc, out, g, o, e: (calls.append((g, o, e)), (Path(out) / f"accel_state_step_{g}").mkdir()))
+    trainer = SimpleNamespace(
+        cfg=OmegaConf.create({"training": {"keep_resume_state_at_end": keep_state, "save_full_states_for_resume": True}}),
+        accelerator=SimpleNamespace(wait_for_everyone=lambda: None),
+        architecture=None,
+    )
+    trainer_mod.OpenWAMTrainer.finish_training(trainer, str(tmp_path), 2500, 1000, 2, True, None, 625, 3)
+    return calls, sorted(p.name for p in tmp_path.iterdir())
+
+
+def test_finish_training_keeps_final_resume_state_when_requested(tmp_path, monkeypatch):
+    calls, names = _finish(tmp_path, monkeypatch, keep_state=True)
+    assert calls == [(2500, 625, 3)]
+    assert names == ["accel_state_step_2000", "accel_state_step_2500",
+                     "checkpoint_step_2000.safetensors", "checkpoint_step_2500.safetensors"]
+
+
+def test_finish_training_default_drops_resume_state(tmp_path, monkeypatch):
+    calls, names = _finish(tmp_path, monkeypatch, keep_state=False)
+    assert calls == []
+    assert names == ["checkpoint_step_2000.safetensors", "checkpoint_step_2500.safetensors"]
