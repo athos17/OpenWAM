@@ -39,3 +39,23 @@ color_jitter:
 # requires color_jitter disabled.
 latent_cache_dir: null
 text_cache_dir: null
+
+# ── Subtask (language-following) mode ──────────────────────────────────────────
+# Sidecar annotation from scripts/subtask/vocab.py (subtasks.parquet). null = the
+# original single episode-level prompt. See openwam/dataloader/utils/subtask.py.
+subtask:
+  annotation_path: null
+  main_prompt: Pick all items into the bin   # episode-level instruction kept for "do everything"
+  still_prompt: Stay still.
+  main_prompt_prob: 0.15                     # share of windows trained with main_prompt (untruncated)
+  prompt_mix: {canonical: 0.25, nohand: 0.25, variants: 0.5}
+  rtc_max_delay_steps: 0                     # must equal training.rtc.max_delay_steps (0 without RTC)
+  hold: true                                 # after the subtask ends, supervise "hold the last target"
+  supervise_padded_video: false
+  decision_weight: 2                         # repeat windows near the start of each pick
+  decision_pre_frames: 16
+  decision_post_frames: 45
+  holdout_episodes: []                       # kept out of training (offline controllability eval)
+# Truncated sub-mode clips (build: build_encode_cache.py --view boundary); needed
+# together with latent_cache_dir in subtask mode.
+boundary_latent_cache_dir: null

@@ -868,6 +868,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         use_grad_ckpt = forward_inputs.pop("use_gradient_checkpointing", False)
         use_grad_ckpt_offload = forward_inputs.pop("use_gradient_checkpointing_offload", False)
         forward_inputs.pop("action_is_pad", None)
+        forward_inputs.pop("rtc_delay", None)
         forward_inputs.pop("video_is_pad", None)
         # ``latents`` carries the noisy-branch video latents into the forward;
         # the cond branch is passed alongside as ``cond_video_latents``.

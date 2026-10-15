@@ -33,11 +33,14 @@ def rtc_config(config=None) -> RTCConfig:
     return RTCConfig(enabled, int(maximum), distribution)
 
 
-def condition_training_actions(actions, noisy_actions, timesteps, action_is_pad, config):
+def condition_training_actions(actions, noisy_actions, timesteps, action_is_pad, config, delay=None):
     """Sample one delay per example; retain at least one real postfix target.
 
     Only an initial contiguous span of valid actions can become a prefix.
     Samples without action supervision get d=0 and retain their original mask.
+    ``delay`` ([B] ints, optional) supplies per-example delays drawn by the data
+    pipeline (e.g. subtask prompts that depend on the first generated step); they
+    are clamped to the same bounds as sampled delays.
     """
     batch, horizon, _ = actions.shape
     if config.max_delay_steps >= horizon:
@@ -53,11 +56,15 @@ def condition_training_actions(actions, noisy_actions, timesteps, action_is_pad,
     valid_steps = (~pad).any(dim=-1)
     contiguous = valid_steps.long().cumprod(dim=1).sum(dim=1)
     maximum = (contiguous - 1).clamp(min=0, max=config.max_delay_steps)
-    delay = (
-        (torch.rand(batch, device=actions.device) * (maximum + 1)).long()
-        if config.max_delay_steps
-        else torch.zeros_like(maximum)
-    )
+    if delay is not None:
+        delay = torch.as_tensor(delay, device=actions.device).long().reshape(batch)
+        if (delay < 0).any():
+            raise ValueError("RTC delays must be non-negative")
+        delay = torch.minimum(delay, maximum)
+    elif config.max_delay_steps:
+        delay = (torch.rand(batch, device=actions.device) * (maximum + 1)).long()
+    else:
+        delay = torch.zeros_like(maximum)
     prefix = torch.arange(horizon, device=actions.device)[None, :] < delay[:, None]
     noisy = torch.where(prefix[..., None], actions, noisy_actions)
     times = torch.where(prefix, torch.zeros_like(timesteps[:, None]), timesteps[:, None])

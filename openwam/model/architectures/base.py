@@ -1042,6 +1042,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         if all_action_masks[0] is not None:
             inputs["action_is_pad"] = torch.stack([~m for m in all_action_masks], dim=0).to(device=_device)
+        # Data-side RTC delays (subtask readers pick the prompt from the first generated step).
+        rtc_delays = [s.get("rtc_delay") for s in samples]
+        if any(d is not None for d in rtc_delays):
+            if not all(d is not None for d in rtc_delays):
+                raise ValueError("Mixed samples with/without 'rtc_delay' in batch")
+            inputs["rtc_delay"] = torch.tensor([int(d) for d in rtc_delays], dtype=torch.long, device=_device)
         if all_video_masks[0] is not None:
             # ``latent[0]`` is a clean conditioning frame (and must be excluded
             # from the loss mask) when either:
@@ -1169,7 +1175,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             rtc = rtc_config(getattr(self, "training_rtc", None))
             if rtc.enabled:
                 noisy_actions, action_timesteps, inputs["action_is_pad"] = condition_training_actions(
-                    actions, noisy_actions, action_timesteps, inputs.get("action_is_pad"), rtc
+                    actions, noisy_actions, action_timesteps, inputs.get("action_is_pad"), rtc, inputs.get("rtc_delay")
                 )
 
         from openwam.train.utils import debug_dump
@@ -1197,6 +1203,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # MoT design, attention itself does not consume sample-level padding.
         forward_inputs.pop("action_is_pad", None)
         forward_inputs.pop("video_is_pad", None)
+        forward_inputs.pop("rtc_delay", None)
 
         # Route per-sample proprio_mask through pipeline_inputs to
         # ``_append_proprio_context_token``. Internal-only key; pop'd there.

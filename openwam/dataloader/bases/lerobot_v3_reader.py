@@ -510,7 +510,7 @@ class LeRobotV3Reader(BaseDataset):
             "color_jitter": self._color_jitter is not None,
             "video_inventory_sha256": digest([(str(p.relative_to(root)), p.stat().st_size) for p in videos]),
             "episode_meta_sha256": digest([(str(p.relative_to(root)), sha256_file(p)) for p in meta]),
-            "num_windows": len(self),
+            "num_windows": self._n_total,
         }
 
     def encode_cache_prompts(self) -> list:
@@ -934,7 +934,7 @@ class LeRobotV3Reader(BaseDataset):
                         type(e).__name__,
                         attempt,
                     )
-                idx = (idx + 1) % max(1, len(self))
+                idx = (idx + 1) % max(1, self._n_total)  # base window space (len() may be a view)
         raise RuntimeError("unreachable")
 
     def _getitem_impl(self, idx: int) -> dict:
@@ -943,18 +943,21 @@ class LeRobotV3Reader(BaseDataset):
         valid_end = int(self._ep_valid_end[ep_local])
         offset = valid_start + (idx - int(self._cum_n_starts[ep_local])) * self._window_stride
         row = self._eps_df.iloc[ep_local]
-        actual_raw_len = min(self._num_frames, valid_end - offset)
+        plan = self._plan_window(idx, ep_local, offset, valid_end)
+        actual_raw_len = int(plan["raw_len"])
 
         # 1) parquet window rows
         local_start = int(self._ep_data_row_offset[ep_local]) + offset
         table = self._load_data_table(int(row["data/chunk_index"]), int(row["data/file_index"]))
         win = table.slice(local_start, actual_raw_len).to_pandas()
 
-        # 2) prompt (hook)
-        prompt = self._resolve_prompt(row, win)
+        # 2) prompt (plan override, else hook)
+        prompt = plan.get("prompt") or self._resolve_prompt(row, win)
 
         # 3) action + 4) proprio (hooks → normalized 20-D payload or None)
-        action, action_mask = self._finalize_action(self._action_20d(win), actual_raw_len)
+        action, action_mask = self._finalize_action(
+            self._action_20d(win), actual_raw_len, hold=bool(plan.get("hold", False))
+        )
         proprio, proprio_mask = self._finalize_proprio(self._proprio_20d(win))
 
         # 5) video — decode head (+ optional wrist) frames into the canvas
@@ -981,6 +984,8 @@ class LeRobotV3Reader(BaseDataset):
         else:
             video = self._decode_window_video(row, ep_local, offset, real_local_indices, idx)
         video_mask = torch.from_numpy(self._video_sample_indices < actual_raw_len)
+        if plan.get("supervise_padded_video"):
+            video_mask = torch.ones_like(video_mask)
 
         sample = {
             "video": video,
@@ -996,8 +1001,10 @@ class LeRobotV3Reader(BaseDataset):
             # builders check that every row really holds the window they think it does.
             "window_index": idx,
         }
+        sample.update(plan.get("extra", {}))
         if latent_cache is not None:
-            sample["latent"] = latent_cache.get(idx)
+            # A plan that changes the clip (e.g. truncation) supplies its own cached latent.
+            sample["latent"] = plan["latent"]() if plan.get("latent") is not None else latent_cache.get(idx)
             # The TI2V first-frame condition is latent[:, 0] of the cached clip.
             sample["first_frame_image"] = None
             sample["first_frame_from_latent"] = True
@@ -1007,9 +1014,25 @@ class LeRobotV3Reader(BaseDataset):
             sample["text_embed"], sample["text_len"] = text_cache.get(prompt)
         return sample
 
+    def _plan_window(self, idx: int, ep_local: int, offset: int, valid_end: int) -> dict:
+        """Per-sample window plan (hook). Keys:
+
+        * ``raw_len``  — rows read from the window (default: up to the episode end).
+        * ``prompt``   — optional prompt override (default: :meth:`_resolve_prompt`).
+        * ``hold``     — pad the action tail by repeating the last real step and
+          supervise it (default: zero-pad and mask).
+        * ``supervise_padded_video`` — keep last-frame video padding in the loss.
+        * ``latent``   — callable returning the cached latent of this exact clip;
+          required when the clip differs from the main cache row ``idx``.
+        * ``extra``    — fields merged into the sample dict.
+        """
+        return {"raw_len": min(self._num_frames, valid_end - offset)}
+
     # ----- action / proprio finalization -----------------------------------
 
-    def _finalize_action(self, action_20d: Optional[np.ndarray], actual_raw_len: int) -> Tuple[np.ndarray, np.ndarray]:
+    def _finalize_action(
+        self, action_20d: Optional[np.ndarray], actual_raw_len: int, hold: bool = False
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """Pad an action payload to ``(T_action, ACTION_DIM)`` + build its 2-D mask.
 
         ``action_20d is None`` → all-zero action + all-False mask (video-only
@@ -1031,6 +1054,10 @@ class LeRobotV3Reader(BaseDataset):
             # readers); a reader that shifts the target +1 frame overrides
             # _n_supervised_action_steps so its clamped final boundary step is masked.
             n_supervised = min(self._n_supervised_action_steps(actual_raw_len), T_action)
+            if hold and 0 < n_valid < T_action:
+                # Hold = keep commanding the last real (absolute) target: "stay where you ended".
+                action[n_valid:] = action[n_valid - 1]
+                n_supervised = T_action
 
         if self._unify:
             # (T, raw) -> (T, unify_dim). The dim mask is the precomputed

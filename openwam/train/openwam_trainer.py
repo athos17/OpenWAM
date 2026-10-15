@@ -151,6 +151,16 @@ class OpenWAMTrainer:
                 raise ValueError("RTC maximum delay must be < action horizon")
             if float(t.lambda_action) <= 0:
                 raise ValueError("Training RTC requires lambda_action > 0")
+        subtask = cfg.dataloader.get("subtask") or {}
+        if subtask.get("annotation_path"):
+            # The reader picks the subtask prompt from the first generated step o + d, so it
+            # must draw d from the same range the RTC conditioning uses.
+            want = rtc.max_delay_steps if rtc.enabled else 0
+            if int(subtask.get("rtc_max_delay_steps") or 0) != want:
+                raise ValueError(
+                    f"dataloader.subtask.rtc_max_delay_steps must equal {want} "
+                    f"(training.rtc enabled={rtc.enabled}, max_delay_steps={rtc.max_delay_steps})"
+                )
 
         # Device placement: skip .to(device) when initialize_model_on_cpu and a real
         # training Accelerator is present — DeepSpeed's prepare() then handles the move.

@@ -48,16 +48,23 @@ def compose_cfg(overrides: list):
     # Caches are built from the online path, never from another cache.
     OmegaConf.update(cfg, "dataloader.latent_cache_dir", None, force_add=True)
     OmegaConf.update(cfg, "dataloader.text_cache_dir", None, force_add=True)
+    OmegaConf.update(cfg, "dataloader.boundary_latent_cache_dir", None, force_add=True)
     seed = OmegaConf.select(cfg, "project.seed", default=None)
     if seed is not None:
         OmegaConf.update(cfg.dataloader, "seed", int(seed), force_add=True)
     return cfg
 
 
-def build_dataset(cfg):
+def build_dataset(cfg, view=None):
     from openwam.dataloader.registry import build_dataset as _build
 
     dataset = _build(cfg.dataloader, split="train")
+    # Readers whose training order is not the cache order (e.g. Marvin subtask mode)
+    # expose cache views: "main" = every window untruncated, "boundary" = truncated clips.
+    if hasattr(dataset, "encode_cache_view"):
+        dataset = dataset.encode_cache_view(view or "main")
+    elif view not in (None, "main"):
+        raise ValueError(f"{type(dataset).__name__} has no encode-cache view {view!r}")
     if type(dataset).__name__ != "MultiTaskRoboTwinDataset" and not hasattr(dataset, "encode_cache_window_table"):
         raise ValueError(f"{type(dataset).__name__} does not implement the encode-cache protocol")
     return dataset
@@ -285,7 +292,7 @@ def cmd_encode(args, overrides):
     cfg = compose_cfg(overrides)
     seed_everything(int(cfg.project.seed), rank=args.shard)
     device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
-    dataset = build_dataset(cfg)
+    dataset = build_dataset(cfg, args.view)
     _, vb = build_model(cfg, device)
     for kind in args.kinds:
         out = Path(args.out) / kind
@@ -304,7 +311,7 @@ def cmd_finalize(args, overrides):
     from openwam.dataloader.utils import encode_cache as ec
 
     cfg = compose_cfg(overrides)
-    dataset = build_dataset(cfg)
+    dataset = build_dataset(cfg, args.view)
     for kind in args.kinds:
         out = Path(args.out) / kind
         records = ec.load_shard_records(out, args.num_shards)
@@ -390,7 +397,7 @@ def cmd_check(args, overrides):
     cfg = compose_cfg(overrides)
     seed_everything(int(cfg.project.seed), rank=0)
     device = torch.device("cuda", int(os.environ.get("LOCAL_RANK", 0)))
-    dataset = build_dataset(cfg)
+    dataset = build_dataset(cfg, args.view)
     _, vb = build_model(cfg, device)
     rng = random.Random(args.seed)
     report = {}
@@ -469,6 +476,8 @@ def main():
     ap.add_argument("command", choices=["encode", "finalize", "verify", "check"])
     ap.add_argument("--out", required=True, help="cache root; holds text/ and latent/")
     ap.add_argument("--kinds", nargs="+", default=["text", "latent"], choices=["text", "latent"])
+    ap.add_argument("--view", default=None, choices=["main", "boundary"],
+                    help="encode-cache view for readers that expose one (Marvin subtask mode: boundary clips)")
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--workers", type=int, default=12)
