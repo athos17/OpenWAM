@@ -14,6 +14,12 @@ Sub-commands (Hydra overrides = the training run's overrides, after ``--``)::
     verify   --out DIR [--kinds ...]
     check    --out DIR [--groups 2] [--kinds ...]                      -- <overrides>
 
+    assemble --out DIR --num-shards N --kinds latent --source DATASET_DIR=LATENT_CACHE_DIR ... -- <overrides>
+
+``assemble`` builds the latent cache of a composed dataset (one whose
+``meta/composition.json`` maps every episode to a source dataset episode, e.g.
+scripts/sim2real/build_mix_datasets.py) by copying rows from verified source caches --
+the clips are pixel-identical, so no re-encode; finalize / verify / check as usual.
 ``encode`` runs one GPU shard (one process per GPU, any node); ``finalize``
 assembles ``meta.json`` once all shard files are present; ``verify`` re-hashes
 every file on the current host and stamps ``VERIFIED-<host>.json``; ``check``
@@ -300,6 +306,93 @@ def cmd_encode(args, overrides):
         (encode_text_shard if kind == "text" else encode_latent_shard)(args, cfg, dataset, vb, out)
 
 
+def _with_dataset_dir(overrides: list, dataset_dir: str) -> list:
+    keep = [o for o in overrides if not o.lstrip("+").startswith("dataloader.dataset_dir=")]
+    return keep + [f"dataloader.dataset_dir={dataset_dir}"]
+
+
+def cmd_assemble(args, overrides):
+    """Latent cache of a composed dataset, copied row-for-row from its sources' verified caches."""
+    import numpy as np
+
+    from openwam.dataloader.utils import encode_cache as ec
+
+    if args.kinds != ["latent"]:
+        raise ValueError("assemble builds latent caches only; encode the text cache normally")
+    cfg = compose_cfg(overrides)
+    target = build_dataset(cfg, args.view)
+    comp_path = Path(cfg.dataloader.dataset_dir) / "meta" / "composition.json"
+    composition = {e["episode_index"]: e for e in json.loads(comp_path.read_text())["episodes"]}
+    sources = dict(item.split("=", 1) for item in args.source)
+
+    # Each source: its verified cache + (source episode_index, offset) -> source row.
+    caches, lookups, metas = {}, {}, []
+    for src_dir in sorted({e["source_dir"] for e in composition.values()}):
+        if src_dir not in sources:
+            raise ValueError(f"no --source cache given for {src_dir}")
+        src = build_dataset(compose_cfg(_with_dataset_dir(overrides, src_dir)), "main")
+        caches[src_dir] = ec.LatentCache(sources[src_dir], src)  # checks signature + window table
+        metas.append(caches[src_dir].meta)
+        ep_index = src._eps_df["episode_index"].to_numpy()
+        table = ec.window_table(src)
+        lookups[src_dir] = {(int(ep_index[e]), int(o)): r for r, (e, o) in enumerate(table.tolist())}
+    for key in ("encoder_fingerprint", "row_shape", "batch"):
+        if len({json.dumps(m.get(key)) for m in metas}) != 1:
+            raise ValueError(f"source caches disagree on {key}")
+
+    # Target window -> (source dir, source row); windows are pixel-identical clips.
+    ep_index = target._eps_df["episode_index"].to_numpy()
+    plan = []
+    for e, o in ec.window_table(target).tolist():
+        c = composition[int(ep_index[e])]
+        plan.append((c["source_dir"], lookups[c["source_dir"]][(int(c["source_episode_index"]), int(o))]))
+
+    out = Path(args.out) / "latent"
+    out.mkdir(parents=True, exist_ok=True)
+    row_shape = metas[0]["row_shape"]
+    signature = ec.latent_signature(target)
+    n = len(plan)
+    for shard in range(args.num_shards):
+        start, end = ec.shard_bounds(n, shard, args.num_shards)
+        name = ec.shard_name(shard, args.num_shards)
+        part = out / (name + ".partial")
+        rows = np.memmap(part, dtype=np.int16, mode="w+", shape=(end - start, *row_shape))
+        k = start
+        while k < end:  # copy maximal runs of consecutive source rows
+            src_dir, r0 = plan[k]
+            j = k + 1
+            while j < end and plan[j][0] == src_dir and plan[j][1] == r0 + (j - k):
+                j += 1
+            reader = caches[src_dir]._rows
+            maps = reader._open()
+            r, dst = r0, k - start
+            while r < r0 + (j - k):
+                s_i = int(np.searchsorted(reader._starts, r, side="right") - 1)
+                s_end = int(reader._shards[s_i]["row_end"])
+                take = min(r0 + (j - k), s_end) - r
+                rows[dst : dst + take] = maps[s_i][r - int(reader._starts[s_i]) : r - int(reader._starts[s_i]) + take]
+                r, dst = r + take, dst + take
+            k = j
+        rows.flush()
+        del rows
+        part.replace(out / name)
+        ec.write_shard_record(
+            out, shard, args.num_shards, start, end, out / name,
+            extra={
+                "signature_sha256": ec.digest(signature),
+                "encoder_fingerprint": metas[0]["encoder_fingerprint"],
+                "tokenizer_sha256": None,
+                "row_shape": row_shape,
+                "num_rows": n,
+                "encode_batch": metas[0]["batch"],
+                "encode_seconds": 0.0,
+                "assembled_from": {d: sources[d] for d in caches},
+            },
+        )
+        log(f"latent shard {shard}: assembled rows [{start}, {end}) of {n}")
+    cmd_finalize(args, overrides)
+
+
 # ----------------------------------------------------------------------------
 # finalize / verify
 # ----------------------------------------------------------------------------
@@ -473,7 +566,9 @@ def main():
         cut = argv.index("--")
         argv, overrides = argv[:cut], argv[cut + 1 :]
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["encode", "finalize", "verify", "check"])
+    ap.add_argument("command", choices=["encode", "finalize", "verify", "check", "assemble"])
+    ap.add_argument("--source", action="append", default=[], metavar="DATASET_DIR=LATENT_CACHE_DIR",
+                    help="assemble: a source dataset and its verified latent cache dir (repeat per source)")
     ap.add_argument("--out", required=True, help="cache root; holds text/ and latent/")
     ap.add_argument("--kinds", nargs="+", default=["text", "latent"], choices=["text", "latent"])
     ap.add_argument("--view", default=None, choices=["main", "boundary"],
@@ -490,7 +585,8 @@ def main():
     BATCH = args.batch
     if not 0 <= args.shard < args.num_shards:
         ap.error("--shard must be in [0, --num-shards)")
-    {"encode": cmd_encode, "finalize": cmd_finalize, "verify": cmd_verify, "check": cmd_check}[args.command](
+    {"encode": cmd_encode, "finalize": cmd_finalize, "verify": cmd_verify, "check": cmd_check,
+     "assemble": cmd_assemble}[args.command](
         args, overrides
     )
 
