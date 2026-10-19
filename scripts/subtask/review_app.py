@@ -56,7 +56,7 @@ def dense_strip(job):
         it["head_frames"] = np.linspace(it["start"], it["end"] - 1, 10).astype(int).tolist()
         head_req[HEAD_CAMERA] += it["head_frames"]
         if it["type"] == "PICK":
-            a, b = max(it["start"], it["grasp"] - 15), min(it["end"] - 1, max(it["release"], it["grasp"] + 30) + 15)
+            a, b = max(it["start"], it["grasp"] - 60), min(it["end"] - 1, max(it["release"], it["grasp"] + 30) + 15)
             it["wrist_frames"] = np.linspace(a, b, 5).astype(int).tolist()
             wrist_req[WRIST_CAMERA[it["hand"]]] += it["wrist_frames"]
     decoded = {cam: read_frames(video_path(dataset, ep_row, cam), f, 320) for cam, f in {**head_req, **wrist_req}.items()}

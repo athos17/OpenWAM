@@ -27,20 +27,22 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import episode_table, label_path  # noqa: E402
-from label import cached, call  # noqa: E402
+from common import ARBITRATION_KIND, episode_table, label_path  # noqa: E402
+from label import COLORS, _CAT_TEXT, cached, call, object_name  # noqa: E402
 from review_app import dense_strip  # noqa: E402
-from vocab import norm  # noqa: E402
 
 TASK = """A robot's {hand} hand picked something up in this segment. Two annotators disagree.
 Image 1 is a strip: rows 1-2 are 10 head-camera frames across the whole segment (frame numbers
 top-left; the robot's left arm is on the image left), row 3 shows 5 {hand} wrist-camera frames
-from just before the grasp to the release. Images 2-3 are the {hand} wrist camera at grasp and
-while lifting, larger.
+from 2 s before the grasp to the release. Images 2-3 are the {hand} wrist camera 1.3 s and 0.7 s
+before the grasp, larger (small objects such as coffee capsules are visible there and hidden later).
 Candidate A: "{a}"   Candidate B: "{b}"
-Objects known in this episode: {inventory}
+Object categories:
+{categories}
+Colors: {colors}
 Decide what the {hand} hand carried, and whether it ended inside the bin.
-Return JSON: {{"choice": "A"|"B"|"other"|"none", "other_name": str|null,  // '<color> <category>' if other
+Return JSON: {{"choice": "A"|"B"|"other"|"none",
+  "category": str|null, "other_category": str|null, "color": str|null,   // only for "other"
   "lifted": bool, "placed_in_bin": bool, "reason": str, "confidence": float}}"""
 
 DECIDING = {"disagree_object", "disagree_success"}
@@ -94,22 +96,18 @@ def main(argv=None):
         with ProcessPoolExecutor(args.workers) as pool:
             list(pool.map(dense_strip, [(args.dataset, out, eps.loc[ep], v) for ep, v in jobs.items()]))
 
-    def inventory(ep):
-        p = out / "llm" / "episode" / "gpt-6.1-sol" / f"ep{ep:03d}.json"
-        return json.dumps([i.get("name") for i in json.loads(p.read_text())["result"].get("inventory", [])]) if p.exists() else "(unknown)"
-
     calls = []
     for r in todo:
         rule = rules.loc[(r.episode_index, r.seg_id)]
         wrist = "lwrist" if rule.hand == "left" else "rwrist"
         imgs = [out / f"review_app/dense/ep{r.episode_index:03d}_{int(rule.start):05d}.jpg",
-                out / kf[(r.episode_index, r.seg_id, wrist, "grasp")], out / kf[(r.episode_index, r.seg_id, wrist, "lift")]]
+                out / kf[(r.episode_index, r.seg_id, wrist, "pre40")], out / kf[(r.episode_index, r.seg_id, wrist, "pre20")]]
         a, b = r.object, r.object_secondary
-        text = TASK.format(hand=rule.hand, a=a, b=b, inventory=inventory(int(r.episode_index)))
+        text = TASK.format(hand=rule.hand, a=a, b=b, categories=_CAT_TEXT, colors=", ".join(COLORS))
         seg = rule.copy()
         seg["episode_index"], seg["seg_id"] = r.episode_index, r.seg_id
         for j in args.judges:
-            path = label_path(out, j, pd.Series(seg)).parent.parent.parent / "arbitration" / j / label_path(out, j, pd.Series(seg)).name
+            path = label_path(out, j, pd.Series(seg), kind=ARBITRATION_KIND)
             calls.append((r, j, path, (lambda t=text, i=imgs, j=j: call(j, t, i))))
     t0 = time.time()
     results = {}
@@ -135,7 +133,7 @@ def main(argv=None):
             ch = str(v.get("choice", "")).strip().lower()
             name = {"a": r.object, "b": r.object_secondary}.get(ch)
             if ch == "other":
-                name = norm(v.get("other_name")) or None
+                name = object_name(v) if v.get("category") else None
             ok = bool(v.get("lifted")) and bool(v.get("placed_in_bin")) and ch != "none" and name not in (None, "", "NONE", "none")
             votes.append(name if ok else "EXCLUDE")
         frame = json.loads(rule.events)["grasp"]

@@ -51,25 +51,79 @@ Return:
 "inventory" lists every distinct object picked or visible on the table during the episode (one entry per
 physical object). Each "object" must be an inventory name. confidence is 0-1."""
 
+# Fixed taxonomy: the final object name is assembled from (color, category) in code, so the
+# same kind of object always gets the same name. Hints target known confusions in this data.
+CATEGORIES = {
+    "coffee capsule": "small (~3 cm) metal coffee pod with a colored domed top (red, purple, gold, ...); "
+                      "it is usually completely hidden in the closed fingers - look at the wrist frames BEFORE the grasp",
+    "bottle cap": "a loose plastic screw cap that is not attached to a bottle",
+    "water bottle": "clear plastic bottle of water (blue or red cap); always call it water bottle",
+    "drink bottle": "plastic bottle with a printed colored label or colored body (e.g. purple yogurt drink, red cola-like bottle); NOT a cup",
+    "cup": "open plastic drinking cup without a lid",
+    "can": "metal drink can",
+    "jar": "container with a screw lid",
+    "tape roll": "roll of adhesive tape", "tape measure": "retractable tape measure",
+    "tennis ball": "fuzzy tennis ball", "ball": "any other ball", "sponge": "kitchen sponge / scrubber",
+    "block": "toy cube or block", "die": "dice", "toy figure": "plastic animal / dinosaur / character figure",
+    "toy car": "toy vehicle", "tissue pack": "soft pack of tissues", "tissue box": "box of tissues",
+    "stapler": "stapler", "scissors": "scissors", "pipette": "plastic pipette / dropper / syringe",
+    "spray bottle": "bottle with trigger sprayer", "spray nozzle": "detached sprayer head",
+    "eraser": "eraser", "marker": "marker or pen", "brush": "brush or comb", "remote control": "remote control",
+    "phone": "phone", "toy fruit": "toy fruit / vegetable", "cloth": "cloth or towel", "padlock": "padlock",
+    "coin": "coin", "glue stick": "glue stick", "other": "none of the above (then give other_category)",
+}
+COLORS = ["red", "pink", "purple", "blue", "cyan", "green", "yellow", "orange", "brown", "black", "white",
+          "gray", "clear", "gold", "silver"]
+_CAT_TEXT = "\n".join(f"- {k}: {v}" for k, v in CATEGORIES.items())
+
 PICK_TASK = """One pick by the robot's {hand} hand (rule-detected, may be wrong). Images in order:
-1 head camera at segment start
-2 head camera when the {hand} hand closes (grasp)
-3 {hand} wrist camera at grasp
-4 {hand} wrist camera while lifting
-5 head camera when the hand opens (release)
-6 head camera about 1 s after the release
-Objects known in this episode: {inventory}
+1 head camera at segment start (the robot is about to go for the object)
+2 head camera at the grasp
+3-5 {hand} wrist camera 2.0 s, 1.3 s and 0.7 s before the grasp (the object is usually visible here,
+    in front of or between the fingers, even when it is hidden later)
+6 {hand} wrist camera while lifting
+7 head camera about 1 s after the hand opens over the bin
+Identify the object the {hand} hand carries. Object categories:
+""" + _CAT_TEXT + """
+Colors: """ + ", ".join(COLORS) + """ (the dominant color of the object; for capsules the color of the top).
+A full lift to the bin almost always carries something: answer "none" only if the hand is clearly empty
+in the wrist frames before AND after the grasp and nothing disappears from the table.
 Return:
-{{"object": str,                 // an inventory name if it matches, else a new '<color> <category>'
-  "object_category": str, "object_color": str, "in_inventory": bool,
+{{"category": str,                // one key of the category list
+  "other_category": str|null,     // plain noun when category is "other"
+  "color": str|null,              // one of the colors
   "hand_used": "left"|"right"|"both"|"none",
+  "object_seen_in": [int],        // image numbers where the carried object is visible
   "grasp_success": bool,          // the object was lifted
-  "placed_in_bin": bool,          // it is inside the bin in image 6
+  "placed_in_bin": bool,          // it is inside the bin in image 7
   "multiple_objects": bool,       // more than one object carried at once
   "human_intervention": bool,     // a person touches objects or the bin during the segment
-  "table_objects_at_start": [{{"name": str, "side": "left"|"right"|"center"}}],  // outside the bin in image 1
+  "table_objects_at_start": [{{"category": str, "color": str|null, "side": "left"|"right"|"center"}}],
   "anomaly": null | str,          // e.g. dropped, regrasp, wrong detection, no object
   "confidence": float}}"""
+
+
+def object_name(r: dict) -> str:
+    """Canonical name from a v3 answer: '<color> <category>' (water bottle: no color)."""
+    cat = str(r.get("category") or "").strip().lower()
+    if cat in ("", "none", "no object") or r.get("hand_used") == "none" and not r.get("grasp_success"):
+        return "NONE" if cat in ("", "none", "no object") else cat
+    if cat == "other":
+        cat = str(r.get("other_category") or "object").strip().lower()
+    if cat == "water bottle":
+        return cat
+    color = str(r.get("color") or "").strip().lower()
+    return f"{color} {cat}" if color in COLORS else cat
+
+
+def call_pick(model, text, images):
+    out = call(model, text, images)
+    res = out["result"]
+    res["object"] = object_name(res)
+    res["table_objects_at_start"] = [
+        {"name": object_name(o), "side": o.get("side")} for o in res.get("table_objects_at_start", []) if isinstance(o, dict)]
+    return out
+
 
 STILL_TASK = """The robot looks idle in this segment (rule-detected). Images: head camera at start, middle, end.
 Return:
@@ -150,19 +204,19 @@ def inventory_text(out, ep, model) -> str:
 
 
 def segment_jobs(out, segs, kf, models, inv_model):
-    order = {"PICK": [("head", "start"), ("head", "grasp"), (None, "grasp"), (None, "lift"),
-                      ("head", "release"), ("head", "after")],
+    order = {"PICK": [("head", "start"), ("head", "grasp"), (None, "pre60"), (None, "pre40"), (None, "pre20"),
+                      (None, "lift"), ("head", "after")],
              "STILL": [("head", "start"), ("head", "mid"), ("head", "end")]}
     kf_idx = kf.set_index(["episode_index", "seg_id", "camera", "tag"]).path
     for s in segs.itertuples():
+        if s.type not in order:  # TRANSIT carries no instruction
+            continue
         wrist = "lwrist" if s.hand == "left" else "rwrist"
         paths = [out / kf_idx[(s.episode_index, s.seg_id, cam or wrist, tag)] for cam, tag in order[s.type]]
-        if s.type == "PICK":
-            text = PICK_TASK.format(hand=s.hand, inventory=inventory_text(out, s.episode_index, inv_model))
-        else:
-            text = STILL_TASK
+        fn = call_pick if s.type == "PICK" else call
+        text = PICK_TASK.format(hand=s.hand) if s.type == "PICK" else STILL_TASK
         for m in models:
-            yield label_path(out, m, s), (lambda m=m, t=text, p=paths: call(m, t, p))
+            yield label_path(out, m, s), (lambda m=m, t=text, p=paths, fn=fn: fn(m, t, p))
 
 
 def main(argv=None):

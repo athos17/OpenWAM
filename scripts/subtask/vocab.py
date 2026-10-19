@@ -10,7 +10,7 @@ Outputs: subtasks.parquet, segment_labels.parquet (pre-merge, rule seg ids), sub
 vocab_map.json, stats.json
 
 Manual review corrections go in ``<out>/overrides.csv`` keyed by the RULE segment id
-with columns ``episode_index,frame,object,lifted,placed,exclude,note``; ``frame`` is any frame inside the
+with columns ``episode_index,frame,object,hand,lifted,placed,exclude,note`` (hand optional); ``frame`` is any frame inside the
 rule segment (e.g. its grasp), so rows survive re-segmentation -- empty cells keep the model
 labels; ``object`` is a canonical name or NONE; lifted/placed/exclude are true/false.
 
@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import EEF_XYZ, episode_table, label_path, load_state  # noqa: E402
 from label import cached, call  # noqa: E402
 
+LABELED_TYPES = ("PICK", "STILL")  # TRANSIT segments carry no instruction and are never labeled
 MAIN_PROMPT = "Pick all items into the bin"
 STILL_PROMPT = "Stay still."
 CANONICAL = "Pick up the {obj} with the {hand} hand and put it in the bin."
@@ -111,9 +112,11 @@ def apply_override(row: dict, o: dict, canon) -> None:
             flags.add("not_in_bin")
     if exclude is not None:
         # A reviewer's keep/exclude decision supersedes every automatic exclusion reason.
-        flags -= {"manual_exclude", "not_idle", "short", "multiple_objects"}
+        flags -= {"manual_exclude", "not_idle", "short", "multiple_objects", "trust_low_conf", "trust_hand_mismatch"}
         if exclude:
             flags.add("manual_exclude")
+    if o.get("hand") in ("left", "right") and row.get("type") == "PICK":
+        row["hand"] = o["hand"]  # the rule picked the wrong arm
     flags.add("reviewed")
     row["flags"] = sorted(flags)
     row["review_note"] = o.get("note", "")
@@ -135,6 +138,7 @@ def main(argv=None):
     ap.add_argument("--out", type=Path, default=Path("outputs/subtask"))
     ap.add_argument("--models", nargs="+", default=["gpt-6.1-sol", "gpt-6-astra"])
     ap.add_argument("--vocab-model", default="gpt-6.1-sol")
+    ap.add_argument("--llm-vocab", action="store_true", help="canonicalize free-form names with an LLM (pre-v3 labels)")
     ap.add_argument("--min-conf", type=float, default=0.7)
     ap.add_argument("--trust", default=None, help="let this model decide object/success/flags (no manual review)")
     ap.add_argument("--trust-min-conf", type=float, default=0.6, help="--trust: exclude below this confidence")
@@ -144,7 +148,7 @@ def main(argv=None):
     segs = pd.read_parquet(args.out / "segments_rules.parquet")
     labels = load_labels(args.out, args.models, segs)
     missing = [(m, r.episode_index, r.seg_id) for r in segs.itertuples() for m in args.models
-               if (m, r.episode_index, r.seg_id) not in labels]
+               if r.type in LABELED_TYPES and (m, r.episode_index, r.seg_id) not in labels]
     if missing:
         sys.exit(f"{len(missing)} segment labels missing (e.g. {missing[:3]}); rerun label.py --pass segment")
 
@@ -154,8 +158,11 @@ def main(argv=None):
         if "object" in lab:
             raw[norm(lab["object"])] += 1
     names = "\n".join(f"{n} ({c})" for n, c in sorted(raw.items(), key=lambda x: -x[1]))
-    vocab, _ = cached(args.out / "vocab_map.json", lambda: call(args.vocab_model, VOCAB_TASK.format(names=names), []))
-    vmap = {norm(k): v for k, v in vocab["result"]["map"].items()}
+    if args.llm_vocab:  # v1/v2 free-form names; v3 names come from a fixed taxonomy already
+        vocab, _ = cached(args.out / "vocab_map.json", lambda: call(args.vocab_model, VOCAB_TASK.format(names=names), []))
+        vmap = {norm(k): v for k, v in vocab["result"]["map"].items()}
+    else:
+        vmap = {n: n for n in raw}
     unmapped = [n for n in raw if n not in vmap]
     if unmapped:
         print(f"WARNING {len(unmapped)} raw names not mapped; kept verbatim: {unmapped[:10]}")
@@ -165,6 +172,8 @@ def main(argv=None):
     aliases = {norm(k): v for k, v in json.loads(alias_path.read_text()).items()} if alias_path.exists() else {}
 
     def canon(s):
+        if norm(s) in ("none", "no object", "nothing", ""):
+            return "NONE"
         c = vmap.get(norm(s), norm(s))
         return aliases.get(norm(c), aliases.get(norm(s), c))
     overrides = load_overrides(args.out)
@@ -181,10 +190,15 @@ def main(argv=None):
     # ---- 1. per-segment merge of the two models ------------------------------------------
     rows = []
     for r in segs.itertuples():
-        a, b = labels[(primary, r.episode_index, r.seg_id)], labels[(secondary, r.episode_index, r.seg_id)]
         row = {"episode_index": r.episode_index, "seg_id": r.seg_id, "rule_seg_ids": [int(r.seg_id)], "type": r.type,
                "start": r.start, "end": r.end, "hand": r.hand, "events": r.events,
                "flags": [f for f in r.flags.split(",") if f], "object_secondary": None, "review_note": ""}
+        if r.type not in LABELED_TYPES:  # TRANSIT: motion that serves no subtask -> no instruction
+            row["object"] = None
+            row["flags"].append("transit")
+            rows.append(row)
+            continue
+        a, b = labels[(primary, r.episode_index, r.seg_id)], labels[(secondary, r.episode_index, r.seg_id)]
         if args.trust:
             # One model decides; the other only adds informational disagreement flags.
             t, o = (a, b) if args.trust == primary else (b, a)
@@ -288,7 +302,7 @@ def main(argv=None):
 
     # ---- 4. prompts ------------------------------------------------------------------------
     exclude = {"no_object", "failed", "not_in_bin", "multiple_objects", "manual_exclude", "short", "not_idle",
-               "trust_low_conf", "trust_hand_mismatch"}
+               "trust_low_conf", "trust_hand_mismatch", "transit"}
     prompts, variants = [], []
     for row in df.itertuples():
         if row.type == "STILL":

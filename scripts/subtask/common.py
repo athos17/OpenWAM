@@ -24,11 +24,17 @@ HEAD_CAMERA = "observation.images.left_head"
 WRIST_CAMERA = {"left": "observation.images.left_wrist", "right": "observation.images.right_wrist"}
 
 
-def label_path(out: Path, model: str, seg) -> Path:
-    """LLM label cache for one rule segment, keyed by its frames (stable when other segments move)."""
+# Label generations live side by side under llm/<kind>/; v3 = pre-grasp wrist frames + fixed taxonomy.
+LABEL_KIND = "segment_v3"
+ARBITRATION_KIND = "arbitration_v3"
+
+
+def label_path(out: Path, model: str, seg, kind: str = LABEL_KIND) -> Path:
+    """LLM label cache for one rule segment. A PICK is keyed by its grasp/release frames only, so
+    labels survive boundary changes; other segments are keyed by their frame range."""
     ev = json.loads(seg.events) if isinstance(seg.events, str) and seg.events else {}
-    tail = f"_g{ev['grasp']:05d}_r{ev['release']:05d}" if ev else ""
-    return out / "llm" / "segment" / model / f"ep{int(seg.episode_index):03d}_{seg.type}_{int(seg.start):05d}_{int(seg.end):05d}{tail}.json"
+    key = f"g{ev['grasp']:05d}_r{ev['release']:05d}" if ev else f"{int(seg.start):05d}_{int(seg.end):05d}"
+    return out / "llm" / kind / model / f"ep{int(seg.episode_index):03d}_{seg.type}_{key}.json"
 
 
 def flexion_columns(dataset_dir: Path) -> dict:

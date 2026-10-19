@@ -3,11 +3,12 @@
 Per hand, a *carry* is one large EEF lift (see ``detect_carries``) with events
 grasp / peak / release.
 
-Segments tile every episode with no gaps. One PICK per carry; the boundary
-between consecutive PICKs is the slowest moment (summed EEF speed) between the
-previous release and the next grasp, so the retreat after a release belongs to
-the finished subtask. Sustained stillness (both arms) of at least ``--still-sec``
-becomes a STILL segment. The LLM pass later assigns objects and verifies.
+Segments tile every episode with no gaps. One PICK per carry; a PICK ends
+``--boundary-after-release-sec`` after its release (the object is in the bin), so
+the retreat and the approach to the next object belong to the next subtask.
+STILL = both arms and both hands below the idle thresholds for ``--still-sec``,
+right after a subtask ends (or at the episode start / end). Motion after the
+last object, or before an idle wait, is TRANSIT (no instruction). The LLM pass assigns objects.
 
 Example:
   python scripts/subtask/segment.py --dataset data/pick_place_2_3_openwam_v3 --out outputs/subtask
@@ -83,7 +84,31 @@ def detect_carries(z, closure, args) -> list:
     return carries
 
 
-def segment_episode(state: np.ndarray, flex: dict, norm: dict, args) -> tuple:
+def move_boundary(segs: list, carries: list, near: int, to: int, window: int = int(5 * FPS)) -> bool:
+    """Reviewer edit: move the segment boundary closest to ``near`` (within 5 s) to frame ``to``.
+    Refused when a neighbour would become empty or a PICK would lose its own grasp."""
+    cands = [i for i in range(1, len(segs)) if abs(segs[i]["start"] - near) <= window]
+    if not cands:
+        print(f"  boundary edit near {near}: no boundary within 5 s, skipped")
+        return False
+    i = min(cands, key=lambda k: abs(segs[k]["start"] - near))
+    a, b = segs[i - 1], segs[i]
+    ok = a["start"] < to < b["end"]
+    for sg in (a, b):
+        if ok and sg["type"] == "PICK":
+            g = carries[sg["carry"]]["grasp"]
+            lo, hi = (a["start"], to) if sg is a else (to, b["end"])
+            ok = lo <= g < hi
+    if not ok:
+        print(f"  boundary edit {segs[i]['start']} -> {to}: would break a neighbouring segment, skipped")
+        return False
+    a["end"] = b["start"] = int(to)
+    a["flags"].append("boundary_edited")
+    b["flags"].append("boundary_edited")
+    return True
+
+
+def segment_episode(state: np.ndarray, flex: dict, norm: dict, args, boundary_edits=()) -> tuple:
     n = len(state)
     smooth = max(1, int(args.speed_smooth_sec * FPS))
     sig = {}
@@ -95,11 +120,12 @@ def segment_episode(state: np.ndarray, flex: dict, norm: dict, args) -> tuple:
         fingers = np.r_[0.0, np.abs(np.diff(closure)) * FPS]
         sig[hand] = {"closure": closure, "z": xyz[:, 2], "speed": uniform_filter1d(speed, smooth),
                      "finger_speed": uniform_filter1d(fingers, smooth)}
-    vsum = sig["left"]["speed"] + sig["right"]["speed"]
-    # Still = arms AND fingers still (a hand paused at an object while closing is not idle).
-    fsum = sig["left"]["finger_speed"] + sig["right"]["finger_speed"]
-    still = runs((vsum < args.still_speed) & (fsum < args.still_finger_speed), int(args.still_sec * FPS),
-                 merge_gap=int(0.5 * FPS))
+    # Still = EVERY arm and EVERY hand below the thresholds (no summing, no gap merging):
+    # slow continuous motion must not count as idle.
+    idle = np.ones(n, dtype=bool)
+    for hand in HANDS:
+        idle &= (sig[hand]["speed"] < args.still_speed) & (sig[hand]["finger_speed"] < args.still_finger_speed)
+    still = runs(idle, int(args.still_sec * FPS))
 
     carries = []
     for hand in HANDS:
@@ -110,56 +136,44 @@ def segment_episode(state: np.ndarray, flex: dict, norm: dict, args) -> tuple:
         c["carry_id"] = k
         c["overlap"] = bool(k and carries[k - 1]["hand"] != c["hand"] and c["grasp"] < carries[k - 1]["release"])
 
-    def still_in(a, b):
-        return [(max(s, a), min(e, b)) for s, e in still if min(e, b) - max(s, a) >= int(args.still_sec * FPS)]
-
     segs = []
 
     def add(kind, a, b, carry=None, flags=()):
         if b > a:
             segs.append({"type": kind, "start": int(a), "end": int(b), "carry": carry, "flags": list(flags)})
 
-    # Leading gap: STILL runs before the first grasp, then PICK starts.
-    first = carries[0]["grasp"] if carries else n
-    cursor = 0
-    pre, post = int(args.still_before_grasp_sec * FPS), int(0.5 * FPS)
-    lead = still_in(0, first - pre)
-    if lead and lead[0][0] <= int(0.5 * FPS):
-        add("STILL", 0, lead[-1][1])
-        cursor = lead[-1][1]
+    def carve(a, limit, end):
+        """Tile [a, end): idle runs inside [a, limit) become STILL, the motion before each idle run
+        is TRANSIT (retreat / waiting moves that serve no subtask). Returns the new cursor."""
+        cur = a
+        for s0, e0 in still:
+            s0, e0 = max(s0, cur), min(e0, limit)
+            if e0 - s0 >= int(args.still_sec * FPS):
+                add("TRANSIT", cur, s0)
+                add("STILL", s0, e0)
+                cur = e0
+        if end == n and cur < n:  # nothing follows: the rest of the episode carries no instruction
+            add("TRANSIT", cur, n)
+            cur = n
+        return cur
+
+    # A subtask ends once its object has been let go into the bin (release + a short settle);
+    # the retreat and the approach to the next object belong to the NEXT subtask, unless the
+    # robot first idles (then: TRANSIT retreat, STILL wait, and the approach starts the next one).
+    settle, pre = int(args.boundary_after_release_sec * FPS), int(args.still_before_grasp_sec * FPS)
+    cursor = carve(0, carries[0]["grasp"] - pre, carries[0]["grasp"]) if carries else carve(0, n, n)
     for k, c in enumerate(carries):
-        nxt = carries[k + 1]["grasp"] if k + 1 < len(carries) else n
-        a, b = c["release"], nxt
-        flags = ["overlap"] if (k + 1 < len(carries) and carries[k + 1]["overlap"]) else []
-        if c["open_at_end"]:
-            flags.append("open_at_end")
-        if b <= a:  # next grasp (other hand) before this release
-            boundary = max(c["grasp"] + 1, nxt - int(1.0 * FPS)) if k + 1 < len(carries) else n
-            add("PICK", cursor, boundary, k, flags)
-            cursor = boundary
-            continue
-        # A pause right before a grasp is the hand positioned at the object, not idling.
-        gap_still = still_in(a + post, b - pre if k + 1 < len(carries) else b)
-        if gap_still:
-            add("PICK", cursor, gap_still[0][0], k, flags)
-            add("STILL", gap_still[0][0], gap_still[-1][1])
-            cursor = gap_still[-1][1]
-        elif k + 1 < len(carries):
-            lo, hi = a + int(0.2 * FPS), b - int(0.3 * FPS)
-            boundary = lo + int(np.argmin(vsum[lo:hi])) if hi > lo else (a + b) // 2
-            add("PICK", cursor, boundary, k, flags)
-            cursor = boundary
-        else:
-            add("PICK", cursor, n, k, flags)
-            cursor = n
-    if cursor < n:
-        if segs and segs[-1]["type"] == "STILL" or not carries:
-            if segs and segs[-1]["type"] == "STILL":
-                segs[-1]["end"] = n  # trailing motion after the final idle stretch stays idle-labeled
-            else:
-                add("STILL", cursor, n)
-        else:
-            add("PICK", cursor, n, len(carries) - 1)
+        nxt = carries[k + 1]["grasp"] if k + 1 < len(carries) else None
+        flags = ["open_at_end"] if c["open_at_end"] else []
+        boundary = min(c["release"] + settle, n)
+        if nxt is not None and boundary >= nxt:
+            # the next pick (other hand) grasps before this one is done: cut before its grasp
+            boundary = max(c["grasp"] + 1, nxt - int(1.0 * FPS))
+            flags.append("overlap")
+        add("PICK", cursor, boundary, k, flags)
+        cursor = carve(boundary, nxt - pre, nxt) if nxt is not None else carve(boundary, n, n)
+    for near, to in boundary_edits:
+        move_boundary(segs, carries, near, to)
     for sg in segs:
         if sg["type"] == "PICK" and sg["end"] - sg["start"] < int(2.0 * FPS):
             sg["flags"].append("short")
@@ -178,8 +192,9 @@ def main(argv=None):
     ap.add_argument("--z-prominence", type=float, default=0.12, help="m; lift heights are bimodal around 0.09-0.15")
     ap.add_argument("--min-lift", type=float, default=0.10, help="m of z rise between grasp and peak")
     ap.add_argument("--baseline-sec", type=float, default=8.0, help="max look-back for the grasp")
-    ap.add_argument("--still-speed", type=float, default=0.04, help="m/s, summed over both EEFs")
-    ap.add_argument("--still-finger-speed", type=float, default=0.15, help="closure units/s, summed over hands")
+    ap.add_argument("--still-speed", type=float, default=0.025, help="m/s, every EEF (idle noise p90 ~0.02)")
+    ap.add_argument("--still-finger-speed", type=float, default=0.1, help="closure units/s, every hand")
+    ap.add_argument("--boundary-after-release-sec", type=float, default=0.3, help="subtask ends this long after release")
     ap.add_argument("--still-sec", type=float, default=1.5)
     ap.add_argument("--still-before-grasp-sec", type=float, default=1.5, help="no STILL this close to a grasp")
     ap.add_argument("--speed-smooth-sec", type=float, default=0.2)
@@ -193,10 +208,16 @@ def main(argv=None):
         allc = np.concatenate([s[:, flex[hand]].mean(1) for s in states.values()])
         norm[hand] = (float(np.percentile(allc, 1)), float(np.percentile(allc, 99)))
     selected = [int(e) for e in args.episodes.split(",")] if args.episodes else sorted(states)
+    edits = {}
+    if (args.out / "boundary_edits.csv").exists():  # written by the viewer's edit mode
+        be = pd.read_csv(args.out / "boundary_edits.csv")
+        for r in be.itertuples():
+            edits.setdefault(int(r.episode_index), []).append((int(r.near_frame), int(r.new_frame)))
+        print(f"applying {len(be)} reviewer boundary edits")
 
     carry_rows, seg_rows, sig_dump = [], [], {}
     for ep in selected:
-        carries, segs, sig, _ = segment_episode(states[ep], flex, norm, args)
+        carries, segs, sig, _ = segment_episode(states[ep], flex, norm, args, edits.get(ep, ()))
         for c in carries:
             carry_rows.append({"episode_index": ep, **c})
         for i, s in enumerate(segs):

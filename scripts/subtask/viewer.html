@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trajectory Viewer</title>
+<style>
+:root{
+  --bg:#f5f6f8;--panel:#ffffff;--fg:#1d2330;--muted:#6b7280;--line:#e2e5ea;--accent:#2563eb;--hover:#eef2f7;
+  --left:#3b82f6;--left-soft:#dbeafe;--right:#f97316;--right-soft:#ffedd5;--still:#9ca3af;--still-soft:#eceef1;
+  --excl:#dc2626;--video-bg:#0b0d10;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#111317;--panel:#1a1d23;--fg:#e5e7eb;--muted:#9aa1ad;--line:#2b2f37;--accent:#60a5fa;--hover:#232832;
+  --left:#60a5fa;--left-soft:#1e3a5f;--right:#fb923c;--right-soft:#4a2b16;--still:#6b7280;--still-soft:#2a2e35;--excl:#f87171;
+}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;display:grid;grid-template-columns:280px 1fr;overflow:hidden}
+aside{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+aside .top{padding:12px 12px 8px;border-bottom:1px solid var(--line)}
+aside h1{font-size:15px;margin:0 0 8px}
+input.search{width:100%;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:6px;padding:6px 8px;font-size:13px}
+.filters{display:flex;gap:6px;margin-top:8px}
+.filters button{flex:1;border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:6px;padding:3px 0;font-size:12px;cursor:pointer}
+.filters button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+#list{overflow-y:auto;flex:1;padding:4px 6px 12px}
+.ep{padding:7px 8px;border-radius:6px;cursor:pointer;margin:2px 0}
+.ep:hover{background:var(--hover)}
+.ep.on{background:var(--hover);box-shadow:inset 3px 0 0 var(--accent)}
+.ep .row{display:flex;justify-content:space-between;align-items:baseline;gap:6px}
+.ep b{font-variant-numeric:tabular-nums}
+.ep .meta{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.mini{display:flex;height:6px;border-radius:3px;overflow:hidden;margin-top:5px;background:var(--still-soft)}
+.mini i{display:block;height:100%}
+main{display:flex;flex-direction:column;min-height:0;min-width:0;padding:12px 16px;gap:10px;overflow:hidden}
+header.bar{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+header.bar h2{margin:0;font-size:17px}
+.muted{color:var(--muted)}
+.now{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;display:flex;align-items:center;gap:10px;min-height:44px}
+.now .tag{font-size:12px;border-radius:4px;padding:1px 7px;white-space:nowrap}
+.now .text{font-size:15px;font-weight:600}
+.videos{display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:8px;min-height:0;flex:0 1 auto}
+.vbox{background:var(--video-bg);border-radius:8px;overflow:hidden;position:relative;display:flex;flex-direction:column}
+.vbox video{width:100%;height:100%;max-height:38vh;object-fit:contain;display:block;background:var(--video-bg)}
+.vbox .cap{position:absolute;left:8px;top:6px;font-size:12px;color:#fff;background:rgba(0,0,0,.55);padding:1px 7px;border-radius:4px}
+.controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.controls button,.controls select{border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:6px;padding:4px 10px;font-size:13px;cursor:pointer}
+.controls .time{font-variant-numeric:tabular-nums;color:var(--muted);font-size:13px}
+.hint{font-size:12px;color:var(--muted);margin-left:auto}
+.timeline{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 10px 6px}
+.track{position:relative;height:58px;border-radius:6px;background:var(--still-soft);cursor:pointer;user-select:none;overflow:hidden}
+.seg{position:absolute;top:0;bottom:0;border-right:1px solid var(--panel);display:flex;align-items:center;padding:0 5px;overflow:hidden}
+.seg span{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--fg);pointer-events:none}
+.seg.left{background:var(--left-soft);box-shadow:inset 0 4px 0 var(--left)}
+.seg.right{background:var(--right-soft);box-shadow:inset 0 4px 0 var(--right)}
+.seg.still{background:var(--still-soft);box-shadow:inset 0 4px 0 var(--still)}
+.seg.transit{background:var(--still-soft);box-shadow:inset 0 4px 0 var(--muted)}
+.seg.excl{background-image:repeating-linear-gradient(135deg,transparent 0 6px,rgba(220,38,38,.18) 6px 9px);opacity:.75}
+.seg.active{outline:2px solid var(--accent);outline-offset:-2px;z-index:1}
+.tick{position:absolute;bottom:0;width:1px;height:12px;background:var(--fg);opacity:.45;pointer-events:none}
+.playhead{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--accent);pointer-events:none;z-index:2}
+.axis{position:relative;height:16px;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.axis span{position:absolute;transform:translateX(-50%)}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin-top:2px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+#tip{position:fixed;pointer-events:none;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;max-width:360px;box-shadow:0 4px 16px rgba(0,0,0,.15);display:none;z-index:10}
+.seglist{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow-y:auto;flex:1 1 140px;min-height:90px}
+.srow{display:grid;grid-template-columns:34px 120px 64px 1fr auto;gap:8px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+.srow:hover{background:var(--hover)}
+.srow.active{background:var(--hover);box-shadow:inset 3px 0 0 var(--accent)}
+.srow.excl{color:var(--muted);text-decoration:line-through;text-decoration-color:var(--excl)}
+.srow .t{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
+.chip{font-size:11px;border-radius:4px;padding:1px 6px;text-align:center;white-space:nowrap}
+.chip.transit{background:var(--still-soft);color:var(--muted)}.chip.left{background:var(--left-soft);color:var(--fg)}.chip.right{background:var(--right-soft);color:var(--fg)}.chip.still{background:var(--still-soft);color:var(--fg)}
+.flags{font-size:11px;color:var(--muted);text-decoration:none;display:inline-block}
+.editor{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:4px 0 2px;font-size:12px;cursor:default}
+.editor input,.editor select{border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:5px;padding:2px 6px;font-size:12px}
+.editor button{border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:5px;padding:2px 9px;font-size:12px;cursor:pointer}
+.editor button.keep.on{background:#16a34a;border-color:#16a34a;color:#fff}.editor button.exclude.on{background:var(--excl);border-color:var(--excl);color:#fff}
+.edited{font-size:11px;background:#fef3c7;color:#92400e;border-radius:4px;padding:1px 6px;margin-left:6px}
+@media (prefers-color-scheme:dark){.edited{background:#4a3a12;color:#fde68a}}
+.bedit{position:absolute;top:-2px;bottom:-2px;width:0;border-left:2px dashed #d97706;pointer-events:none;z-index:2}
+.editbar{display:none;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;background:var(--panel);border:1px dashed #d97706;border-radius:8px;padding:6px 10px}
+body.editing .editbar{display:flex}
+.editbar button{border:1px solid var(--line);background:var(--bg);color:var(--fg);border-radius:5px;padding:2px 9px;font-size:12px;cursor:pointer}
+.ep .badge{font-size:11px;color:#b45309;margin-left:4px}
+@media (max-width:900px){body{grid-template-columns:1fr;overflow:auto}aside{max-height:40vh}.videos{grid-template-columns:1fr}.srow{grid-template-columns:30px 1fr;}.srow .t,.srow .flags{display:none}}
+</style></head><body>
+<aside>
+  <div class="top">
+    <h1>轨迹列表</h1>
+    <input class="search" id="search" placeholder="按 episode 编号或物体搜索">
+    <div class="filters" id="filters">
+      <button data-f="all" class="on">全部</button><button data-f="short">短 (0–63)</button><button data-f="long">长 (64–86)</button>
+    </div>
+  </div>
+  <div id="list"></div>
+</aside>
+<main>
+  <header class="bar"><h2 id="title">—</h2><span class="muted" id="subtitle"></span>
+    <label style="margin-left:auto;font-size:13px"><input type="checkbox" id="editMode"> 编辑模式</label></header>
+  <div class="now" id="now"></div>
+  <div class="videos" id="videos"></div>
+  <div class="controls">
+    <button id="play">▶ 播放</button>
+    <button id="prevSeg" title="上一个子任务 [">⏮</button><button id="nextSeg" title="下一个子任务 ]">⏭</button>
+    <select id="rate"><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select>
+    <span class="time" id="time">0 / 0</span>
+    <span class="hint">空格 播放/暂停 · ←/→ 逐帧（Shift 1秒）· [ / ] 子任务 · ↑/↓ 切换轨迹</span>
+  </div>
+  <div class="timeline">
+    <div class="track" id="track"></div>
+    <div class="axis" id="axis"></div>
+    <div class="legend"><span><i style="background:var(--left)"></i>左手</span><span><i style="background:var(--right)"></i>右手</span><span><i style="background:var(--still)"></i>静止</span><span><i style="background:var(--muted)"></i>过渡（无指令）</span><span><i style="background:repeating-linear-gradient(135deg,transparent 0 3px,rgba(220,38,38,.5) 3px 5px)"></i>训练中剔除</span><span>竖线 = 抓取 / 松手</span></div>
+  </div>
+  <div class="editbar" id="editbar">
+    <button id="moveBoundary">把最近的边界移到当前帧</button>
+    <span id="bedits" class="muted"></span>
+    <span class="muted" style="margin-left:auto">修改立即保存到 outputs/subtask/manual_edits.json；重跑标注流程后生效（虚线 = 待生效的边界）</span>
+  </div>
+  <div class="seglist" id="seglist"></div>
+</main>
+<div id="tip"></div>
+<script>
+let DATA, cur = null, filter = "all", dragging = false, EDITS = {segments: {}, boundaries: []};
+const editKey = (ep, s) => `${ep}:${s.key}`;
+const editOf = s => EDITS.segments[editKey(cur.ep, s)];
+async function postEdit(body) {
+  const r = await fetch("api/edit", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) { alert("保存失败：" + (await r.text())); return; }
+  EDITS = await r.json(); renderSegList(); renderTimeline(); renderList(); renderBoundaryEdits(); lastSeg = -2;
+}
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const fmt = s => { s = Math.max(0, s); const m = Math.floor(s / 60); return `${m}:${(s % 60).toFixed(1).padStart(4, "0")}`; };
+const kind = s => s.type === "PICK" ? s.hand : s.type.toLowerCase();
+const handLabel = s => s.type === "STILL" ? "静止" : s.type === "TRANSIT" ? "过渡" : (s.hand === "left" ? "左手" : "右手");
+const segText = s => s.type === "TRANSIT" ? "（过渡动作：回撤 / 等待前的移动，无指令）" : s.exclude ? (s.type === "STILL" ? "Stay still." : (s.prompt || `（${s.object && s.object !== "NONE" ? s.object : "无物体"}）`)) : s.prompt;
+
+$("editMode").checked = localStorage.getItem("viewer-edit") === "1";
+document.body.classList.toggle("editing", $("editMode").checked);
+$("editMode").onchange = () => { localStorage.setItem("viewer-edit", $("editMode").checked ? "1" : "0"); document.body.classList.toggle("editing", $("editMode").checked); renderSegList(); };
+Promise.all([fetch("data.json").then(r => r.json()), fetch("api/edits").then(r => r.json())]).then(([d, e]) => { EDITS = e; DATA = d; buildVideos(); renderList(); const ep = +(new URLSearchParams(location.hash.slice(1)).get("ep") ?? d.episodes[0].ep); select(ep); loop(); });
+
+function buildVideos() {
+  $("videos").innerHTML = DATA.cameras.map(c => `<div class="vbox"><video id="v-${c.key}" muted playsinline preload="auto"></video><span class="cap">${c.label}</span></div>`).join("");
+}
+const vids = () => DATA.cameras.map(c => $("v-" + c.key));
+const master = () => $("v-" + DATA.cameras[0].key);
+
+function renderList() {
+  const q = $("search").value.trim().toLowerCase();
+  const eps = DATA.episodes.filter(e => (filter === "all" || (filter === "short" ? e.ep < 64 : e.ep >= 64)) &&
+    (!q || String(e.ep) === q || String(e.ep).padStart(3, "0").includes(q) || e.segments.some(s => (s.object || "").toLowerCase().includes(q))));
+  $("list").innerHTML = eps.map(e => {
+    const mini = e.segments.map(s => `<i style="width:${100 * (s.end - s.start) / e.frames}%;background:var(--${s.type === "TRANSIT" ? "muted" : s.exclude ? "excl" : kind(s)});opacity:${s.exclude ? .45 : 1}"></i>`).join("");
+    return `<div class="ep ${cur && cur.ep === e.ep ? "on" : ""}" data-ep="${e.ep}"><div class="row"><b>ep ${String(e.ep).padStart(3, "0")}</b><span class="meta">${fmt(e.frames / DATA.fps)}</span></div>
+      <div class="meta">${e.picks} 个子任务${e.excluded ? ` · 剔除 ${e.excluded}` : ""}${(() => { const n = Object.values(EDITS.segments).filter(x => x.ep === e.ep).length + EDITS.boundaries.filter(b => b.ep === e.ep).length; return n ? `<span class="badge">已修改 ${n}</span>` : ""; })()}</div><div class="mini">${mini}</div></div>`;
+  }).join("") || `<p class="muted" style="padding:8px">没有匹配的轨迹</p>`;
+  $("list").querySelectorAll(".ep").forEach(el => el.onclick = () => select(+el.dataset.ep));
+}
+
+function select(ep) {
+  cur = DATA.episodes.find(e => e.ep === ep) || DATA.episodes[0];
+  history.replaceState(null, "", "#ep=" + cur.ep);
+  renderList();
+  $("list").querySelector(".ep.on")?.scrollIntoView({block: "nearest"});
+  $("title").textContent = `Episode ${cur.ep}`;
+  $("subtitle").textContent = `${cur.frames} 帧 · ${fmt(cur.frames / DATA.fps)} · ${cur.picks} 个可用子任务${cur.excluded ? ` · ${cur.excluded} 段剔除` : ""}`;
+  const rate = +$("rate").value;
+  vids().forEach((v, i) => { v.pause(); v.src = `video/${DATA.cameras[i].key}/${cur.ep}.mp4`; v.playbackRate = rate; });
+  $("play").textContent = "▶ 播放";
+  renderTimeline(); renderSegList(); renderBoundaryEdits(); lastSeg = -2;
+}
+
+function renderTimeline() {
+  const n = cur.frames;
+  $("track").innerHTML = cur.segments.map((s, i) => {
+    const ticks = Object.entries(s.events || {}).filter(([k]) => k !== "peak").map(([k, f]) => `<div class="tick" style="left:${100 * f / n}%"></div>`).join("");
+    return `<div class="seg ${kind(s)} ${s.exclude && s.type !== "TRANSIT" ? "excl" : ""}" data-i="${i}" style="left:${100 * s.start / n}%;width:${100 * (s.end - s.start) / n}%"><span>${esc(s.type === "STILL" ? "静止" : s.type === "TRANSIT" ? "过渡" : (s.object && s.object !== "NONE" ? s.object : "无物体"))}</span></div>${ticks}`;
+  }).join("") + EDITS.boundaries.filter(b => b.ep === cur.ep).map(b => `<div class="bedit" style="left:${100 * b.to / n}%"></div>`).join("") + `<div class="playhead" id="playhead"></div>`;
+  const step = n / DATA.fps > 120 ? 30 : n / DATA.fps > 40 ? 10 : 5;
+  let ax = "";
+  for (let t = 0; t <= n / DATA.fps; t += step) ax += `<span style="left:${100 * t * DATA.fps / n}%">${fmt(t).replace(/\.\d$/, "")}</span>`;
+  $("axis").innerHTML = ax;
+}
+
+function renderSegList() {
+  const editing = $("editMode").checked;
+  const names = DATA.objects.map(o => `<option value="${esc(o)}">`).join("");
+  $("seglist").innerHTML = `<datalist id="objnames">${names}</datalist>` + cur.segments.map((s, i) => {
+    const e = editOf(s) || {};
+    const excl = e.decision ? e.decision === "exclude" : (s.exclude && s.type !== "TRANSIT");
+    const shownHand = e.hand ? {...s, hand: e.hand} : s;
+    const text = e.object && s.type === "PICK" ? `→ ${e.object}` : segText(s);
+    const editor = !editing || s.type === "TRANSIT" ? "" : `<div class="editor" data-i="${i}">
+      ${s.type === "PICK" ? `物体 <input list="objnames" data-f="object" value="${esc(e.object ?? (s.object && s.object !== "NONE" ? s.object : ""))}" style="width:190px">
+      手 <select data-f="hand"><option value="">${s.hand === "left" ? "左手" : "右手"}（原）</option><option value="left" ${e.hand === "left" ? "selected" : ""}>左手</option><option value="right" ${e.hand === "right" ? "selected" : ""}>右手</option></select>` : ""}
+      <button class="keep ${e.decision === "keep" ? "on" : ""}" data-d="keep">保留</button>
+      <button class="exclude ${e.decision === "exclude" ? "on" : ""}" data-d="exclude">剔除</button>
+      备注 <input data-f="note" value="${esc(e.note || "")}" placeholder="例如：人手递物 / 手判错" style="width:200px">
+      ${Object.keys(e).length ? `<button data-clear>撤销修改</button>` : ""}</div>`;
+    return `<div class="srow ${excl ? "excl" : ""}" data-i="${i}">
+    <span class="t">#${i + 1}</span><span class="t">${s.start}–${s.end} · ${((s.end - s.start) / DATA.fps).toFixed(1)}s</span>
+    <span class="chip ${kind(shownHand)}">${handLabel(shownHand)}</span><span>${esc(text)}${Object.keys(e).length ? `<span class="edited">已修改</span>` : ""}</span>
+    <span class="flags">${esc((excl ? ["剔除"] : []).concat(s.flags.filter(f => !["human", "reviewed", "open_at_end"].includes(f))).join(" · "))}</span>${editor}</div>`;
+  }).join("");
+  $("seglist").querySelectorAll(".srow").forEach(el => el.onclick = ev => { if (!ev.target.closest(".editor")) seekFrame(cur.segments[+el.dataset.i].start); });
+  $("seglist").querySelectorAll(".editor").forEach(ed => {
+    const s = cur.segments[+ed.dataset.i];
+    const send = patch => {
+      const e = {...(editOf(s) || {}), ...patch};
+      if (s.type === "PICK" && e.decision === "keep" && !(e.object || (s.object && s.object !== "NONE"))) { alert("保留需要物体名称"); return; }
+      if (s.type === "PICK" && e.decision === "keep" && !e.object) e.object = s.object;
+      postEdit({kind: "segment", ep: cur.ep, frame: s.key, type: s.type, object: e.object || null, hand: e.hand || null, decision: e.decision || null, note: e.note || null});
+    };
+    ed.querySelectorAll("[data-f]").forEach(inp => inp.onchange = () => {
+      let v = inp.value.trim();
+      if (inp.dataset.f === "object" && v === (s.object || "")) v = "";
+      send({[inp.dataset.f]: v || null});
+    });
+    ed.querySelectorAll("[data-d]").forEach(b => b.onclick = () => send({decision: (editOf(s) || {}).decision === b.dataset.d ? null : b.dataset.d}));
+    ed.querySelector("[data-clear]")?.addEventListener("click", () => postEdit({kind: "segment", ep: cur.ep, frame: s.key, type: s.type}));
+  });
+}
+
+function renderBoundaryEdits() {
+  const mine = EDITS.boundaries.filter(b => b.ep === cur.ep);
+  $("bedits").innerHTML = mine.length ? "本轨迹边界修改：" + mine.map(b => `${b.near} → ${b.to} <button data-near="${b.near}">删除</button>`).join(" ") : "本轨迹暂无边界修改";
+  $("bedits").querySelectorAll("[data-near]").forEach(btn => btn.onclick = () => postEdit({kind: "boundary", ep: cur.ep, near: +btn.dataset.near, delete: true}));
+}
+$("moveBoundary").onclick = () => {
+  const f = frameNow();
+  const bounds = cur.segments.slice(1).map(s => s.start);
+  const near = bounds.reduce((a, b) => Math.abs(b - f) < Math.abs(a - f) ? b : a, bounds[0]);
+  if (near === undefined || Math.abs(near - f) > 5 * DATA.fps) { alert("当前帧 5 秒内没有子任务边界"); return; }
+  if (near === f) return;
+  postEdit({kind: "boundary", ep: cur.ep, near, to: f});
+};
+
+function seekFrame(f) {
+  const t = Math.min(Math.max(f, 0), cur.frames - 1) / DATA.fps + 0.5 / DATA.fps;
+  vids().forEach(v => { if (v.readyState) v.currentTime = t; else v.addEventListener("loadedmetadata", () => v.currentTime = t, {once: true}); });
+}
+const frameNow = () => Math.min(cur.frames - 1, Math.floor(master().currentTime * DATA.fps));
+const segAt = f => cur.segments.findIndex(s => s.start <= f && f < s.end);
+
+let lastSeg = -2;
+function loop() {
+  if (cur) {
+    const m = master(), f = frameNow();
+    if (!m.paused) vids().slice(1).forEach(v => { if (Math.abs(v.currentTime - m.currentTime) > 0.08) v.currentTime = m.currentTime; });
+    $("playhead").style.left = (100 * f / cur.frames) + "%";
+    $("time").textContent = `帧 ${f} / ${cur.frames - 1} · ${fmt(m.currentTime)} / ${fmt(cur.frames / DATA.fps)}`;
+    const i = segAt(f);
+    if (i !== lastSeg) {
+      lastSeg = i;
+      document.querySelectorAll(".seg.active,.srow.active").forEach(e => e.classList.remove("active"));
+      const s = cur.segments[i];
+      if (s) {
+        document.querySelector(`.seg[data-i="${i}"]`)?.classList.add("active");
+        const row = document.querySelector(`.srow[data-i="${i}"]`); row?.classList.add("active");
+        if (row) { const box = $("seglist"); const top = row.offsetTop - box.offsetTop; if (top < box.scrollTop || top > box.scrollTop + box.clientHeight - row.offsetHeight) box.scrollTop = top - box.clientHeight / 3; }
+        $("now").innerHTML = `<span class="chip ${kind(s)} tag">${handLabel(s)} · 子任务 ${i + 1}/${cur.segments.length}</span><span class="text">${esc(segText(s))}</span>${s.exclude && s.type !== "TRANSIT" ? `<span class="tag" style="color:var(--excl)">训练中剔除</span>` : ""}`;
+      } else $("now").innerHTML = `<span class="muted">—</span>`;
+    }
+    if (m.ended) { vids().forEach(v => v.pause()); $("play").textContent = "▶ 播放"; }
+  }
+  requestAnimationFrame(loop);
+}
+
+function togglePlay() {
+  const m = master();
+  if (m.paused) { const t = m.currentTime; vids().forEach(v => { v.currentTime = t; v.play().catch(() => {}); }); $("play").textContent = "⏸ 暂停"; }
+  else { vids().forEach(v => v.pause()); $("play").textContent = "▶ 播放"; }
+}
+$("play").onclick = togglePlay;
+$("rate").onchange = () => vids().forEach(v => v.playbackRate = +$("rate").value);
+const jumpSeg = d => { const i = segAt(frameNow()); const j = Math.min(Math.max((i < 0 ? 0 : i) + d, 0), cur.segments.length - 1); seekFrame(cur.segments[j].start); };
+$("prevSeg").onclick = () => jumpSeg(-1);
+$("nextSeg").onclick = () => jumpSeg(1);
+
+const track = $("track");
+const frameFromX = x => { const r = track.getBoundingClientRect(); return Math.round((x - r.left) / r.width * cur.frames); };
+track.addEventListener("pointerdown", e => { dragging = true; track.setPointerCapture(e.pointerId); seekFrame(frameFromX(e.clientX)); });
+track.addEventListener("pointermove", e => {
+  if (dragging) seekFrame(frameFromX(e.clientX));
+  const f = frameFromX(e.clientX), s = cur.segments[segAt(f)], tip = $("tip");
+  if (!s) { tip.style.display = "none"; return; }
+  tip.innerHTML = `<b>${handLabel(s)}</b> · 帧 ${s.start}–${s.end}${s.exclude ? " · <span style='color:var(--excl)'>剔除</span>" : ""}<br>${esc(segText(s))}${s.flags.length ? `<br><span class="muted">${esc(s.flags.join(", "))}</span>` : ""}<br><span class="muted">悬停帧 ${f}</span>`;
+  tip.style.display = "block"; tip.style.left = Math.min(e.clientX + 12, innerWidth - 380) + "px"; tip.style.top = (e.clientY + 14) + "px";
+});
+track.addEventListener("pointerup", () => dragging = false);
+track.addEventListener("pointerleave", () => { $("tip").style.display = "none"; });
+
+$("search").oninput = renderList;
+window.addEventListener("hashchange", () => { const ep = +new URLSearchParams(location.hash.slice(1)).get("ep"); if (cur && ep !== cur.ep) select(ep); });
+$("filters").querySelectorAll("button").forEach(b => b.onclick = () => { filter = b.dataset.f; $("filters").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b)); renderList(); });
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  const step = e.shiftKey ? DATA.fps : 1;
+  if (e.key === " ") { e.preventDefault(); togglePlay(); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); vids().forEach(v => v.pause()); $("play").textContent = "▶ 播放"; seekFrame(frameNow() + step); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); vids().forEach(v => v.pause()); $("play").textContent = "▶ 播放"; seekFrame(frameNow() - step); }
+  else if (e.key === "]") jumpSeg(1);
+  else if (e.key === "[") jumpSeg(-1);
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const items = [...$("list").querySelectorAll(".ep")].map(x => +x.dataset.ep);
+    const k = items.indexOf(cur.ep) + (e.key === "ArrowDown" ? 1 : -1);
+    if (items[k] !== undefined) select(items[k]);
+  }
+});
+</script></body></html>

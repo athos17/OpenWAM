@@ -1,6 +1,6 @@
 """P1: extract per-segment keyframes for review and LLM labeling.
 
-PICK  head: start / grasp / peak / release / after (release + 1 s) / end;  wrist (that hand): grasp / lift
+PICK  head: start / grasp / peak / release / after (release + 1 s) / end;  wrist (that hand): pre60 / pre40 / pre20 (frames before grasp) / grasp / lift
 STILL head: start / mid / end
 Plus one per-episode overview sheet: the head frame at every PICK grasp, numbered.
 
@@ -37,8 +37,10 @@ def plan_episode(segs: pd.DataFrame) -> list:
             # The next pick (other hand) can start right after a release, so judge the drop
             # from a fixed delay instead of the segment end.
             items.append((s.seg_id, HEAD_CAMERA, "after", min(r + 30, n - 1)))
-            for tag, f in (("grasp", g), ("lift", (g + p) // 2)):
-                items.append((s.seg_id, WRIST_CAMERA[s.hand], tag, f))
+            # Small objects (coffee capsules, dice, caps) vanish inside the closed hand; the wrist
+            # camera sees them clearly 0.5-2 s before the lift starts.
+            for tag, f in (("pre60", g - 60), ("pre40", g - 40), ("pre20", g - 20), ("grasp", g), ("lift", (g + p) // 2)):
+                items.append((s.seg_id, WRIST_CAMERA[s.hand], tag, max(f, s.start)))
         else:
             for tag, f in (("start", s.start), ("mid", (s.start + last) // 2), ("end", last)):
                 items.append((s.seg_id, HEAD_CAMERA, tag, f))
