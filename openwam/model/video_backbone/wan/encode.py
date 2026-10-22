@@ -13,6 +13,7 @@ import torch
 from torch import Tensor
 
 from openwam.model.video_backbone.wan.preprocess import preprocess_video as _preprocess_video_native
+from openwam.model.video_backbone.wan.preprocess import preprocess_video_batch as _preprocess_video_batch_native
 from openwam.model.video_backbone.wan.preprocess import vae_output_to_video
 
 
@@ -52,6 +53,13 @@ def preprocess_video(frames, *, encoder=None, dtype, device) -> Tensor:
     if encoder is not None:
         return encoder.preprocess_video(frames)
     return _preprocess_video_native(frames, dtype=dtype, device=device)
+
+
+def preprocess_video_batch(clips, *, encoder=None, dtype, device) -> Tensor:
+    """``torch.cat([preprocess_video(c) for c in clips])`` with a batched native fast path."""
+    if encoder is not None:
+        return torch.cat([encoder.preprocess_video(clip) for clip in clips], dim=0)
+    return _preprocess_video_batch_native(clips, dtype=dtype, device=device)
 
 
 def encode_video(video_tensor: Tensor, *, vae, encoder=None) -> Tensor:

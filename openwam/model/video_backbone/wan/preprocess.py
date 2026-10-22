@@ -32,6 +32,27 @@ def preprocess_video(video, *, dtype, device, pattern="B C T H W", min_value=-1,
     return video
 
 
+def preprocess_video_batch(clips, *, dtype, device, min_value=-1, max_value=1):
+    """Batched :func:`preprocess_video` + ``torch.cat`` over clips -> ``(B, C, T, H, W)``.
+
+    Same values bit for bit: uint8 -> ``dtype`` is exact for 0..255 (as is the
+    legacy uint8 -> float32 -> ``dtype`` hop) and the scale / shift run in the same
+    order on the same device. The difference is one uint8 host->device copy for the
+    whole batch instead of one float32 copy per frame. Clips that are not
+    equally-sized RGB ``PIL.Image`` lists take the legacy per-frame path.
+    """
+    first = clips[0][0]
+    fast = all(
+        isinstance(im, Image.Image) and im.mode == "RGB" and im.size == first.size for clip in clips for im in clip
+    ) and len({len(clip) for clip in clips}) == 1
+    if not fast:
+        return torch.cat([preprocess_video(clip, dtype=dtype, device=device) for clip in clips], dim=0)
+    host = torch.from_numpy(np.stack([np.stack([np.asarray(im) for im in clip]) for clip in clips]))  # B T H W C
+    video = host.to(device=device).to(dtype=dtype)
+    video = video * ((max_value - min_value) / 255) + min_value
+    return video.permute(0, 4, 1, 2, 3).contiguous()
+
+
 def _vae_output_to_image(vae_output, pattern="B C H W", min_value=-1, max_value=1):
     if pattern != "H W C":
         vae_output = reduce(vae_output, f"{pattern} -> H W C", reduction="mean")

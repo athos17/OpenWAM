@@ -15,6 +15,7 @@ code reaches them only through the ABC methods.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from typing import Callable, Optional, Tuple
@@ -43,6 +44,20 @@ from openwam.model.video_backbone.wan.preprocess import (
 from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint import gradient_checkpoint_forward
 
 logger = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def _cudnn_autotune(enabled: bool):
+    """Temporarily allow cuDNN autotuned / non-deterministic algorithms."""
+    if not enabled:
+        yield
+        return
+    prev = (torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic)
+    torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = True, False
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.benchmark, torch.backends.cudnn.deterministic = prev
 
 
 class WanBase(VideoBackbone):
@@ -114,6 +129,11 @@ class WanBase(VideoBackbone):
         self._wan_blocks_compile_enabled = False
         self._wan_blocks_compile_kwargs: dict | None = None
         self._compiled_wan_blocks: dict[int, Callable[..., Tensor]] = {}
+        # Training-input fast paths; the trainer opts in (defaults = legacy behaviour).
+        self._text_embed_cache = None
+        self._text_embed_cache_strict = False
+        self._text_embed_cache_misses = 0
+        self._vae_cudnn_benchmark = False
 
     # ================================================================
     # Internal properties
@@ -749,6 +769,83 @@ class WanBase(VideoBackbone):
         return noisy, cond
 
     # ================================================================
+    # Training-input fast paths (text embed cache, VAE cuDNN autotune)
+    # ================================================================
+
+    def attach_text_embed_cache(
+        self, cache, *, verify_prompts: int = 0, verify_atol: float = 0.0, offload_text_encoder: bool = False
+    ) -> dict:
+        """Serve training ``context`` from a precomputed :class:`TextEmbedCache`.
+
+        ``verify_prompts`` cached prompts are re-encoded with this backbone's own
+        text encoder (cache call shape) and must match the cached rows within
+        ``verify_atol`` (0 = bitwise). ``offload_text_encoder`` then moves UMT5 to
+        CPU; a prompt missing from the cache raises instead of encoding online.
+        """
+        from openwam.model.video_backbone.wan.text_embed_cache import encode_prompt_rows
+
+        stats = {"prompts": len(cache), "verified": 0, "bitwise": True, "max_abs": 0.0}
+        if verify_prompts > 0:
+            n = min(int(verify_prompts), len(cache.prompts))
+            picks = [cache.prompts[i * len(cache.prompts) // n] for i in range(n)]
+            rows = encode_prompt_rows(
+                picks,
+                tokenizer=self._tokenizer,
+                text_encoder=self.text_encoder,
+                device=self.device,
+                batch_size=int(cache.meta.get("encode_batch_size", n)),
+            )
+            for p, online in zip(picks, rows):
+                cached = cache.rows(p)
+                if cached.shape != online.shape:
+                    raise RuntimeError(f"text embed cache: seq_len mismatch for {p!r}: {cached.shape} vs {online.shape}")
+                stats["bitwise"] &= bool(torch.equal(cached, online))
+                stats["max_abs"] = max(stats["max_abs"], (cached.float() - online.float()).abs().max().item())
+            stats["verified"] = n
+            if stats["max_abs"] > verify_atol:
+                raise RuntimeError(
+                    f"text embed cache does not match this text encoder: max_abs={stats['max_abs']:.3e} "
+                    f"> verify_atol={verify_atol} over {n} prompts (wrong ckpt/tokenizer/dtype?)"
+                )
+        self._text_embed_cache = cache
+        self._text_embed_cache_strict = bool(offload_text_encoder)
+        if offload_text_encoder:
+            self.text_encoder.to("cpu")
+            torch.cuda.empty_cache()
+        return stats
+
+    def set_vae_encode_options(self, *, cudnn_benchmark: bool = False) -> None:
+        """``cudnn_benchmark``: autotune (non-deterministic-allowed) cuDNN algorithms
+        for the frozen VAE encode only; training's global deterministic flags are
+        restored right after."""
+        self._vae_cudnn_benchmark = bool(cudnn_benchmark)
+
+    def _encode_train_text(self, text: list) -> Tuple[Tensor, Tensor]:
+        cache = self._text_embed_cache
+        if cache is None:
+            return wan_encode.encode_text(text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device)
+        missing = cache.missing(text)
+        if missing:
+            if self._text_embed_cache_strict:
+                raise KeyError(
+                    f"{len(missing)} prompt(s) missing from the text embed cache while the text encoder is "
+                    f"offloaded, e.g. {missing[0]!r}; rebuild the cache for this dataset"
+                )
+            context, seq_lens = wan_encode.encode_text(
+                missing, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
+            )
+            for p, c, n in zip(missing, context, seq_lens.tolist()):
+                cache.add(p, c[:n].clone())
+            self._text_embed_cache_misses += len(missing)
+            logger.warning(
+                "text embed cache: encoded %d new prompt(s) online (%d total so far), e.g. %r",
+                len(missing),
+                self._text_embed_cache_misses,
+                missing[0],
+            )
+        return cache.lookup(text)
+
+    # ================================================================
     # ABC: Unified preprocessing (1)
     # ================================================================
 
@@ -770,19 +867,13 @@ class WanBase(VideoBackbone):
         )
 
         batch_size = len(frames)
-        context, seq_lens = wan_encode.encode_text(
-            text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
-        )
+        context, seq_lens = self._encode_train_text(text)
 
-        all_input_videos = []
-        for clip_frames in frames:
-            all_input_videos.append(
-                wan_encode.preprocess_video(
-                    clip_frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
-                )
-            )
-        stacked_inputs = torch.cat(all_input_videos, dim=0)
-        input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
+        stacked_inputs = wan_encode.preprocess_video_batch(
+            frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
+        )
+        with _cudnn_autotune(self._vae_cudnn_benchmark):
+            input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
         # Variant-specific first-frame / control conditioning lives in

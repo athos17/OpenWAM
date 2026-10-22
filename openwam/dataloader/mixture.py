@@ -236,6 +236,9 @@ class MixtureDataset(BaseDataset):
     def __len__(self) -> int:
         return len(self._index_map)
 
+    def prompt_vocabulary(self) -> set:
+        return set().union(*(d.prompt_vocabulary() for d in self._datasets))
+
     @property
     def action_dim(self) -> int:
         return self._action_dim

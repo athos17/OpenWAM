@@ -550,7 +550,34 @@ class OpenWAMTrainer:
             type(self.architecture).__name__,
             self.accelerator.device,
         )
+        self._configure_input_fast_paths(arch)
         return optimizer, dataloader, scheduler
+
+    def _configure_input_fast_paths(self, arch) -> None:
+        """Opt-in frozen-encoder fast paths (``training.vae_cudnn_benchmark`` /
+        ``training.text_embed_cache``); runs after frozen modules reach the device."""
+        t = self.cfg.training
+        vb = getattr(arch, "video_backbone", None)
+        if bool(t.get("vae_cudnn_benchmark", False)):
+            if not hasattr(vb, "set_vae_encode_options"):
+                raise ValueError("training.vae_cudnn_benchmark needs a Wan video backbone")
+            vb.set_vae_encode_options(cudnn_benchmark=True)
+            logger.info("VAE encode: cuDNN autotune enabled")
+        tc = t.get("text_embed_cache") or {}
+        if not tc.get("path"):
+            return
+        if not hasattr(vb, "attach_text_embed_cache"):
+            raise ValueError("training.text_embed_cache needs a Wan video backbone")
+        from openwam.model.video_backbone.wan.text_embed_cache import TextEmbedCache
+
+        cache = TextEmbedCache.load(str(tc.path), device=self.accelerator.device)
+        stats = vb.attach_text_embed_cache(
+            cache,
+            verify_prompts=int(tc.get("verify_prompts", 16)),
+            verify_atol=float(tc.get("verify_atol", 0.0)),
+            offload_text_encoder=bool(tc.get("offload_text_encoder", False)),
+        )
+        logger.info("text embed cache %s attached: %s", tc.path, stats)
 
     # (8) Called by train() on the resume path — restore full state, map step -> (start_epoch, skip).
     def resume_if_configured(self, resume_state_dir: str, dataloader, grad_accum: int) -> tuple[int, int, int, int]:

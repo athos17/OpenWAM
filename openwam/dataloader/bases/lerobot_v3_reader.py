@@ -646,6 +646,12 @@ class LeRobotV3Reader(BaseDataset):
         task_str = tasks_df.index.to_numpy()
         self._task_idx_to_text = dict(zip(task_idx.tolist(), task_str.tolist()))
 
+    def prompt_vocabulary(self) -> set:
+        """Exactly what ``_resolve_prompt`` can return (stripped, non-empty)."""
+        if self.PROMPT_SOURCE == "episode_annotated":
+            return set(self._episode_idx_to_text.values())
+        return {t.strip() for t in self._task_idx_to_text.values() if t.strip()}
+
     def _resolve_prompt(self, row, win: pd.DataFrame) -> str:
         """Resolve this window's prompt text according to ``PROMPT_SOURCE``.
 

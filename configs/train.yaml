@@ -32,6 +32,14 @@ training:
   mixed_precision: bf16           # bf16 / fp16 / no — training + deploy compute dtype
   zero_stage: 2                   # DeepSpeed ZeRO stage: 1 or 2 (CLI override: training.zero_stage=1)
 
+  # --- Frozen-encoder input fast paths ---
+  vae_cudnn_benchmark: false             # cuDNN autotune for the frozen VAE encode only (training stays deterministic)
+  text_embed_cache:
+    path: null                           # scripts/precompute/build_text_embed_cache.py output; null = encode online
+    verify_prompts: 16                   # startup check: re-encode N cached prompts with this run's own T5
+    verify_atol: 0.0                     # 0 = require bitwise-equal rows
+    offload_text_encoder: false          # after the check, move T5 to CPU (~11 GB/GPU freed); misses then raise
+
   # --- Memory optimization ---
   use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
                                          # costs ~1 extra forward (standard term; cf. PyTorch/HF)

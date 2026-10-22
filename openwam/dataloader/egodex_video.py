@@ -106,6 +106,9 @@ class EgoDexVideoDataset(BaseDataset):
     def __len__(self):
         return int(self.cumulative[-1])
 
+    def prompt_vocabulary(self):
+        return set(self.episodes['prompt'])
+
     def locate(self, index):
         index = int(index)
         if index < 0 or index >= len(self):

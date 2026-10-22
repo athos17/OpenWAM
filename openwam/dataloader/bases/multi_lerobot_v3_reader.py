@@ -55,6 +55,9 @@ class MultiLeRobotV3Reader(BaseDataset):
     def __len__(self) -> int:
         return int(self._cum_lens[-1])
 
+    def prompt_vocabulary(self) -> set:
+        return set().union(*(b.prompt_vocabulary() for b in self._buckets))
+
     def __getitem__(self, idx: int) -> dict:
         # Bounds + negative-index normalization. ``searchsorted(side="right")``
         # on a negative idx returns 0 → local = idx (negative) → routes to a

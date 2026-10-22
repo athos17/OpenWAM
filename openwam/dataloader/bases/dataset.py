@@ -43,6 +43,15 @@ class BaseDataset(ABC, torch.utils.data.Dataset):
         VAE encoding internally — converting to Tensor prematurely would
         bypass that step.
         """
+
+    def prompt_vocabulary(self) -> set:
+        """Every ``sample["prompt"]`` string this dataset can return (a superset is fine).
+
+        Used to precompute the frozen text-encoder cache
+        (``scripts/precompute/build_text_embed_cache.py``). Readers whose prompts
+        are not enumerable keep this default and the cache builder refuses them.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not enumerate its prompts")
         ...
 
     @abstractmethod
