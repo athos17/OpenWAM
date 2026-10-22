@@ -62,6 +62,7 @@ def load_from_checkpoint_dir(
     ckpt_dir: str,
     device: str = "cuda",
     ckpt_name: Optional[str] = None,
+    normalization_source: Optional[str] = None,
 ) -> Tuple[DictConfig, BaseWAMArchitecture]:
     """Load full model from a self-contained checkpoint directory.
 
@@ -74,6 +75,7 @@ def load_from_checkpoint_dir(
         device: Target device (e.g. ``"cuda"`` or ``"cuda:0"``).
         ckpt_name: Specific checkpoint filename.  If *None*, the latest
             (highest step number) checkpoint is used.
+        normalization_source: Required source name for a mixture checkpoint.
 
     Returns:
         ``(cfg, architecture)`` — the resolved config and architecture
@@ -84,6 +86,7 @@ def load_from_checkpoint_dir(
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"config.yaml not found in {ckpt_dir}")
     cfg = OmegaConf.load(config_path)
+    cfg, normalizer_dir = _resolve_normalization_source(cfg, ckpt_dir, normalization_source)
 
     # 2. Resolve checkpoint file
     if ckpt_name is not None:
@@ -215,7 +218,7 @@ def load_from_checkpoint_dir(
     architecture.eval()
 
     # 6. Attach the action normalizer built from saved normalization_stats.npy + config.
-    architecture.attach_normalizer(_build_normalizer(cfg, ckpt_dir))
+    architecture.attach_normalizer(_build_normalizer(cfg, normalizer_dir))
 
     # 7. Binary command dims for the final legality projection at WAMPolicy.predict_action.
     # Authoritative source is the CKPT's dataloader config, never the deploy yaml: the training data
@@ -505,7 +508,32 @@ def _infer_raw_dim(inner) -> Optional[int]:
     return None
 
 
-def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
+def _resolve_normalization_source(cfg: DictConfig, ckpt_dir: str, source: Optional[str]):
+    """Select source semantics before model loading, without editing saved config."""
+    if OmegaConf.select(cfg, "dataloader.type") != "mixture":
+        if source is not None:
+            raise ValueError("normalization_source applies only to mixture checkpoints")
+        return cfg, ckpt_dir
+    from openwam.dataloader.utils.normalization_package import read_normalization_package
+
+    package = read_normalization_package(ckpt_dir)
+    names = list(package["sources"])
+    if source is None or source not in package["sources"]:
+        raise ValueError(f"Mixture deployment requires normalization_source from {names}; got {source!r}")
+    entry = package["sources"][source]
+    if entry["training_modality"] != "video_action":
+        raise ValueError(f"Source {source!r} has no action supervision and cannot define a robot policy")
+    # Training-only fields may contain Hydra resolvers (e.g. ${now:...})
+    # unavailable in a standalone deploy process. Source config is already
+    # resolved in the package; preserve unrelated config interpolation verbatim.
+    selected = OmegaConf.create(OmegaConf.to_container(cfg, resolve=False))
+    selected.dataloader = entry["config"]
+    selected.normalization_source = source
+    directory = os.path.dirname(os.path.join(ckpt_dir, entry["stats_file"])) if entry["stats_file"] else ckpt_dir
+    return selected, directory
+
+
+def _build_normalizer(cfg: DictConfig, ckpt_dir: str, normalization_source: Optional[str] = None):
     """Build the deploy normalizer, wrapping for ``unify_action`` when the ckpt used it.
 
     Non-unify ckpts: identical to upstream (returns the raw-space Normalizer or None).
@@ -516,6 +544,7 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
     compact RoboCasa365's state19 and action15 to use distinct raw widths while
     preserving the symmetric map used by older datasets.
     """
+    cfg, ckpt_dir = _resolve_normalization_source(cfg, ckpt_dir, normalization_source)
     inner = _build_inner_normalizer(cfg, ckpt_dir)
 
     unify_on = bool(OmegaConf.select(cfg, "dataloader.unify_action", default=False))

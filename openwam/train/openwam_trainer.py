@@ -100,6 +100,11 @@ class OpenWAMTrainer:
         resume_path = cfg_get(t, "resume_ckpt_path", None) or None
         if finetune_path and resume_path:
             raise ValueError("finetune_ckpt_path and resume_ckpt_path are mutually exclusive; set at most one.")
+        action_init = cfg_get(t, "action_backbone_init", "pretrained")
+        if action_init not in ("pretrained", "random"):
+            raise ValueError("training.action_backbone_init must be pretrained or random")
+        if action_init == "random" and not (finetune_path or resume_path):
+            raise ValueError("Random action initialization requires training.finetune_ckpt_path")
         self._ckpt_source_dir = finetune_path or resume_path
         if self._ckpt_source_dir is not None:
             from openwam.train.utils.ckpt_model_loader import (
@@ -119,6 +124,8 @@ class OpenWAMTrainer:
                 self._ckpt_source_dir,
                 weights_required=finetune_path is not None,
                 override_cfg=cfg if finetune_path is not None else None,
+                reset_action_backbone=action_init == "random" and finetune_path is not None,
+                action_init_seed=cfg_get(t, "action_init_seed", None),
             )
             if finetune_path is not None:
                 # The merge replaced the cfg.model node, so `m` (bound above)
@@ -416,6 +423,19 @@ class OpenWAMTrainer:
                 "DataLoader shuffle disabled for MixtureDataset; its shuffled index map "
                 "is reshuffled by dataset.set_epoch(epoch)."
             )
+            accelerator = getattr(self, "accelerator", None)
+            world_size = accelerator.num_processes if accelerator is not None else 1
+            mixed_modalities = len(set(self.dataset.source_modalities)) > 1
+            self.dataset.training_layout = {
+                "world_size": world_size, "microbatch": batch_size,
+                "gradient_accumulation": int(getattr(t, "gradient_accumulation_steps", 1)),
+                "batching": "global_modality_v1" if mixed_modalities else "shuffled_windows",
+            }
+            if mixed_modalities:
+                from openwam.dataloader.modality_sampler import GlobalModalitySampler
+
+                kwargs["sampler"] = GlobalModalitySampler(self.dataset, batch_size, world_size)
+                logger.info("Global modality batching: %d samples per global microbatch", batch_size * world_size)
         if self._run_seed is not None:
             from openwam.train.utils.seeding import dataloader_worker_init_fn, make_dataloader_generator
 
@@ -482,6 +502,13 @@ class OpenWAMTrainer:
 
                 copy_ckpt_artifacts(self._ckpt_source_dir, output_path)
             save_config(output_path, self.cfg)
+            provenance = getattr(self.architecture, "initialization_provenance", None)
+            if provenance is not None:
+                import json
+
+                with open(os.path.join(output_path, "initialization.json"), "w") as handle:
+                    json.dump(provenance, handle, indent=2)
+                    handle.write("\n")
             if self.dataset is not None:
                 save_normalization_stats(output_path, self.dataset)
         else:
@@ -556,6 +583,21 @@ class OpenWAMTrainer:
         """Compute joint video-action loss. Returns dict: total/video/action."""
         if not isinstance(batch, list):
             batch = [batch]
+
+        # Reject an external sampler that could deadlock ZeRO-2 before any
+        # model backward starts. The normal mixture loader aligns these flags.
+        if (getattr(self, "accelerator", None) is not None and self.accelerator.num_processes > 1
+                and len(set(getattr(self.dataset, "source_modalities", []))) > 1):
+            import torch.distributed as dist
+
+            video = [sample.get("training_modality") == "video_only" for sample in batch]
+            code = 1 if all(video) else (0 if not any(video) else 2)
+            state = torch.tensor([code], dtype=torch.int64, device=self.accelerator.device)
+            states = [torch.empty_like(state) for _ in range(self.accelerator.num_processes)]
+            dist.all_gather(states, state)
+            codes = [int(s.item()) for s in states]
+            if 2 in codes or len(set(codes)) != 1:
+                raise ValueError(f"Distributed mixture requires aligned global modalities; got {codes}. Use GlobalModalitySampler.")
 
         inputs = self.architecture.prepare_inputs(batch)
         if self.lambda_action > 0 and inputs.get("actions") is None:

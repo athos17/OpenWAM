@@ -901,8 +901,19 @@ class BaseWAMArchitecture(ABC, nn.Module):
         all_proprio_masks: list = []
         all_action_masks: list = []
         all_video_masks: list = []
+        video_only_flags = []
 
         for sample in samples:
+            modality = sample.get("training_modality", "video_action")
+            if modality not in ("video_only", "video_action"):
+                raise ValueError(f"Unknown training_modality: {modality}")
+            video_only = modality == "video_only"
+            if video_only:
+                for mask_name in ("action_mask", "proprio_mask"):
+                    mask = sample.get(mask_name)
+                    if mask is None or torch.as_tensor(mask).any():
+                        raise ValueError(f"video_only requires an all-False {mask_name}")
+            video_only_flags.append(video_only)
             all_frames.append(sample["video"])
             all_prompts.append(sample["prompt"])
             all_vace_videos.append(sample.get("vace_video"))
@@ -984,6 +995,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
             "min_timestep_boundary": self._min_timestep_boundary,
             "actions": action_data,
         }
+        if any(video_only_flags):
+            inputs["video_only_mask"] = torch.tensor(video_only_flags, dtype=torch.bool, device=_device)
 
         # Bridge proprio into inputs whenever the batch carries it (not gated on
         # uses_proprioception): the main-stream proprio-context path reads
@@ -1071,6 +1084,49 @@ class BaseWAMArchitecture(ABC, nn.Module):
         Returns:
             dict with keys: loss, loss_video, loss_action.
         """
+        video_only_mask = inputs.pop("video_only_mask", None)
+        if video_only_mask is not None:
+            mask = torch.as_tensor(video_only_mask, device=inputs["input_latents"].device)
+            batch_size = inputs["input_latents"].shape[0]
+            if mask.dtype != torch.bool or mask.shape != (batch_size,):
+                raise ValueError("video_only_mask must be bool with shape [B]")
+            if mask.any():
+                if not getattr(self, "supports_video_only_training", False):
+                    raise ValueError("This architecture has no verified strict video-only training path")
+                # Do not infer modality from all-invalid action windows: a robot
+                # can legitimately have no valid commands in an individual window.
+                for key, valid_value in (("action_is_pad", True), ("proprio_mask", False)):
+                    value = inputs.get(key)
+                    if value is None or not torch.all(value[mask.to(value.device)] == valid_value):
+                        raise ValueError(f"Strict video-only samples have inconsistent {key}")
+                if actions is None:
+                    actions = inputs.pop("actions", None)
+                if mask.all():
+                    actions = None
+                    inputs.pop("actions", None)
+                    inputs.pop("proprio", None)
+                    inputs.pop("proprio_mask", None)
+                    inputs["_strict_video_only"] = True
+                else:
+                    # Keep the existing per-sample mean: each sub-batch is
+                    # weighted by its size, not by an independently averaged loss.
+                    def subset(value, take):
+                        if isinstance(value, torch.Tensor) and value.ndim and value.shape[0] == batch_size:
+                            return value.index_select(0, take.to(value.device))
+                        if isinstance(value, dict):
+                            return {k: subset(v, take) for k, v in value.items()}
+                        return value
+                    results = []
+                    for is_video in (False, True):
+                        take = torch.where(mask == is_video)[0]
+                        part = {k: subset(v, take) for k, v in inputs.items()}
+                        part["video_only_mask"] = mask.index_select(0, take)
+                        result = self.compute_loss(actions=subset(actions, take),
+                                                   lambda_video=lambda_video, lambda_action=lambda_action, **part)
+                        results.append((len(take)/batch_size, result))
+                    return {key: sum(weight*result[key] for weight, result in results)
+                            for key in ("loss", "loss_video", "loss_action")}
+
         vb = self.video_backbone
         action_scheduler = self.action_backbone.scheduler
         _dtype = self.dtype

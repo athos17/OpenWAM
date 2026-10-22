@@ -166,6 +166,8 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             return
         logger.info("Enabled dual self-attn MoT compile with torch.compile kwargs=%s", kwargs)
 
+    supports_video_only_training = True
+
     def forward(
         self,
         noisy_actions: Optional[Tensor],
@@ -184,7 +186,13 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
                 "architecture.__init__ to enable forward()."
             )
 
-        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
+        strict_video_only = pipeline_inputs.pop("_strict_video_only", False)
+        if strict_video_only:
+            if noisy_actions is not None or proprio is not None:
+                raise ValueError("Strict video-only forward cannot consume actions or proprio")
+            pipeline_inputs.pop("_proprio_sample_mask", None)
+        else:
+            pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
         action_context = pipeline_inputs.get("context")
         action_context_mask = pipeline_inputs.get("context_mask")
         if action_context is not None and action_context_mask is None and pipeline_inputs.get("seq_lens") is not None:

@@ -1,0 +1,50 @@
+type: mixture
+weight_strategy: proportional
+seed: 42
+datasets:
+  assemble_gears_on_base:
+    type: sharpadex_tianji
+    dataset_dir: /mnt/pfs/v89atp/workspace/datasets/sharpadex_tianji_pilot_20261021/assemble_gears_on_base
+    action_mode: eef
+    unify_action: true
+    unify_action_map: &id001
+    - 0-8
+    - 10-31
+    - 34-42
+    - 44-65
+    unify_state_map: &id002
+    - 0-8
+    - 10-31
+    - 34-42
+    - 44-65
+    normalize_mode: min-max
+    num_frames: 33
+    video_stride: 4
+    window_stride: 1
+    height: 384
+    width: 320
+    multiview: true
+    camera_layout: &id003
+    - observation.images.left_head
+    - observation.images.left_wrist
+    - observation.images.right_wrist
+    color_jitter: &id004
+      enabled: false
+    split: train
+  collect_waste_into_bin:
+    type: sharpadex_tianji
+    dataset_dir: /mnt/pfs/v89atp/workspace/datasets/sharpadex_tianji_pilot_20261021/collect_waste_into_bin
+    action_mode: eef
+    unify_action: true
+    unify_action_map: *id001
+    unify_state_map: *id002
+    normalize_mode: min-max
+    num_frames: 33
+    video_stride: 4
+    window_stride: 1
+    height: 384
+    width: 320
+    multiview: true
+    camera_layout: *id003
+    color_jitter: *id004
+    split: train

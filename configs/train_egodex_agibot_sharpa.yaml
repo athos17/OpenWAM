@@ -1,0 +1,22 @@
+# Three-source training with trainable video, action and proprio branches.
+defaults:
+  - train
+  - override dataloader: egodex_agibot_sharpa
+  - _self_
+
+training:
+  num_epochs: 1
+  batch_size: 1
+  # Default: 8 GPUs * 1 sample * 384 microsteps = effective batch 3072.
+  gradient_accumulation_steps: 384
+  # Component initialization follows configs/model. To warm-start Alpha, set
+  # finetune_ckpt_path explicitly; bounded acceptance does so and overrides steps.
+  finetune_ckpt_path: null
+  output_path: /mnt/pfs/v89atp/workspace/outputs/egodex_agibot_sharpa
+  save_full_states_for_resume: true
+  save_steps: 3840
+  dataset_num_workers: 4
+
+project:
+  seed: 42
+  wandb: null

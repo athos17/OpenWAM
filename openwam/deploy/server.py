@@ -358,7 +358,9 @@ def build_server_from_config(
     deploy_cfg = cfg if cfg is not None else OmegaConf.create({})
     _validate_inference_config(deploy_cfg)
     _normalize_compile_enabled_in_cfg(deploy_cfg)
-    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device, ckpt_name=ckpt_name)
+    source = OmegaConf.select(deploy_cfg, "normalization_source", default=None)
+    loader_kwargs = {"normalization_source": source} if source is not None else {}
+    training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device, ckpt_name=ckpt_name, **loader_kwargs)
     merged = merge_deploy_cfg(training_cfg, deploy_cfg)
     engine = JointInferenceEngine(cfg=merged, architecture=architecture)
     return PolicyServer(engine=engine, cfg=merged, readiness_token=readiness_token)
@@ -465,6 +467,8 @@ def _build_argparser() -> argparse.ArgumentParser:
         default=None,
         help="Inference device (default: device from the deploy yaml, else cuda).",
     )
+    parser.add_argument("--normalization-source", type=str, default=None,
+                        help="Robot source name from a mixture checkpoint, e.g. agibot or sharpa.")
     parser.add_argument("--host", type=str, default=None, help="WebSocket bind host override.")
     parser.add_argument("--port", type=int, default=None, help="WebSocket port override.")
     parser.add_argument("--readiness-token", help=argparse.SUPPRESS)
@@ -635,6 +639,9 @@ def resolve_deploy_args(args):
     cfg = _load_deploy_yaml(args.config)
     if args.overrides:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(args.overrides))
+
+    if getattr(args, "normalization_source", None) is not None:
+        OmegaConf.update(cfg, "normalization_source", args.normalization_source, force_add=True)
 
     cfg = _apply_inference_overrides(cfg, args)
     cfg = _apply_execution_cli_overrides(cfg, args)

@@ -1,5 +1,6 @@
 # --- Base deploy settings ---
 checkpoint_path: null          # Default checkpoint dir; --ckpt-dir overrides
+normalization_source: null     # Required for mixture checkpoints: agibot / sharpa
 device: cuda:0
 server:
   host: "0.0.0.0"

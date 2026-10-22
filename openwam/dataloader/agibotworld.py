@@ -334,7 +334,9 @@ class AgiBotWorldDataset(LeRobotV3Reader):
     DEFAULT_NORMALIZE_MODE = None
 
     WRIST_DECODE_TOLERATED = (Exception,)
-    CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + ("use_segment_annotations", "segment_max_trim_ratio")
+    CONFIG_KEYS = LeRobotV3Reader.CONFIG_KEYS + (
+        "use_segment_annotations", "segment_max_trim_ratio", "enable_action_supervision"
+    )
 
     def __init__(
         self,
@@ -344,6 +346,7 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         unify_action_map=None,
         use_segment_annotations: bool = True,
         segment_max_trim_ratio: float | None = None,
+        enable_action_supervision: bool = True,
         **kwargs,
     ):
         """Detect the bucket flavor + base motion and wire the finger / move scatter.
@@ -364,6 +367,8 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         dex → 20-D pose with grip slots masked.
 
         Args:
+            enable_action_supervision: False keeps the numeric values available
+                but masks both action and proprio, and selects video-only training.
             use_segment_annotations: honor ``segment_flag`` / ``segment_delta``
                 (see :meth:`_filter_episodes`). False → full segments, the
                 pre-annotation behavior.
@@ -374,6 +379,7 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         """
 
         self._is_dex = Path(dataset_dir).name in _DEX_BUCKET_IDS
+        self._enable_action_supervision = bool(enable_action_supervision)
 
         action_moves, state_moves = _bucket_base_motion_flags(dataset_dir) if unify_action else (False, False)
         self._action_has_move = bool(action_moves)
@@ -472,6 +478,11 @@ class AgiBotWorldDataset(LeRobotV3Reader):
                 self.PROPRIO_DIM_MASK = GRIP_EXCLUDED_DIM_MASK
         else:
             self.NEEDED_COLS = (_GRIP_COLS + move_cols) if self._unify else _GRIP_COLS
+        if not self._enable_action_supervision:
+            # Set raw-width masks before the base class builds unified masks.
+            # This covers both gripper/dex layouts and optional base motion.
+            self.ACTION_DIM_MASK = np.zeros(self._raw_action_dim, dtype=bool)
+            self.PROPRIO_DIM_MASK = np.zeros(self._raw_action_dim, dtype=bool)
         return self.HEAD_CAMERA, self.LEFT_WRIST_CAMERA, self.RIGHT_WRIST_CAMERA
 
     def _load_stats(self, info: dict):
@@ -726,9 +737,21 @@ class AgiBotWorldDataset(LeRobotV3Reader):
         raw = self._append_move(raw, win, "observation.state.robot_velocity", 1)
         return self._normalize_array(raw, self._proprio_norm_stats)
 
+    def _getitem_impl(self, idx: int) -> dict:
+        sample = super()._getitem_impl(idx)
+        if not self._enable_action_supervision:
+            # Explicit routing also removes action/proprio from video conditioning;
+            # loss masks alone would still allow gradients through those streams.
+            sample["training_modality"] = "video_only"
+        return sample
+
     @property
     def robot_type(self):
         return self._robot_type
+
+    @property
+    def training_modality(self):
+        return "video_action" if self._enable_action_supervision else "video_only"
 
     @classmethod
     def _multibucket_wrapper(cls):
@@ -740,6 +763,35 @@ class MultiAgiBotWorldDataset(MultiLeRobotV3Reader):
 
     def __init__(self, buckets: List[AgiBotWorldDataset]):
         super().__init__(buckets)
+        modalities = {getattr(b, "training_modality", "video_action") for b in buckets}
+        if len(modalities) != 1:
+            raise DataContractError("AgiBot source buckets must share one training modality")
+        self.training_modality = modalities.pop()
+        # Converted datasets can package one shared 80-D action/state artifact.
+        # Samples are already normalized; this path is only for checkpoint export.
+        self.normalization_stats_path = None
+        roots = {b._dataset_dir.parent.resolve() for b in self._buckets}
+        modes = {b._normalize_mode for b in self._buckets}
+        if len(roots) == 1 and all(b._unify for b in self._buckets) and modes.isdisjoint({None, "none", "null"}):
+            root = next(iter(roots))
+            manifest_path = root / "meta" / "normalization_manifest.json"
+            if manifest_path.is_file():
+                manifest = json.loads(manifest_path.read_text())
+                if (manifest.get("schema_version") != 2 or manifest.get("action_key") != "eef"
+                        or manifest.get("state_key") != "eef_state"):
+                    raise DataContractError("Packaged AgiBot normalizer requires schema 2 with eef/eef_state")
+                if modes != {manifest["normalize_mode"]} or manifest["unified_dim"] != 80:
+                    raise DataContractError("Packaged AgiBot normalizer mode/dimension disagrees with reader")
+                for filename, hash_key in (("stats_g2a.json", "stats_g2a_sha256"),
+                                           ("normalization_stats.npy", "normalization_stats_sha256")):
+                    path = root / "meta" / filename
+                    if hashlib.sha256(path.read_bytes()).hexdigest() != manifest[hash_key]:
+                        raise DataContractError(f"Packaged AgiBot normalizer changed: {path}")
+                artifact = np.load(root / "meta" / "normalization_stats.npy", allow_pickle=True).item()
+                if (not isinstance(artifact, dict) or "proprio_eef" in artifact
+                        or not all(isinstance(artifact.get(key), dict) for key in ("eef", "eef_state"))):
+                    raise DataContractError("Packaged AgiBot normalizer must contain eef/eef_state stats dicts")
+                self.normalization_stats_path = str(root / "meta" / "normalization_stats.npy")
         n_dex = sum(1 for b in self._buckets if getattr(b, "_is_dex", False))
         logger.info(
             "MultiAgiBotWorldDataset: %d datasets (%d dex-hand, %d grippered), %d windows",

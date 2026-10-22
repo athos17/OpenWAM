@@ -1,0 +1,36 @@
+# Single-source entry point. No mixture weights are specified.
+defaults:
+  - train
+  - override dataloader: egodex_300h_video
+  - _self_
+
+model:
+  # Freeze unused branches for a standalone EgoDex run. The per-sample loss
+  # route also enforces isolation when these branches are trainable elsewhere.
+  freeze:
+    - video_backbone.text_encoder
+    - video_backbone.reason1
+    - video_backbone.vae
+    - video_backbone.image_encoder
+    - video_backbone.video_encoder
+    - action_backbone
+    - proprio_encoder
+
+training:
+  num_epochs: 1
+  batch_size: 1
+  # Default launch: 8 GPUs, 8 * 1 * 384 = effective batch 3072.
+  # For N GPUs and microbatch M, use accumulation = 3072 / (N * M).
+  # Bounded acceptance runs override this to 1; that is not the final recipe.
+  gradient_accumulation_steps: 384
+  finetune_ckpt_path: /mnt/pfs/v89atp/workspace/models/OpenWAM-Alpha-Pretrain-Foundation-Model
+  output_path: /mnt/pfs/v89atp/workspace/outputs/egodex_video
+  save_full_states_for_resume: true
+  # Save on optimizer boundaries (10 updates at the default 8-GPU launch).
+  # When changing accumulation, keep this an integer multiple of it.
+  save_steps: 3840
+  dataset_num_workers: 4
+
+project:
+  seed: 42
+  wandb: null

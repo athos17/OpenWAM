@@ -88,6 +88,14 @@ def _register_builtins():
     from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
     from openwam.dataloader.vlabench import VLABenchDataset
 
+    from openwam.dataloader.sharpadex_tianji import SharpaDexTianjiDataset
+    register_dataset("sharpadex_tianji")(SharpaDexTianjiDataset)
+    from openwam.dataloader.sharpadex_tianji_global import SharpaDexTianjiGlobalDataset
+    register_dataset("sharpadex_tianji_global")(SharpaDexTianjiGlobalDataset)
+
+    from openwam.dataloader.egodex_video import EgoDexVideoDataset
+    register_dataset("egodex_video")(EgoDexVideoDataset)
+
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
     register_dataset("robodojo")(MultiTaskRoboDojoDataset)
     register_dataset("agibotworld")(MultiAgiBotWorldDataset)

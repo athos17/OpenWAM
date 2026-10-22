@@ -57,6 +57,8 @@ training:
   # --- Finetune / Resume (mutually exclusive; both point to a training output dir, latest step auto-selected) ---
   finetune_ckpt_path: null   # non-null: warm-start from latest weights in this dir (step from 0, new output dir)
   resume_ckpt_path: null     # non-null: resume full state from latest in this dir (output reuses this dir)
+  action_backbone_init: pretrained  # pretrained | random; applies only to new finetune runs
+  action_init_seed: null     # Required with random: shared CPU constructor seed across all ranks
 
   # --- Data loading ---
   dataset_num_workers: 8          # DataLoader num_workers (0 = main process)

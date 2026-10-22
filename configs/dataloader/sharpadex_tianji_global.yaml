@@ -1,0 +1,27 @@
+type: sharpadex_tianji_global
+dataset_dir: /mnt/pfs/v89atp/workspace/dataset/sharpadex_tianji_global_v1_20261022/buckets
+action_mode: eef
+unify_action: true
+unify_action_map:
+- 0-8
+- 10-31
+- 34-42
+- 44-65
+unify_state_map:
+- 0-8
+- 10-31
+- 34-42
+- 44-65
+normalize_mode: min-max
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+camera_layout:
+- observation.images.left_head
+- observation.images.left_wrist
+- observation.images.right_wrist
+color_jitter:
+  enabled: false

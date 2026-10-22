@@ -1,0 +1,21 @@
+type: agibotworld
+action_mode: eef
+dataset_dir: /mnt/pfs/v89atp/workspace/dataset/agibot_pretrain_v1
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+split: train
+unify_action: true
+normalize_mode: quantile
+enable_action_supervision: true
+use_segment_annotations: false
+segment_max_trim_ratio: null
+total_hours: null
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
