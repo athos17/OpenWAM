@@ -591,7 +591,10 @@ class OpenWAMTrainer:
     def _configure_input_fast_paths(self, arch) -> None:
         """Opt-in frozen-encoder fast paths (``training.vae_cudnn_benchmark`` /
         ``training.text_embed_cache``); runs after frozen modules reach the device."""
-        t = self.cfg.training
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return
+        t = cfg.training
         vb = getattr(arch, "video_backbone", None)
         if bool(t.get("vae_cudnn_benchmark", False)):
             if not hasattr(vb, "set_vae_encode_options"):
