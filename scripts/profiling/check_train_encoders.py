@@ -48,6 +48,13 @@ def load_vae(ckpt: str, device, dtype=torch.bfloat16):
     return vae.to(device=device, dtype=dtype).eval().requires_grad_(False)
 
 
+def conv3d_memory_format(module, fmt) -> None:
+    """``module.to(memory_format=...)`` rejects the VAE's non-5D params; convert conv weights only."""
+    for m in module.modules():
+        if isinstance(m, torch.nn.Conv3d):
+            m.weight.data = m.weight.data.contiguous(memory_format=fmt)
+
+
 def sync_time(fn, iters: int, warmup: int = 1):
     for _ in range(warmup):
         out = fn()
@@ -177,8 +184,8 @@ def main() -> None:
         r["autotune_vs_deterministic"] = diff(lat, base)
         r["autotune_vs_fp32"] = diff(lat, ref32)
 
-        vae.model.to(memory_format=torch.channels_last_3d)
         try:
+            conv3d_memory_format(vae.model, torch.channels_last_3d)
             xcl = x.contiguous(memory_format=torch.channels_last_3d)
             with _cudnn_autotune(True):
                 lat_cl, r["encode_autotune_channels_last_s"] = sync_time(lambda: vae.batch_encode(xcl, device),
@@ -187,7 +194,7 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001 - report, keep going
             r["autotune_channels_last_error"] = f"{type(e).__name__}: {e}"
         finally:
-            vae.model.to(memory_format=torch.contiguous_format)
+            conv3d_memory_format(vae.model, torch.contiguous_format)
 
         half = x.shape[0] // 2
         sub, r["encode_deterministic_subbatch2_s"] = sync_time(
