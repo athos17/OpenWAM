@@ -1,0 +1,24 @@
+# OpenWAM Alpha Wan + proprio; randomly initialized ActionDiT.
+defaults:
+  - train_egodex_agibot_sharpa
+  - _self_
+
+training:
+  finetune_ckpt_path: /mnt/pfs/v89atp/workspace/models/OpenWAM-Alpha-Pretrain-Foundation-Model/checkpoint_step_154000.safetensors
+  action_backbone_init: random
+  action_init_seed: 42
+  batch_size: 16
+  gradient_accumulation_steps: 6   # 4 nodes * 8 GPUs * 16 * 6 = 3072
+  num_epochs: 1
+  max_steps: null
+  initialize_model_on_cpu: true
+  output_path: /mnt/pfs/v89atp/workspace/outputs/action_random_32gpu
+  save_steps: 600                 # 100 optimizer updates; must be an accumulation boundary
+  save_full_states_for_resume: true
+  keep_last_k_ckpts: 2
+  dataset_num_workers: 4
+
+project:
+  name: openwam-action-random-32gpu
+  seed: 42
+  wandb: null

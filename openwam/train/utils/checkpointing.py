@@ -1,6 +1,7 @@
 """Checkpoint save / load / management utilities."""
 
 import glob as _glob
+import json
 import logging
 import os
 import re
@@ -17,6 +18,36 @@ _NORMALIZATION_SEMANTIC_KEYS = (
 
 
 # --- Deploy assets (write-once) ---
+
+
+def save_training_data_contract(output_dir: str, dataset) -> None:
+    """Bind manifest-driven datasets to their index, modality and window policy."""
+    contract = getattr(dataset, "training_data_contract", None)
+    if contract is None:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "training_data_contract.json")
+    if os.path.exists(path):
+        verify_resume_training_data_contract(output_dir, dataset)
+        return
+    with open(path, "w") as f:
+        json.dump(contract, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+
+def verify_resume_training_data_contract(output_dir: str, dataset) -> None:
+    contract = getattr(dataset, "training_data_contract", None)
+    path = os.path.join(output_dir, "training_data_contract.json")
+    if contract is None:
+        if os.path.exists(path):
+            raise ValueError("resume dataset no longer exposes the saved training data contract")
+        return
+    if not os.path.isfile(path):
+        raise ValueError("resume checkpoint is missing training_data_contract.json")
+    with open(path) as f:
+        saved = json.load(f)
+    if saved != contract:
+        raise ValueError("resume training data contract differs: index, modality or sampling settings changed")
 
 
 def save_config(output_dir: str, cfg):
@@ -43,6 +74,14 @@ def save_normalization_stats(output_dir: str, dataset) -> None:
     matching the saved config's ``action_mode``.
     """
     import shutil
+
+    save_training_data_contract(output_dir, dataset)
+
+    if hasattr(type(dataset), "normalization_sources"):
+        from openwam.dataloader.utils.normalization_package import save_normalization_package
+
+        save_normalization_package(output_dir, dataset.normalization_sources)
+        return
 
     dst = os.path.join(output_dir, "normalization_stats.npy")
     if os.path.exists(dst):
@@ -145,6 +184,14 @@ def verify_resume_normalization_stats(output_dir: str, dataset) -> None:
     shared semantic markers are still compared strictly. Direct the user to
     ``finetune_ckpt_path`` instead of silently continuing or replacing.
     """
+    verify_resume_training_data_contract(output_dir, dataset)
+
+    if hasattr(type(dataset), "normalization_sources"):
+        from openwam.dataloader.utils.normalization_package import verify_normalization_package
+
+        verify_normalization_package(output_dir, dataset.normalization_sources)
+        return
+
     import pickle
 
     import numpy as np

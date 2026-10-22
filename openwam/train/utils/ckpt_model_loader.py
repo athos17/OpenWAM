@@ -27,6 +27,9 @@ kept independent so training never imports deploy code.
 import logging
 import os
 import shutil
+from contextlib import nullcontext
+
+import torch
 
 from omegaconf import DictConfig, OmegaConf, open_dict
 
@@ -213,7 +216,48 @@ def warn_live_model_cfg_ignored(ckpt_cfg: DictConfig, cfg: DictConfig, ckpt_dir:
         print(line, flush=True)
 
 
-def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, override_cfg: DictConfig = None):
+def load_pretrained_except_action(architecture, weights: str, *, seed: int) -> None:
+    """Keep the freshly constructed ActionDiT; strictly load every other tensor.
+
+    This includes standalone modulation parameters that recursive
+    ``reset_parameters`` would miss. Module objects remain unchanged, preserving
+    the MoT driver's references to both backbones.
+    """
+    from safetensors import safe_open
+
+    prefix = "action_backbone."
+    expected = architecture.state_dict()
+    action_keys = {name for name in expected if name.startswith(prefix)}
+    if not action_keys or any(expected[name].is_meta for name in action_keys):
+        raise ValueError("Random action initialization requires a materialized ActionDiT")
+    with safe_open(weights, framework="pt", device="cpu") as source:
+        keys = set(source.keys())
+        missing = set(expected) - action_keys - keys
+        unexpected = keys - set(expected)
+        if missing or unexpected:
+            raise RuntimeError(f"Strict retained-weight load failed: missing={sorted(missing)}, unexpected={sorted(unexpected)}")
+        retained = {name: source.get_tensor(name) for name in keys if not name.startswith(prefix)}
+    result = architecture.load_state_dict(
+        retained, strict=False, assign=any(t.is_meta for t in expected.values())
+    )
+    if set(result.missing_keys) != action_keys or result.unexpected_keys:
+        raise RuntimeError(f"Selective initialization failed: {result}")
+    if any(t.is_meta for t in architecture.state_dict().values()):
+        raise RuntimeError("Selective initialization left unmaterialized tensors")
+    architecture.initialization_provenance = {
+        "action_backbone_init": "random",
+        "action_init_seed": seed,
+        "action_initializer": "original ActionDiT constructor",
+        "source_weights": os.path.abspath(weights),
+        "random_tensor_names": sorted(action_keys),
+        "retained_tensor_names": sorted(retained),
+    }
+
+
+def build_architecture_from_ckpt_dir(
+    ckpt_dir: str, *, weights_required: bool, override_cfg: DictConfig = None,
+    reset_action_backbone: bool = False, action_init_seed: int | None = None,
+):
     """Build the architecture from a self-contained checkpoint source.
 
     Skeletons come from the resolved model config's
@@ -236,6 +280,12 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, o
     Returns ``(resolved_arch, architecture, ckpt_cfg)``.
     """
     from openwam.model import build_architecture, resolve_architecture_config
+
+    if reset_action_backbone:
+        if not weights_required:
+            raise ValueError("ActionDiT random initialization is only allowed for a new finetune run, never resume")
+        if type(action_init_seed) is not int or not 0 <= action_init_seed < 2**63:
+            raise ValueError("Random action initialization requires an integer action_init_seed in [0, 2**63)")
 
     ckpt_dir, explicit_weights = _resolve_ckpt_source(ckpt_dir)
     tag = "finetune" if weights_required else "resume"
@@ -277,7 +327,13 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, o
     vb_params["_materialize_weights"] = not weights_required
 
     logger.info("[%s] building architecture from self-contained ckpt dir: %s", tag, ckpt_dir)
-    architecture = build_architecture(resolved_arch.registry_name, params)
+    # Rank-local training seeds must not give ranks different random weights.
+    # The constructor initializes ActionDiT on CPU; restore the caller's CPU
+    # RNG afterwards without reseeding any CUDA device.
+    with torch.random.fork_rng(devices=[]) if reset_action_backbone else nullcontext():
+        if reset_action_backbone:
+            torch.random.default_generator.manual_seed(action_init_seed)
+        architecture = build_architecture(resolved_arch.registry_name, params)
 
     if weights_required:
         weights = explicit_weights or find_latest_weights(ckpt_dir)
@@ -285,7 +341,11 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, o
         # Plain print so the warm-start is visible on the launch terminal even
         # when logger output is drowned out; non-main ranks have print disabled.
         print(f"[{tag}] loading pretrained weights: {weights}", flush=True)
-        architecture.load_checkpoint(weights)
+        if reset_action_backbone:
+            load_pretrained_except_action(architecture, weights, seed=action_init_seed)
+            print(f"[{tag}] ActionDiT kept at constructor initialization, seed={action_init_seed}", flush=True)
+        else:
+            architecture.load_checkpoint(weights)
         print(f"[{tag}] pretrained weights loaded OK", flush=True)
     return resolved_arch, architecture, ckpt_cfg
 

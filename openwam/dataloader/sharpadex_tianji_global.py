@@ -1,27 +1,30 @@
 """Global EEF62 pretraining data with source video offsets and command masks."""
-import os
+from pathlib import Path
 import numpy as np
 from openwam.dataloader.sharpadex_tianji import SharpaDexTianjiDataset
 from openwam.dataloader.bases.multi_lerobot_v3_reader import MultiLeRobotV3Reader
 from openwam.dataloader.utils.normalization import apply_normalization
 
 
-class SharpaDexTianjiGlobalBuckets(MultiLeRobotV3Reader):
-    """Root-mode wrapper exposing the one train-split stats file all buckets share.
+class MultiSharpaDexTianjiGlobalDataset(MultiLeRobotV3Reader):
+    """Expose the one shared statistics artifact for checkpoint export.
 
-    Every bucket's meta/normalization_stats.npy links to the dataset-root copy; the
-    trainer copies ``normalization_stats_path`` into each run dir, which deploy needs.
+    Samples are already normalized by each bucket. Keep normalization_stats=None
+    to prevent a second normalization; only expose the artifact's source path.
     """
 
     def __init__(self, buckets):
         super().__init__(buckets)
-        paths = [b.normalization_stats_path for b in self._buckets]
+        paths = [getattr(bucket, 'normalization_stats_path', None) for bucket in buckets]
         self.normalization_stats_path = None
-        if any(paths):
-            resolved = {os.path.realpath(p) for p in paths if p}
-            if not all(paths) or len(resolved) != 1:
-                raise ValueError(f'SharpaDex buckets must share one normalization stats file, got {sorted(resolved)}')
-            self.normalization_stats_path = resolved.pop()
+        if all(path is None for path in paths):
+            return
+        if any(path is None for path in paths):
+            raise ValueError('Global SharpaDex mixes normalized and unnormalized buckets')
+        resolved = {Path(path).resolve(strict=True) for path in paths}
+        if len(resolved) != 1:
+            raise ValueError('Global SharpaDex requires one shared normalization file')
+        self.normalization_stats_path = str(resolved.pop())
 
 
 class SharpaDexTianjiGlobalDataset(SharpaDexTianjiDataset):
@@ -52,19 +55,18 @@ class SharpaDexTianjiGlobalDataset(SharpaDexTianjiDataset):
         if x.shape[1]!=62 or not np.isfinite(x).all():raise ValueError('Invalid EEF62 state')
         return apply_normalization(x,self._proprio_stats,self._normalize_mode)
 
-    def _finalize_action(self,action,actual_raw_len,hold=False):
-        # Accept the newer caller's argument, but SharpaDex always disables hold.
-        # Omitting hold keeps zero-padding in both old and new OpenWAM bases.
-        values,mask=super()._finalize_action(action,actual_raw_len)
-        n=min(actual_raw_len,len(self._window_action_validity),len(mask))
-        valid=np.zeros_like(mask,dtype=bool)
+    def _finalize_action(self,action,actual_raw_len,**kwargs):
+        # OpenWAM-fast's reader passes the optional hold argument here.
+        values,mask=super()._finalize_action(action,actual_raw_len,**kwargs)
+        n=min(len(self._window_action_validity),len(mask))
         if self._unify:
-            valid[:n,self._unify_dst_index]=self._window_action_validity[:n]
-        else:valid[:n]=self._window_action_validity[:n]
-        mask&=valid
+            valid=np.zeros((n,self._unify_dim),dtype=bool)
+            valid[:,self._unify_dst_index]=self._window_action_validity[:n]
+        else:valid=self._window_action_validity[:n]
+        mask[:n]&=valid
         values[~mask]=0.
         return values,mask
 
     @classmethod
     def _multibucket_wrapper(cls):
-        return SharpaDexTianjiGlobalBuckets
+        return MultiSharpaDexTianjiGlobalDataset

@@ -1,0 +1,11 @@
+# All three readers expose the 80D unified space and identical video geometry.
+defaults:
+  - egodex_300h_video@datasets.egodex
+  - agibot_pretrain_v1@datasets.agibot
+  - sharpadex_tianji_global@datasets.sharpa
+  - _self_
+
+type: mixture
+weight_strategy: proportional
+# The trainer aligns video-only vs robot modality across each global microbatch.
+# Proportional weights visit every source window once per epoch (plus tail padding).

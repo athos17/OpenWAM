@@ -8,6 +8,7 @@ selected source name with every item.
 
 import copy
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
@@ -53,6 +54,8 @@ class MixtureDataset(BaseDataset):
         action_dim_override: Optional[int] = None,
         names: Optional[Sequence[str]] = None,
         strict_action_dim: bool = False,
+        source_configs: Optional[Sequence[dict]] = None,
+        weight_strategy: Optional[str] = None,
     ):
         if not datasets:
             raise ValueError("MixtureDataset requires at least one sub-dataset")
@@ -69,6 +72,16 @@ class MixtureDataset(BaseDataset):
             if len(names) != len(self._datasets):
                 raise ValueError(f"names length ({len(names)}) != datasets length ({len(self._datasets)})")
             self._names = [str(n) for n in names]
+        if len(set(self._names)) != len(self._names):
+            raise ValueError("MixtureDataset source names must be unique")
+        self.source_configs = copy.deepcopy(list(source_configs)) if source_configs is not None else None
+        if self.source_configs is not None and len(self.source_configs) != len(self._datasets):
+            raise ValueError("source_configs must match the number of sources")
+        self.weight_strategy = weight_strategy or ("proportional" if weights is None else "manual")
+        self.training_layout = None
+        self.source_modalities = [getattr(d, "training_modality", "video_action") for d in self._datasets]
+        if any(m not in ("video_only", "video_action") for m in self.source_modalities):
+            raise ValueError(f"Unsupported mixture modalities: {self.source_modalities}")
 
         dims = [d.action_dim for d in self._datasets]
         if strict_action_dim:
@@ -166,6 +179,9 @@ class MixtureDataset(BaseDataset):
             return
         self._seed = new_seed
         self._build_index_map()
+        for dataset in self._datasets:
+            if hasattr(dataset, "set_epoch"):
+                dataset.set_epoch(epoch)
 
     def _build_index_map(self):
         """Build the shuffled ``(dataset_idx, sample_idx)`` virtual index.
@@ -178,6 +194,8 @@ class MixtureDataset(BaseDataset):
         total_real = sum(len(d) for d in self._datasets)
         entries = []
         self._virtual_counts = [0] * len(self._datasets)
+        # Draws the partial pass of each source (see below) afresh each epoch.
+        rng = np.random.RandomState(self._seed)
         for di, (ds, w) in enumerate(zip(self._datasets, self._weights)):
             n_real = len(ds)
             if n_real == 0 or w <= 0.0:
@@ -197,16 +215,20 @@ class MixtureDataset(BaseDataset):
             raise RuntimeError("MixtureDataset: all sub-sources are empty or zero-weight; nothing to sample.")
 
         # Four-source pretraining has hundreds of millions of windows. Fill one
-        # map with bounded temporary storage, then shuffle its rows in place;
-        # this keeps the legacy seeded order without a second map/permutation.
+        # map with bounded temporary storage, then shuffle its rows in place.
+        # Full passes preserve coverage; a partial pass (virtual_n % n_real rows)
+        # is drawn without replacement instead of always taking a prefix.
         combined = np.empty((sum(self._virtual_counts), 2), dtype=np.int32)
         offset = 0
         block_size = 1_000_000
         for di, n_real, virtual_n in entries:
             combined[offset : offset + virtual_n, 0] = di
-            for start in range(0, virtual_n, block_size):
-                end = min(start + block_size, virtual_n)
+            full = virtual_n - virtual_n % n_real
+            for start in range(0, full, block_size):
+                end = min(start + block_size, full)
                 combined[offset + start : offset + end, 1] = np.arange(start, end, dtype=np.int64) % n_real
+            if full < virtual_n:
+                combined[offset + full : offset + virtual_n, 1] = rng.choice(n_real, size=virtual_n - full, replace=False)
             offset += virtual_n
         # One eight-byte row per shuffle item uses NumPy's fast 1-D path.
         np.random.RandomState(self._seed).shuffle(combined.view(np.int64).reshape(-1))
@@ -241,6 +263,36 @@ class MixtureDataset(BaseDataset):
     @property
     def normalization_stats(self) -> Optional[dict]:
         return None
+
+    @property
+    def normalization_sources(self) -> dict:
+        """Independent, explicitly configured source artifacts for save/deploy."""
+        if self.source_configs is None:
+            raise ValueError("Saving a mixture requires source_configs; build it from the dataset config")
+        return {name: {"config": copy.deepcopy(config), "training_modality": modality,
+                       "stats_path": getattr(dataset, "normalization_stats_path", None)}
+                for name, dataset, config, modality in zip(
+                    self._names, self._datasets, self.source_configs, self.source_modalities)}
+
+    @property
+    def training_data_contract(self) -> dict:
+        from openwam.dataloader.utils.normalization_package import file_sha256
+
+        sources = {}
+        for name, dataset, config, modality in zip(
+                self._names, self._datasets, self.source_configs or [{} for _ in self._datasets], self.source_modalities):
+            root = Path(config["dataset_dir"]) if config.get("dataset_dir") else None
+            manifest = None if root is None else next(
+                (p / "dataset_manifest.json" for p in (root, root.parent) if (p / "dataset_manifest.json").is_file()), None)
+            stats = getattr(dataset, "normalization_stats_path", None)
+            sources[name] = {"config": copy.deepcopy(config), "windows": len(dataset), "training_modality": modality,
+                             "contract": copy.deepcopy(getattr(dataset, "training_data_contract", None)),
+                             "dataset_manifest_sha256": file_sha256(manifest) if manifest else None,
+                             "normalization_sha256": file_sha256(stats) if stats else None}
+        return {"schema_version": 1, "dataset_type": "mixture", "seed": self._base_seed,
+                "weight_strategy": self.weight_strategy, "weights": dict(zip(self._names, self._weights)),
+                "source_order": self.names, "sources": sources, "training_layout": self.training_layout,
+                "sampling_algorithm": "full_passes_random_partial_v2", "virtual_windows": len(self)}
 
     @property
     def datasets(self) -> List[BaseDataset]:
@@ -433,4 +485,14 @@ class MixtureDataset(BaseDataset):
             action_dim_override=_get(config, "action_dim_override") if has_override_field else None,
             names=enabled_names,
             strict_action_dim=not has_override_field,
+            source_configs=[_plain_config(c) for c in enabled_cfgs],
+            weight_strategy=weight_strategy,
         )
+
+
+def _plain_config(config):
+    from omegaconf import OmegaConf
+
+    if OmegaConf.is_config(config):
+        return OmegaConf.to_container(config, resolve=True)
+    return OmegaConf.to_container(OmegaConf.create(dict(config) if hasattr(config, "items") else vars(config)), resolve=True)

@@ -1,0 +1,19 @@
+type: egodex_video
+dataset_dir: /mnt/pfs/v89atp/workspace/dataset/egodex_300h_video_v1
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+camera_layout:
+  - observation.images.camera
+  - __missing_left__
+  - __missing_right__
+enable_action_supervision: false
+enable_proprio_supervision: false
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
