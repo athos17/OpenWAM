@@ -31,6 +31,14 @@ training:
   # --- DeepSpeed / precision ---
   mixed_precision: bf16           # bf16 / fp16 / no — training + deploy compute dtype
   zero_stage: 2                   # DeepSpeed ZeRO stage: 1 or 2 (CLI override: training.zero_stage=1)
+  deepspeed_zero:                 # merged into DeepSpeed zero_optimization; null = DeepSpeed default
+    overlap_comm: null            # true: overlap gradient reduce-scatter with backward (ZeRO-2 default false)
+    contiguous_gradients: null
+    reduce_bucket_size: null      # elements per gradient reduce bucket (DeepSpeed default 5e8)
+    allgather_bucket_size: null   # elements per post-step parameter all-gather bucket (default 5e8)
+  step_timing:
+    enabled: false                # per-stage CPU / CUDA-event timing; STEP_TIMING summary every N steps
+    summary_every: 50
 
   # --- Frozen-encoder input fast paths ---
   vae_cudnn_benchmark: false             # cuDNN autotune for the frozen VAE encode only (training stays deterministic)

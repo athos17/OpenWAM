@@ -1,0 +1,24 @@
+# OpenWAM Alpha Wan + random ActionDiT on the three-source mixture, bs48 x accum2
+# (4 nodes * 8 GPUs * 48 * 2 = 3072, same effective batch as bs16 x accum6), with the
+# UMT5 embed cache, ZeRO-2 overlap_comm and per-stage step timing.
+defaults:
+  - train_action_random_32gpu
+  - _self_
+
+training:
+  batch_size: 48
+  gradient_accumulation_steps: 2
+  save_steps: 200                 # 100 optimizer updates; must be an accumulation boundary
+  output_path: /mnt/pfs/v89atp/workspace/outputs/action_random_32gpu_bs48
+  deepspeed_zero:
+    overlap_comm: true
+    contiguous_gradients: true
+    reduce_bucket_size: 200000000
+    allgather_bucket_size: 500000000
+  text_embed_cache:
+    path: /mnt/pfs/v89atp/workspace/cache/text_embed/alpha154000_three_source_b16.safetensors
+    verify_prompts: 16
+    offload_text_encoder: false
+  step_timing:
+    enabled: true
+    summary_every: 50

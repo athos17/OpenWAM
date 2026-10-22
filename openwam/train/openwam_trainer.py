@@ -43,6 +43,7 @@ from openwam.train.utils.checkpointing import (
 )
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sampler_seed
+from openwam.train.utils.step_timing import StepTimer
 from openwam.train.utils.training_utils import (
     build_cosine_scheduler,
     cfg_get,
@@ -174,6 +175,8 @@ class OpenWAMTrainer:
         )
 
         self.model = self  # self-reference some external callers expect
+        # Replaced in train() from training.step_timing; disabled stages are no-ops.
+        self.step_timer = StepTimer(enabled=False)
 
         is_main = self.accelerator is None or self.accelerator.is_main_process
         log_parameter_counts(self.architecture, is_main=is_main)
@@ -297,6 +300,9 @@ class OpenWAMTrainer:
                     skip_first,
                 )
 
+        self._setup_step_timer(batch_size * n_proc, output_path, is_main)
+        timer = self.step_timer
+
         _step_t0 = _time.monotonic()
         pbar = tqdm(total=total_steps, desc="Training", unit="step", initial=min(global_step, total_steps))
 
@@ -320,58 +326,68 @@ class OpenWAMTrainer:
             else:
                 epoch_iter = dataloader
             for batch in epoch_iter:
+                timer.begin_step()
                 if self._run_seed is not None:
                     step_seed = per_step_seed(self._run_seed, rank=self._rank, step=global_step)
                     torch.manual_seed(step_seed)
                     if torch.cuda.is_available():
                         torch.cuda.manual_seed_all(step_seed)
                 with self.accelerator.accumulate(self.architecture):
-                    losses = self.compute_loss(batch)
+                    with timer.stage("compute_loss"):
+                        losses = self.compute_loss(batch)
                     loss = losses["total"]
-                    self.accelerator.backward(loss)
+                    with timer.stage("backward"):
+                        self.accelerator.backward(loss)
 
                     grad_norm = torch.tensor(0.0, device=loss.device)
                     if self.accelerator.sync_gradients:
-                        if max_grad_norm is not None:
-                            grad_norm_val = self.accelerator.clip_grad_norm_(all_params, max_grad_norm)
-                            grad_norm = torch.tensor(float(grad_norm_val), device=loss.device)
-                        optimizer.step()
-                        if scheduler is not None:
-                            scheduler.step()
-                        optimizer.zero_grad()
+                        with timer.stage("optimizer_wrapper"):
+                            if max_grad_norm is not None:
+                                grad_norm_val = self.accelerator.clip_grad_norm_(all_params, max_grad_norm)
+                                grad_norm = torch.tensor(float(grad_norm_val), device=loss.device)
+                            optimizer.step()
+                            if scheduler is not None:
+                                scheduler.step()
+                            optimizer.zero_grad()
                         opt_step += 1
 
                 global_step += 1
 
-                metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
+                with timer.stage("metrics_reduce"):
+                    metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
+                timer.end_step()
 
                 current_lr = optimizer.param_groups[0]["lr"]
                 _now = _time.monotonic()
                 steps_per_sec = 1.0 / max(_now - _step_t0, 1e-9)
                 _step_t0 = _now
 
-                self.log_step(
-                    metrics=metrics,
-                    global_step=global_step,
-                    opt_step=opt_step,
-                    epoch=epoch,
-                    lr=current_lr,
-                    steps_per_sec=steps_per_sec,
-                    batch_size=batch_size,
-                    pbar=pbar,
-                    wandb_run=wandb_run,
-                    debug=debug,
-                    output_path=output_path,
-                )
+                with timer.stage("log_step"):
+                    self.log_step(
+                        metrics=metrics,
+                        global_step=global_step,
+                        opt_step=opt_step,
+                        epoch=epoch,
+                        lr=current_lr,
+                        steps_per_sec=steps_per_sec,
+                        batch_size=batch_size,
+                        pbar=pbar,
+                        wandb_run=wandb_run,
+                        debug=debug,
+                        output_path=output_path,
+                    )
+                timer.maybe_summarize(global_step)
 
                 # save_steps: write the weights line (+ the resumable full state when
                 # save_full_states_for_resume=true), then prune in lockstep.
                 if save_steps and global_step > 0 and global_step % save_steps == 0:
-                    save_weights(self.accelerator, self.architecture, output_path, global_step, final=False)
-                    if save_full_states_for_resume:
-                        save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
-                    if is_main:
-                        manage_checkpoints(output_path, keep_last_k)
+                    with timer.stage("checkpoint"):
+                        save_weights(self.accelerator, self.architecture, output_path, global_step, final=False)
+                        if save_full_states_for_resume:
+                            save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
+                        if is_main:
+                            manage_checkpoints(output_path, keep_last_k)
+                timer.finish_iteration()
 
                 if max_steps and global_step >= max_steps:
                     pbar.close()
@@ -553,6 +569,25 @@ class OpenWAMTrainer:
         self._configure_input_fast_paths(arch)
         return optimizer, dataloader, scheduler
 
+    def _setup_step_timer(self, samples_per_step: int, output_path: str, is_main: bool) -> None:
+        """``training.step_timing``: stage timers, incl. DeepSpeed's backward / step inside
+        ``accelerator.backward`` and the text / video encode inside ``prepare_inputs``."""
+        self.step_timer = StepTimer.from_cfg(
+            self.cfg.training.get("step_timing"),
+            samples_per_step=samples_per_step,
+            output_path=output_path,
+            is_main=is_main,
+        )
+        if not self.step_timer.enabled:
+            return
+        engine = self.architecture
+        if hasattr(engine, "backward") and hasattr(engine, "step") and hasattr(engine, "module"):
+            self.step_timer.wrap(engine, "backward", "ds_backward")
+            self.step_timer.wrap(engine, "step", "ds_step")
+        vb = getattr(self.accelerator.unwrap_model(self.architecture), "video_backbone", None)
+        if vb is not None:
+            vb._stage_timer = self.step_timer
+
     def _configure_input_fast_paths(self, arch) -> None:
         """Opt-in frozen-encoder fast paths (``training.vae_cudnn_benchmark`` /
         ``training.text_embed_cache``); runs after frozen modules reach the device."""
@@ -626,7 +661,8 @@ class OpenWAMTrainer:
             if 2 in codes or len(set(codes)) != 1:
                 raise ValueError(f"Distributed mixture requires aligned global modalities; got {codes}. Use GlobalModalitySampler.")
 
-        inputs = self.architecture.prepare_inputs(batch)
+        with self.step_timer.stage("prepare_inputs"):
+            inputs = self.architecture.prepare_inputs(batch)
         if self.lambda_action > 0 and inputs.get("actions") is None:
             raise ValueError("lambda_action > 0 but no action in data.")
 

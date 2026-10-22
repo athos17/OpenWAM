@@ -134,6 +134,7 @@ class WanBase(VideoBackbone):
         self._text_embed_cache_strict = False
         self._text_embed_cache_misses = 0
         self._vae_cudnn_benchmark = False
+        self._stage_timer = None  # trainer's StepTimer (training.step_timing), else None
 
     # ================================================================
     # Internal properties
@@ -820,6 +821,9 @@ class WanBase(VideoBackbone):
         restored right after."""
         self._vae_cudnn_benchmark = bool(cudnn_benchmark)
 
+    def _timed(self, name: str):
+        return self._stage_timer.stage(name) if self._stage_timer is not None else contextlib.nullcontext()
+
     def _encode_train_text(self, text: list) -> Tuple[Tensor, Tensor]:
         cache = self._text_embed_cache
         if cache is None:
@@ -867,12 +871,14 @@ class WanBase(VideoBackbone):
         )
 
         batch_size = len(frames)
-        context, seq_lens = self._encode_train_text(text)
+        with self._timed("encode_text"):
+            context, seq_lens = self._encode_train_text(text)
 
-        stacked_inputs = wan_encode.preprocess_video_batch(
-            frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
-        )
-        with _cudnn_autotune(self._vae_cudnn_benchmark):
+        with self._timed("preprocess_video"):
+            stacked_inputs = wan_encode.preprocess_video_batch(
+                frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
+            )
+        with self._timed("encode_video"), _cudnn_autotune(self._vae_cudnn_benchmark):
             input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
