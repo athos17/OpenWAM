@@ -64,6 +64,8 @@ training:
   # --- Finetune / Resume (mutually exclusive; both point to a training output dir, latest step auto-selected) ---
   finetune_ckpt_path: null   # non-null: warm-start from latest weights in this dir (step from 0, new output dir)
   resume_ckpt_path: null     # non-null: resume full state from latest in this dir (output reuses this dir)
+  finetune_load_prefixes: null   # finetune only: load just these ckpt key prefixes, e.g. [video_backbone.]; the rest keep the seeded fresh init
+  finetune_video_dit_path: null  # finetune only: replace video_backbone.dit.* with this Wan DiT (*.safetensors dir/file), cast to the ckpt dtype
 
   # --- Data loading ---
   dataset_num_workers: 8          # DataLoader num_workers (0 = main process)

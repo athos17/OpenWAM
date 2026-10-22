@@ -24,6 +24,7 @@ Train-side counterpart of the deploy loader (``openwam/deploy/model_loader.py``)
 kept independent so training never imports deploy code.
 """
 
+import glob
 import logging
 import os
 import shutil
@@ -213,7 +214,93 @@ def warn_live_model_cfg_ignored(ckpt_cfg: DictConfig, cfg: DictConfig, ckpt_dir:
         print(line, flush=True)
 
 
-def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, override_cfg: DictConfig = None):
+_DIT_PREFIX = "video_backbone.dit."
+_SAFETENSORS_DTYPES = {"BF16": "bfloat16", "F16": "float16", "F32": "float32"}
+
+
+def _safetensors_files(path: str) -> list[str]:
+    """A single ``.safetensors`` file, or every ``*.safetensors`` shard in a directory."""
+    files = sorted(glob.glob(os.path.join(path, "*.safetensors"))) if os.path.isdir(path) else [path]
+    if not files or not all(os.path.isfile(f) for f in files):
+        raise FileNotFoundError(f"No safetensors weights at {path}")
+    return files
+
+
+def load_partial_finetune_weights(
+    architecture, weights: str, *, load_prefixes=None, video_dit_path: str | None = None
+) -> None:
+    """Warm-start only part of the architecture; everything else keeps its fresh init.
+
+    ``load_prefixes`` selects which ckpt keys are loaded (e.g. ``["video_backbone."]``
+    leaves the action branch and proprio projection at the seeded random init).
+    ``video_dit_path`` replaces ``video_backbone.dit.*`` with an external Wan DiT
+    (e.g. the original Wan2.2-TI2V-5B shards), cast to the ckpt's per-tensor dtype
+    so both initializations enter training at the same precision. Every loaded
+    prefix must be covered completely: a key the sources do not supply raises.
+    """
+    import torch
+    from safetensors import safe_open
+
+    prefixes = tuple(load_prefixes) if load_prefixes else ("",)
+    if video_dit_path and not _DIT_PREFIX.startswith(prefixes):
+        raise ValueError(f"finetune_video_dit_path needs {_DIT_PREFIX} inside finetune_load_prefixes={list(prefixes)}")
+
+    state_dict, ckpt_dit_dtypes = {}, {}
+    with safe_open(weights, framework="pt") as f:
+        for key in f.keys():
+            if video_dit_path and key.startswith(_DIT_PREFIX):
+                ckpt_dit_dtypes[key] = getattr(torch, _SAFETENSORS_DTYPES[f.get_slice(key).get_dtype()])
+            elif key.startswith(prefixes):
+                state_dict[key] = f.get_tensor(key)
+    n_ckpt = len(state_dict)
+
+    if video_dit_path:
+        dit = {}
+        for path in _safetensors_files(video_dit_path):
+            with safe_open(path, framework="pt") as f:
+                for key in f.keys():
+                    name = _DIT_PREFIX + key
+                    dit[name] = f.get_tensor(key)
+                    if name in ckpt_dit_dtypes:
+                        dit[name] = dit[name].to(ckpt_dit_dtypes[name])
+        if set(dit) != set(ckpt_dit_dtypes):
+            raise ValueError(
+                f"{video_dit_path} DiT keys differ from the ckpt's {_DIT_PREFIX}*: "
+                f"missing={sorted(set(ckpt_dit_dtypes) - set(dit))[:5]} extra={sorted(set(dit) - set(ckpt_dit_dtypes))[:5]}"
+            )
+        live = architecture.state_dict()
+        bad = [k for k, v in dit.items() if tuple(v.shape) != tuple(live[k].shape)]
+        if bad:
+            raise ValueError(f"{video_dit_path} DiT shape mismatch, e.g. {bad[0]}: {tuple(dit[bad[0]].shape)}")
+        state_dict.update(dit)
+
+    has_meta = any(p.device.type == "meta" for p in architecture.parameters())
+    missing, unexpected = architecture.load_state_dict(state_dict, strict=False, assign=has_meta)
+    not_loaded = [k for k in missing if k.startswith(prefixes)]
+    if unexpected or not_loaded:
+        raise RuntimeError(f"Partial finetune load failed: not_loaded={not_loaded[:10]}, unexpected={unexpected[:10]}")
+    still_meta = [n for n, p in architecture.named_parameters() if p.device.type == "meta"]
+    if still_meta:
+        raise RuntimeError(f"Partial finetune load left meta (uninitialized) params, e.g. {still_meta[:5]}")
+
+    fresh = sorted({".".join(k.split(".")[:2]) for k in missing})
+    msg = (
+        f"[finetune] partial load: {n_ckpt} tensors from {weights} (prefixes={list(prefixes)})"
+        + (f", {len(state_dict) - n_ckpt} DiT tensors from {video_dit_path}" if video_dit_path else "")
+        + f"; fresh init: {fresh}"
+    )
+    logger.info(msg)
+    print(msg, flush=True)
+
+
+def build_architecture_from_ckpt_dir(
+    ckpt_dir: str,
+    *,
+    weights_required: bool,
+    override_cfg: DictConfig = None,
+    load_prefixes=None,
+    video_dit_path: str | None = None,
+):
     """Build the architecture from a self-contained checkpoint source.
 
     Skeletons come from the resolved model config's
@@ -232,6 +319,9 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, o
     merged result — written back into ``override_cfg.model`` — is what the
     architecture is built from. When omitted the ckpt's ``model`` section is used
     verbatim (resume, and standalone callers).
+
+    ``load_prefixes`` / ``video_dit_path`` (finetune only) switch the weight load
+    to :func:`load_partial_finetune_weights`.
 
     Returns ``(resolved_arch, architecture, ckpt_cfg)``.
     """
@@ -285,7 +375,12 @@ def build_architecture_from_ckpt_dir(ckpt_dir: str, *, weights_required: bool, o
         # Plain print so the warm-start is visible on the launch terminal even
         # when logger output is drowned out; non-main ranks have print disabled.
         print(f"[{tag}] loading pretrained weights: {weights}", flush=True)
-        architecture.load_checkpoint(weights)
+        if load_prefixes or video_dit_path:
+            load_partial_finetune_weights(
+                architecture, weights, load_prefixes=load_prefixes, video_dit_path=video_dit_path
+            )
+        else:
+            architecture.load_checkpoint(weights)
         print(f"[{tag}] pretrained weights loaded OK", flush=True)
     return resolved_arch, architecture, ckpt_cfg
 

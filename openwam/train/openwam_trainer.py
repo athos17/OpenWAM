@@ -116,10 +116,14 @@ class OpenWAMTrainer:
             # the new run dir are the same one. Resume continues ONE run whose
             # config.yaml is already on disk and is reused untouched, so there the
             # ckpt config stays authoritative and divergence is only reported.
+            # Partial warm-start knobs only shape the finetune load; resume restores
+            # every weight from its accel state.
             resolved_arch, self.architecture, ckpt_cfg = build_architecture_from_ckpt_dir(
                 self._ckpt_source_dir,
                 weights_required=finetune_path is not None,
                 override_cfg=cfg if finetune_path is not None else None,
+                load_prefixes=cfg_get(t, "finetune_load_prefixes", None) if finetune_path else None,
+                video_dit_path=cfg_get(t, "finetune_video_dit_path", None) if finetune_path else None,
             )
             if finetune_path is not None:
                 # The merge replaced the cfg.model node, so `m` (bound above)
