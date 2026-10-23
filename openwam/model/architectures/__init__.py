@@ -1,6 +1,6 @@
 """Architecture package exports and side-effect registration."""
 
-from openwam.model.architectures import dual_system, single_system, tri_system  # noqa: F401
+from openwam.model.architectures import dual_system, single_system, touchwam, tri_system  # noqa: F401
 from openwam.model.architectures.base import ActionState, BaseWAMArchitecture
 from openwam.model.architectures.dual_system import (
     DualSystemCrossAttnArchitecture,

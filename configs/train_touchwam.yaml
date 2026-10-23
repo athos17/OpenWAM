@@ -1,0 +1,20 @@
+defaults:
+  - train
+  - override model: touchwam
+  - override dataloader: bench2dex_tactile
+  - _self_
+
+training:
+  finetune_ckpt_path: ???  # Explicit Alpha checkpoint (or V2 with initialization disabled).
+  initialize_touch_from_openwam: true
+  initialize_model_on_cpu: true
+  resume_ckpt_path: null
+  num_epochs: null
+  max_steps: 40000
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  dataset_num_workers: 2
+  output_path: outputs/touchwam
+
+project:
+  name: touchwam

@@ -176,7 +176,11 @@ class PolicyServer:
         then apply their old-server compatibility rules.
         """
         contract = getattr(getattr(self.engine, "architecture", None), "repr_contract", None)
-        return dict(contract) if contract else {}
+        result = dict(contract) if contract else {}
+        tactile = getattr(getattr(self.engine, "architecture", None), "tactile_input_contract", None)
+        if tactile is not None:
+            result["tactile"] = tactile
+        return result
 
     def _pong_payload(self) -> dict:
         """Return checkpoint compatibility plus optional launch ownership."""

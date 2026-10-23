@@ -674,7 +674,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
             state_dict = self.state_dict()
         state_dict = _exclude_vlm_from_state_dict(state_dict)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        save_file(state_dict, path)
+        save_file(state_dict, path, metadata=getattr(self, "checkpoint_metadata", None))
 
     def load_checkpoint(self, path: str, strict: bool = True) -> None:
         """Load architecture state from a safetensors checkpoint.

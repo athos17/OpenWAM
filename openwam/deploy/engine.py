@@ -337,10 +337,20 @@ class JointInferenceEngine(BaseInferenceEngine):
             )
         )
 
+        tactile_kwargs = {}
+        observation = conditions.get("observation") or {}
+        for key in ("tactile_maps", "tactile_valid"):
+            value = conditions.get(key, observation.get(key))
+            if value is not None:
+                tactile_kwargs[key] = value
+        if tactile_kwargs and not hasattr(self.architecture, "tactile_spec"):
+            raise ValueError("Tactile inputs require a TouchWAM checkpoint")
+
         generate_kwargs = self._filter_architecture_generate_kwargs(
             {
                 "schedule": schedule,
                 "prompt": conditions.get("prompt", ""),
+                **tactile_kwargs,
                 "vace_video": conditions.get("vace_video", None),
                 "first_frame_image": conditions.get("first_frame_image", None),
                 "num_frames": video_num_frames,

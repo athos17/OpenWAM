@@ -30,7 +30,6 @@ import shutil
 from contextlib import nullcontext
 
 import torch
-
 from omegaconf import DictConfig, OmegaConf, open_dict
 
 from openwam.train.utils.checkpointing import find_latest_weights
@@ -290,6 +289,18 @@ def build_architecture_from_ckpt_dir(
     ckpt_dir, explicit_weights = _resolve_ckpt_source(ckpt_dir)
     tag = "finetune" if weights_required else "resume"
     ckpt_cfg = OmegaConf.load(os.path.join(ckpt_dir, "config.yaml"))
+    touch_warm_start = bool(OmegaConf.select(
+        override_cfg, "training.initialize_touch_from_openwam", default=False
+    )) if override_cfg is not None else False
+    if touch_warm_start:
+        source = OmegaConf.select(ckpt_cfg, "model.architecture.variant")
+        target = OmegaConf.select(override_cfg, "model.architecture.variant")
+        if not weights_required or reset_action_backbone or source != "joint_self_attn" or target != "touchwam_v2":
+            raise ValueError("initialize_touch_from_openwam requires Alpha -> TouchWAM finetune with pretrained ActionDiT")
+        # Newly introduced weights must start identically on all training ranks.
+        touch_seed = OmegaConf.select(override_cfg, "project.seed", default=42)
+        if type(touch_seed) is not int or not 0 <= touch_seed < 2**63:
+            raise ValueError("TouchWAM initialization requires an integer project.seed in [0, 2**63)")
     if override_cfg is not None:
         model_cfg = merge_ckpt_model_cfg(ckpt_cfg, override_cfg, ckpt_dir)
     else:
@@ -330,9 +341,9 @@ def build_architecture_from_ckpt_dir(
     # Rank-local training seeds must not give ranks different random weights.
     # The constructor initializes ActionDiT on CPU; restore the caller's CPU
     # RNG afterwards without reseeding any CUDA device.
-    with torch.random.fork_rng(devices=[]) if reset_action_backbone else nullcontext():
-        if reset_action_backbone:
-            torch.random.default_generator.manual_seed(action_init_seed)
+    with torch.random.fork_rng(devices=[]) if reset_action_backbone or touch_warm_start else nullcontext():
+        if reset_action_backbone or touch_warm_start:
+            torch.random.default_generator.manual_seed(action_init_seed if reset_action_backbone else touch_seed)
         architecture = build_architecture(resolved_arch.registry_name, params)
 
     if weights_required:
@@ -341,7 +352,9 @@ def build_architecture_from_ckpt_dir(
         # Plain print so the warm-start is visible on the launch terminal even
         # when logger output is drowned out; non-main ranks have print disabled.
         print(f"[{tag}] loading pretrained weights: {weights}", flush=True)
-        if reset_action_backbone:
+        if touch_warm_start:
+            architecture.load_openwam_checkpoint(weights)
+        elif reset_action_backbone:
             load_pretrained_except_action(architecture, weights, seed=action_init_seed)
             print(f"[{tag}] ActionDiT kept at constructor initialization, seed={action_init_seed}", flush=True)
         else:

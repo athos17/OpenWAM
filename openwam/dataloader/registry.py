@@ -86,9 +86,8 @@ def _register_builtins():
     from openwam.dataloader.robocoin import MultiRobotCOINDataset
     from openwam.dataloader.robodojo import MultiTaskRoboDojoDataset
     from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
-    from openwam.dataloader.vlabench import VLABenchDataset
-
     from openwam.dataloader.sharpadex_tianji import SharpaDexTianjiDataset
+    from openwam.dataloader.vlabench import VLABenchDataset
     register_dataset("sharpadex_tianji")(SharpaDexTianjiDataset)
     from openwam.dataloader.sharpadex_tianji_global import SharpaDexTianjiGlobalDataset
     register_dataset("sharpadex_tianji_global")(SharpaDexTianjiGlobalDataset)
@@ -96,6 +95,9 @@ def _register_builtins():
     from openwam.dataloader.egodex_video import EgoDexVideoDataset
     register_dataset("egodex_video")(EgoDexVideoDataset)
 
+    from openwam.dataloader.bench2dex_tactile import Bench2DexTactileMixture
+
+    register_dataset("bench2dex_tactile")(Bench2DexTactileMixture)
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
     register_dataset("robodojo")(MultiTaskRoboDojoDataset)
     register_dataset("agibotworld")(MultiAgiBotWorldDataset)

@@ -100,6 +100,8 @@ class OpenWAMTrainer:
         resume_path = cfg_get(t, "resume_ckpt_path", None) or None
         if finetune_path and resume_path:
             raise ValueError("finetune_ckpt_path and resume_ckpt_path are mutually exclusive; set at most one.")
+        if cfg_get(t, "initialize_touch_from_openwam", False) and not finetune_path:
+            raise ValueError("initialize_touch_from_openwam requires finetune_ckpt_path; disable it for resume")
         action_init = cfg_get(t, "action_backbone_init", "pretrained")
         if action_init not in ("pretrained", "random"):
             raise ValueError("training.action_backbone_init must be pretrained or random")
@@ -609,11 +611,15 @@ class OpenWAMTrainer:
             lambda_action=self.lambda_action,
         )
 
-        return {
+        losses = {
             "total": result["loss"],
             "video": result.get("loss_video", torch.tensor(0.0)),
             "action": result.get("loss_action", torch.tensor(0.0)),
         }
+        for key in ("tactile", "tactile_contact", "tactile_distance"):
+            if f"loss_{key}" in result:
+                losses[key] = result[f"loss_{key}"]
+        return losses
 
     # (10) Called each step in train()'s loop — progress bar, wandb log, debug loss-history CSV.
     def log_step(
@@ -633,6 +639,8 @@ class OpenWAMTrainer:
     ) -> None:
         """Update progress bar, log to wandb, and (debug) write the loss-history CSV row."""
         labels = [("action", "loss_action")]
+        labels.extend((key, f"loss_{key}") for key in ("tactile", "tactile_contact", "tactile_distance")
+                      if f"loss_{key}" in metrics)
         loss_total = metrics["loss_total"]
         loss_video = metrics["loss_video"]
         grad_norm = metrics["grad_norm"]

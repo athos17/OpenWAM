@@ -1,0 +1,25 @@
+type: bench2dex_tactile
+manifest_path: ???  # Existing bench2dex_alpha_v1 manifest; supply at launch.
+source_root: null
+seed: 42
+action_mode: eef
+normalize_mode: min-max
+unify_action: true
+unify_dim: 80
+unify_action_map: ["0-8", "10-29", "34-42", "44-63"]
+unify_state_map: null
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+camera_layout: [cam_stereo_left, cam_wrist_left, cam_wrist_right]
+target_camera: cam_stereo_left
+
+tactile_history: ${model.architecture.tactile.history}
+tactile_map_size: ${model.architecture.tactile.map_size}
+tactile_future_frames: ${model.architecture.tactile.future_frames}
+tactile_future_stride: ${model.architecture.tactile.future_stride}
+tactile_fps: ${model.architecture.tactile.fps}
+tactile_cache_root: null  # Optional existing sharpa_tactile_v1 cache; otherwise read HDF5.

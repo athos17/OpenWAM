@@ -1,0 +1,24 @@
+defaults:
+  - dual_system
+  - _self_
+
+architecture:
+  variant: touchwam_v2
+  training_mode: joint_finetune  # Default: train visual DiT + ActionDiT + proprio + touch.
+                                # new_only / action_finetune remain explicit ablations.
+  tactile:
+    history: 4
+    map_size: 32
+    patch_size: 16         # 4 patches/fingertip; preserves all 32x32 pixels
+    distance_scale_m: 0.015
+    width: 256
+    heads: 8
+    layers: 6
+    history_layers: 2
+    bridge_layers: null   # Alpha -> [4,9,14,19,24,29], zero-based
+    future_frames: 8
+    future_stride: 2      # t+2,...,t+16: 0.1,...,0.8 seconds at 20 Hz
+    fps: 20
+    loss_weight: 1.0
+    contact_positive_weight: 5.0
+    distance_background_weight: 0.1
