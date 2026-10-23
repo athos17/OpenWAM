@@ -87,6 +87,7 @@ def _register_builtins():
     from openwam.dataloader.robocoin import MultiRobotCOINDataset
     from openwam.dataloader.robodojo import MultiTaskRoboDojoDataset
     from openwam.dataloader.robotwin import MultiTaskRoboTwinDataset
+    from openwam.dataloader.sharpadex_tianji_global import SharpaDexTianjiGlobalDataset
     from openwam.dataloader.vlabench import VLABenchDataset
 
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
@@ -98,6 +99,8 @@ def _register_builtins():
     register_dataset("ebench")(EBenchDataset)
     register_dataset("libero")(LiberoDataset)
     register_dataset("marvin")(MarvinDataset)
+    # Converted SharpaDex in Tianji EEF62 (same 80-D contract as marvin); multi-bucket root.
+    register_dataset("sharpadex_tianji_global")(SharpaDexTianjiGlobalDataset)
     register_dataset("muka_franka")(MukaFrankaDataset)
     register_dataset("oxe_droid")(OxeDroidDataset)
     register_dataset("robocasa365")(MultiTaskRoboCasa365Dataset)
