@@ -472,3 +472,9 @@ Have a question, want to share results, or just follow development? Join us:
     </td>
   </tr>
 </table>
+
+## TouchWAM tactile extension
+
+The optional `touchwam_v2` architecture adds a compact generative tactile stream to
+OpenWAM's existing video/action model. See [TouchWAM setup and compatibility](docs/touchwam/README.md)
+for training, deployment, data contracts, and migration validation.

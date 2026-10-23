@@ -1,0 +1,15 @@
+{
+  "source": "ys:/data_all/intern10/workspace/TouchWAM/OpenWAM",
+  "source_head": "4a9af3e5bf6a992b0a41ccc19d33acd224f55ed1",
+  "source_has_uncommitted_changes": true,
+  "target_base": "96f4b6ec4d8d5d92fd65572ba23c15f2e1481f3e",
+  "date": "2026-10-23",
+  "files": {
+    "openwam/model/architectures/touchwam/v2.py": "f590be3e638b2a1675745be3e0b9529ec4561ed6a1aa4a1e2dbb15faaa027ae2",
+    "openwam/model/architectures/touchwam/modules_v2.py": "51dfea8895dbdc96e8f13235419aa3d1e47d4553a26b6bbc86e18872455b0d8b",
+    "openwam/model/architectures/touchwam/inference_v2.py": "175cfcfba8588c1ccba062fdffdd1df2317680bdfe6d5f5994e9213976b61f38",
+    "openwam/tactile/sharpa_v1.py": "19ed1ebcfc04178f8d06c7e8315e8567126767d8a47f6baa31a5fe0bc87cb3ef",
+    "openwam/dataloader/bench2dex_tactile.py": "d35baeb88c433db231c12a1c4c1fab12767ab875a4ad1789a605d7e119846e9c",
+    "openwam/dataloader/bench2dex_alpha.py": "262d07618ce898c834bc96df628dc6fef28639e1a180ae357c9a75d17c79ce68"
+  }
+}

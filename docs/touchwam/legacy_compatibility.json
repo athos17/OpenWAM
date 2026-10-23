@@ -1,0 +1,95 @@
+{
+  "generate_future_tactile_offsets": {
+    "shape": [
+      2
+    ],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "forward_0": {
+    "shape": [
+      2,
+      4,
+      3,
+      2,
+      2
+    ],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "forward_1": {
+    "shape": [
+      2,
+      4,
+      7
+    ],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "forward_2": {
+    "shape": [
+      2,
+      80,
+      32
+    ],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "generate_actions": {
+    "shape": [
+      4,
+      7
+    ],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "generate_future_tactile_maps": {
+    "shape": [
+      2,
+      10,
+      2,
+      8,
+      8
+    ],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "loss_loss": {
+    "shape": [],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "loss_loss_action": {
+    "shape": [],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "loss_loss_tactile": {
+    "shape": [],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "loss_loss_tactile_contact": {
+    "shape": [],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "loss_loss_tactile_distance": {
+    "shape": [],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "loss_loss_video": {
+    "shape": [],
+    "max_abs_error": 0.0,
+    "equal": true
+  },
+  "generate_future_tactile_valid": {
+    "shape": [
+      2,
+      10
+    ],
+    "max_abs_error": 0.0,
+    "equal": true
+  }
+}
