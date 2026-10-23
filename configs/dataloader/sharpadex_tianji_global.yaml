@@ -1,0 +1,40 @@
+# SharpaDex converted to Tianji EEF62 (global v1; /data/lyh/sharpadex_eef pipeline).
+# Same sample contract as marvin.yaml; the reader differs only in storage: native
+# 62-D vectors, source-video offsets from from_timestamp (videos are symlinks into
+# the untrimmed SharpaDex-v1.0 streams), per-group action_validity masks, and one
+# LeRobot v3 bucket per task/season under dataset_dir.
+type: sharpadex_tianji_global
+dataset_dir: /data/lyh/datasets/sharpadex_eef_global_v1/buckets
+action_mode: eef
+
+# Raw reader layout (62-D): L EEF9, L hand22, R EEF9, R hand22.
+unify_action: true
+unify_action_map: [0-8, 10-31, 34-42, 44-65]
+unify_state_map: [0-8, 10-31, 34-42, 44-65]
+
+# Fixed OpenWAM-alpha temporal and normalization contract (stats: dataset root
+# normalization_stats.npy, train split only; rot6d identity).
+normalize_mode: min-max
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+# Three-camera L-shaped canvas expected by the foundation model.
+height: 384
+width: 320
+multiview: true
+camera_layout:
+  - observation.images.left_head
+  - observation.images.left_wrist
+  - observation.images.right_wrist
+
+color_jitter:
+  enabled: true
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
+
+# Offline encoder caches; null = encode online. A latent cache requires color_jitter disabled.
+latent_cache_dir: null
+text_cache_dir: null
