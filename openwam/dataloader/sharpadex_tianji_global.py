@@ -1,8 +1,27 @@
 """Global EEF62 pretraining data with source video offsets and command masks."""
+import os
 import numpy as np
 from openwam.dataloader.sharpadex_tianji import SharpaDexTianjiDataset
 from openwam.dataloader.bases.multi_lerobot_v3_reader import MultiLeRobotV3Reader
 from openwam.dataloader.utils.normalization import apply_normalization
+
+
+class SharpaDexTianjiGlobalBuckets(MultiLeRobotV3Reader):
+    """Root-mode wrapper exposing the one train-split stats file all buckets share.
+
+    Every bucket's meta/normalization_stats.npy links to the dataset-root copy; the
+    trainer copies ``normalization_stats_path`` into each run dir, which deploy needs.
+    """
+
+    def __init__(self, buckets):
+        super().__init__(buckets)
+        paths = [b.normalization_stats_path for b in self._buckets]
+        self.normalization_stats_path = None
+        if any(paths):
+            resolved = {os.path.realpath(p) for p in paths if p}
+            if not all(paths) or len(resolved) != 1:
+                raise ValueError(f'SharpaDex buckets must share one normalization stats file, got {sorted(resolved)}')
+            self.normalization_stats_path = resolved.pop()
 
 
 class SharpaDexTianjiGlobalDataset(SharpaDexTianjiDataset):
@@ -48,4 +67,4 @@ class SharpaDexTianjiGlobalDataset(SharpaDexTianjiDataset):
 
     @classmethod
     def _multibucket_wrapper(cls):
-        return MultiLeRobotV3Reader
+        return SharpaDexTianjiGlobalBuckets
