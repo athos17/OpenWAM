@@ -250,6 +250,11 @@ class OpenWAMTrainer:
 
         output_path, resume_state_dir = self.setup_output_dir(debug, resume_path)
         optimizer, dataloader, scheduler = self.prepare_accelerate(optimizer, dataloader, scheduler)
+        # Build the default process group's all_reduce connections now. DeepSpeed reduces
+        # gradients on its own cloned world group, so otherwise their first use is the barrier
+        # inside the first checkpoint save, and a stray TCP connection (internet scanners reach
+        # NCCL's listening ports on the txy nodes) landing in that lazy setup aborts the job.
+        self.accelerator.wait_for_everyone()
 
         if self._run_seed is not None:
             from openwam.dataloader.mixture import MixtureDataset
