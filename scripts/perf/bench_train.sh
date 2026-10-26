@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Short throughput probe for training-acceleration work (SharpaDex Tianji global recipe).
 #
-#   TAG=<run name> [STEPS=40] [NNODES=1 NODE_RANK=0 MASTER_ADDR=127.0.0.1] \
+#   TAG=<run name> [STEPS=40] [DATALOADER=<dataloader group>] [NNODES=1 NODE_RANK=0 MASTER_ADDR=127.0.0.1] \
 #     bash scripts/perf/bench_train.sh [extra hydra overrides]
 #
 # Runs scripts/train.sh with the 2026-10-24 sharpadex_global recipe (bs48/GPU, GA1,
@@ -23,8 +23,14 @@ export PYTHONPATH="$PWD" WANDB_MODE=disabled PYTORCH_CUDA_ALLOC_CONF=expandable_
 NODE_RANK=${NODE_RANK:-0}
 LOG="$PERF_ROOT/$TAG.node$NODE_RANK.log"
 git rev-parse HEAD > "$PERF_ROOT/$TAG.node$NODE_RANK.sha" 2>/dev/null
+# DATALOADER=<group> swaps the dataset (its yaml then supplies dataset_dir / jitter).
+if [ -n "${DATALOADER:-}" ]; then
+  DATA_ARGS=("dataloader=$DATALOADER")
+else
+  DATA_ARGS=(dataloader=sharpadex_tianji_global dataloader.dataset_dir="$DATASET_DIR" dataloader.color_jitter.enabled=true)
+fi
 bash scripts/train.sh \
-  dataloader=sharpadex_tianji_global dataloader.dataset_dir="$DATASET_DIR" dataloader.color_jitter.enabled=true \
+  "${DATA_ARGS[@]}" \
   training.finetune_ckpt_path="$FINETUNE_CKPT" \
   training.batch_size=48 training.gradient_accumulation_steps=1 training.use_gradient_checkpointing=true \
   training.learning_rate=1e-4 training.rtc.enabled=false \
