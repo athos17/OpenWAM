@@ -26,6 +26,8 @@ def test_disabled_preserves_values_and_disables_both_masks(tmp_path, patch_decod
         table = pq.read_table(path)
         fingers = np.tile(np.arange(12, dtype=np.float32), (40, 1))
         for name in ["action.dex", "observation.state.dex"]:
+            if name in table.column_names:  # newer _make_bucket already writes the dex columns
+                continue
             table = table.append_column(name, pa.array(fingers.tolist(), type=pa.list_(pa.float32(), 12)))
         pq.write_table(table, path)
 

@@ -217,7 +217,8 @@ class MixtureDataset(BaseDataset):
         # Four-source pretraining has hundreds of millions of windows. Fill one
         # map with bounded temporary storage, then shuffle its rows in place.
         # Full passes preserve coverage; a partial pass (virtual_n % n_real rows)
-        # is drawn without replacement instead of always taking a prefix.
+        # is drawn without replacement, afresh each epoch, instead of always taking
+        # the same prefix (which would never visit a down-weighted source's tail).
         combined = np.empty((sum(self._virtual_counts), 2), dtype=np.int32)
         offset = 0
         block_size = 1_000_000
