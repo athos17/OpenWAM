@@ -96,6 +96,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             "mot_checkpoint_mixed_attn": bool(cfg.get("mot_checkpoint_mixed_attn", True)),
             "attention_mask_mode": str(cfg.get("attention_mask_mode", ACTION_SEES_VIDEO)),
             "video_attention_mask_mode": str(cfg.get("video_attention_mask_mode", "first_frame_causal")),
+            "mot_split_attention": bool(cfg.get("mot_split_attention", False)),
         }
         if self.video_backbone is not None:
             self.build_mot_driver()

@@ -57,6 +57,32 @@ def resolve_checkpoint_layers(spec, num_layers: int) -> Optional[frozenset]:
     return layers
 
 
+def plan_split_attention(mask: Tensor) -> Optional[Tuple[Tuple[int, int, int, int], ...]]:
+    """Split a 2-D bool ``[Sq, Sk]`` mask into unmasked attention runs, or None.
+
+    Returns ``((q0, q1, k0, k1), ...)`` covering every query row in order, where each
+    row of run ``[q0, q1)`` sees exactly the keys ``[k0, k1)``. Running plain
+    (unmasked, flash-eligible) SDPA per run is then the same attention as one masked
+    SDPA. None when some row's visible keys are not one contiguous interval (or
+    empty), in which case the caller keeps the masked path.
+    """
+    if mask.dim() != 2 or mask.dtype != torch.bool:
+        return None
+    mask = mask.cpu()
+    s_q, s_k = mask.shape
+    count = mask.sum(dim=1)
+    if not bool((count > 0).all()):
+        return None
+    first = mask.int().argmax(dim=1)
+    last = s_k - 1 - mask.flip(1).int().argmax(dim=1)
+    if not torch.equal(last - first + 1, count):
+        return None
+    change = (first[1:] != first[:-1]) | (last[1:] != last[:-1])
+    starts = [0] + (torch.nonzero(change).flatten() + 1).tolist()
+    ends = starts[1:] + [s_q]
+    return tuple((q0, q1, int(first[q0]), int(last[q0]) + 1) for q0, q1 in zip(starts, ends))
+
+
 class DualSystemMoTDriver:
     """Drives joint self-attention across a video backbone and an action backbone.
 
@@ -87,6 +113,7 @@ class DualSystemMoTDriver:
         mot_checkpoint_mixed_attn: bool = True,
         attention_mask_mode: str = ACTION_SEES_VIDEO,
         video_attention_mask_mode: Optional[str] = None,
+        mot_split_attention: bool = False,
     ) -> None:
         if vb.num_layers != ab.num_layers:
             raise ValueError(
@@ -115,6 +142,10 @@ class DualSystemMoTDriver:
         # (None = every layer). The rest keep only the mixed-attention recompute
         # (``mot_checkpoint_mixed_attn``), trading activation memory for compute.
         self.checkpoint_layers: Optional[frozenset] = None
+        # Run the joint attention as unmasked (flash-eligible) SDPA calls over the
+        # query groups that share one contiguous key range (plan_split_attention).
+        self.mot_split_attention = bool(mot_split_attention)
+        self._split_plans: dict = {}
         self.attention_mask_mode = attention_mask_mode
 
         # Allow the architecture / config to override the video v↔v sub-mode.
@@ -156,20 +187,40 @@ class DualSystemMoTDriver:
         q_cat: Tensor,
         k_cat: Tensor,
         v_cat: Tensor,
-        attn_mask: Optional[Tensor],
+        attn_mask,
     ) -> Tensor:
         """Single mixed self-attention over the concatenated [v, a] sequence.
 
         Inputs are ``(B, S, H*D)`` (the layout produced by ``pre_attn_at_layer``
         in both backbones). Output is the same layout. SDPA is used so an
-        optional bool ``attn_mask`` (True = keep) can be honored.
+        optional bool ``attn_mask`` (True = keep) can be honored. A tuple
+        ``attn_mask`` is a :func:`plan_split_attention` plan: one unmasked SDPA
+        per query run over its key range, concatenated along the sequence.
         """
         n = self.num_heads
         q = rearrange(q_cat, "b s (n d) -> b n s d", n=n)
         k = rearrange(k_cat, "b s (n d) -> b n s d", n=n)
         v = rearrange(v_cat, "b s (n d) -> b n s d", n=n)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        if isinstance(attn_mask, tuple):
+            out = torch.cat(
+                [
+                    F.scaled_dot_product_attention(q[:, :, q0:q1], k[:, :, k0:k1], v[:, :, k0:k1])
+                    for q0, q1, k0, k1 in attn_mask
+                ],
+                dim=2,
+            )
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         return rearrange(out, "b n s d -> b s (n d)", n=n)
+
+    def _split_plan(self, s_video: int, s_action: int, video_tokens_per_frame: int):
+        """Cached :func:`plan_split_attention` for this layout (mask built on the CPU)."""
+        key = (s_video, s_action, video_tokens_per_frame, self.attention_mask_mode,
+               getattr(self.vb, "video_attention_mask_mode", None))
+        if key not in self._split_plans:
+            mask = self._build_attention_mask(s_video, s_action, video_tokens_per_frame, device=torch.device("cpu"))
+            self._split_plans[key] = plan_split_attention(mask)
+        return self._split_plans[key]
 
     # ------------------------------------------------------------------
     # Per-layer step
@@ -364,18 +415,24 @@ class DualSystemMoTDriver:
             )
         s_action = payload.x_action.shape[1]
 
-        attn_mask = self._build_attention_mask(
-            s_video=s_video,
-            s_action=s_action,
-            video_tokens_per_frame=self._video_tokens_per_frame(vstate),
-            device=vstate.hidden_states.device,
-        )
+        plan = None
+        if self.mot_split_attention and not int(getattr(vstate, "prefix_kv_len", 0) or 0):
+            plan = self._split_plan(s_video, s_action, self._video_tokens_per_frame(vstate))
+        if plan is not None:
+            attn_mask = plan
+        else:
+            attn_mask = self._build_attention_mask(
+                s_video=s_video,
+                s_action=s_action,
+                video_tokens_per_frame=self._video_tokens_per_frame(vstate),
+                device=vstate.hidden_states.device,
+            )
 
-        # Backbones may prepend prefix K/V tokens (keys without matching query
-        # rows — e.g. Cosmos3's cached und text stream). ``_step_impl`` needs no
-        # change: it splits the attention output by query lengths, and SDPA
-        # handles the resulting rectangular mask.
-        attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
+            # Backbones may prepend prefix K/V tokens (keys without matching query
+            # rows — e.g. Cosmos3's cached und text stream). ``_step_impl`` needs no
+            # change: it splits the attention output by query lengths, and SDPA
+            # handles the resulting rectangular mask.
+            attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
 
         for layer_id in range(self.num_layers):
             vstate, astate = self.step(
@@ -389,4 +446,4 @@ class DualSystemMoTDriver:
         return vstate, astate
 
 
-__all__ = ["DualSystemMoTDriver", "resolve_checkpoint_layers"]
+__all__ = ["DualSystemMoTDriver", "plan_split_attention", "resolve_checkpoint_layers"]

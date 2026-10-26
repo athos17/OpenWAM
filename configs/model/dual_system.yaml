@@ -36,5 +36,8 @@ architecture:
   bridge_interval: 1
 
   mot_checkpoint_mixed_attn: true  # joint_self_attn/idm only: grad-checkpoint the mixed attention (VRAM down)
+  mot_split_attention: false       # joint_self_attn: run the masked mixed attention as unmasked (flash) SDPA calls,
+                                   # one per query group sharing a contiguous key range; same attention. Masks with
+                                   # non-contiguous rows (e.g. per_frame_causal) keep the masked path.
   detach_bridge: false             # joint_cross_attn only
   idm_video_cond_noise_prob: 0.5   # idm only
