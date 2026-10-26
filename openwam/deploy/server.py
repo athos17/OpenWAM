@@ -32,8 +32,12 @@ Server-side behavior:
 
 Messages:
     obs   → {"type": "action", "action": [floats], "step": int, "latency_ms": float}
+    obs_chunk → {
+        "type": "action_chunk", "actions": [[floats], ...], "count": int,
+        "step": int, "latency_ms": float
+    }
     reset → {"type": "reset_ack"}
-    ping  → {"type": "pong"}
+    ping  → {"type": "pong", "supported_requests": [str], ...}
     error → {"type": "error", "code": str, "message": "<what went wrong>"}
 
 Usage:
@@ -58,10 +62,13 @@ logger = logging.getLogger(__name__)
 # these string values are a frozen wire contract and must never change.
 # Client -> server
 OBS = "obs"
+OBS_CHUNK = "obs_chunk"
+OBS_RTC = "obs_rtc"
 RESET = "reset"
 PING = "ping"
 # Server -> client
 ACTION = "action"
+ACTION_CHUNK = "action_chunk"
 RESET_ACK = "reset_ack"
 PONG = "pong"
 ERROR = "error"
@@ -73,6 +80,7 @@ ERR_INTERNAL = "internal_error"
 # Cap for a single obs message. A multi-camera base64 frame can exceed the
 # 1 MB websockets default, so lift it for the obs stream.
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+MAX_ACTION_CHUNK = 64
 
 
 def _infer_video_num_frames(dl) -> int:
@@ -134,6 +142,7 @@ class PolicyServer:
 
         # Lazy imports at init time to validate availability
         self._policy = None
+        self._execution_config = None
         self._request_count = 0
         self._total_latency = 0.0
 
@@ -146,6 +155,24 @@ class PolicyServer:
         from openwam.deploy.policy import WAMPolicy
 
         execution_config = resolve_execution_config(self.cfg)
+        self._execution_config = execution_config
+        if execution_config.mode == "training_rtc":
+            from openwam.model.training_rtc import rtc_config
+
+            rtc = rtc_config(getattr(self.engine.architecture, "training_rtc", None))
+            if not rtc.enabled:
+                raise ValueError("training_rtc requires an RTC-trained checkpoint")
+            from omegaconf import OmegaConf
+
+            framework = OmegaConf.select(self.cfg, "model.architecture.framework")
+            variant = OmegaConf.select(self.cfg, "model.architecture.variant")
+            if (framework, variant) != ("dual_system", "joint_self_attn"):
+                raise ValueError("training_rtc currently supports dual_system/joint_self_attn")
+            horizon = int(self.cfg.dataloader.num_frames) - 1
+            if rtc.max_delay_steps >= horizon:
+                raise ValueError("RTC checkpoint maximum delay must be < action horizon")
+            if execution_config.inference_horizon is not None and execution_config.inference_horizon > horizon:
+                raise ValueError("RTC execution horizon exceeds model horizon")
         self._policy = WAMPolicy(
             engine=self.engine,
             cfg=self.cfg,
@@ -186,6 +213,28 @@ class PolicyServer:
             result["readiness_token"] = self.readiness_token
         return result
 
+    def _protocol_capabilities(self) -> dict:
+        """Describe optional wire operations and the active executor."""
+        self._init_policy()
+        horizon = self._execution_config.inference_horizon
+        rtc_fields = {}
+        requests = [OBS, OBS_CHUNK, RESET, PING]
+        if self._execution_config.mode == "training_rtc":
+            rtc = self.engine.architecture.training_rtc
+            requests = [OBS_RTC, RESET, PING]
+            rtc_fields = {
+                "rtc_protocol_version": 1,
+                "action_horizon": int(self.cfg.dataloader.num_frames) - 1,
+                "rtc_max_delay_steps": rtc.max_delay_steps,
+            }
+        return {
+            **rtc_fields,
+            "supported_requests": requests,
+            "max_action_chunk": min(MAX_ACTION_CHUNK, horizon or MAX_ACTION_CHUNK),
+            "inference_mode": self._execution_config.mode,
+            "inference_horizon": horizon,
+        }
+
     def predict(self, obs: dict) -> dict:
         """Synchronous prediction for a single observation.
 
@@ -204,6 +253,8 @@ class PolicyServer:
         self._init_policy()
         t0 = time.monotonic()
 
+        if self._execution_config.mode == "training_rtc":
+            raise ObsValidationError("training_rtc requires obs_rtc")
         obs = self._obs_preprocessor.preprocess(obs)
         action = self._policy.predict_action(obs)
 
@@ -215,6 +266,81 @@ class PolicyServer:
             "action": action.tolist(),
             "step": self._request_count,
             "latency_ms": round(latency_ms, 2),
+        }
+
+    def predict_chunk(self, obs: dict, count: int) -> dict:
+        """Preprocess one observation and return consecutive buffered actions."""
+        self._init_policy()
+        if self._execution_config.mode != "sync":
+            raise ObsValidationError("obs_chunk requires inference_mode='sync'")
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise ObsValidationError("count must be an integer")
+        horizon = self._execution_config.inference_horizon
+        maximum = min(MAX_ACTION_CHUNK, horizon or MAX_ACTION_CHUNK)
+        if not 1 <= count <= maximum:
+            raise ObsValidationError(f"count must be in [1, {maximum}]")
+
+        t0 = time.monotonic()
+        obs = self._obs_preprocessor.preprocess(obs)
+        actions = [self._policy.predict_action(obs).tolist() for _ in range(count)]
+
+        latency_ms = (time.monotonic() - t0) * 1000
+        self._request_count += count
+        self._total_latency += latency_ms
+        return {
+            "actions": actions,
+            "count": len(actions),
+            "step": self._request_count,
+            "latency_ms": round(latency_ms, 2),
+        }
+
+    def predict_rtc(self, obs: dict) -> dict:
+        """One complete conditioned generation; playback clock belongs to the client."""
+        import numpy as np
+
+        self._init_policy()
+        if self._execution_config.mode != "training_rtc":
+            raise ObsValidationError("obs_rtc requires inference_mode='training_rtc'")
+        for key in ("request_id", "observation_step", "commit_step", "prefix_length"):
+            value = obs.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ObsValidationError(f"{key} must be a non-negative integer")
+        episode = obs.get("episode_id")
+        if not isinstance(episode, str) or not 1 <= len(episode) <= 128:
+            raise ObsValidationError("episode_id must be a nonempty string of at most 128 characters")
+        length = obs["prefix_length"]
+        horizon = int(self.cfg.dataloader.num_frames) - 1
+        maximum = self.engine.architecture.training_rtc.max_delay_steps
+        if length > maximum or length >= horizon or obs["commit_step"] - obs["observation_step"] != length:
+            raise ObsValidationError("invalid RTC prefix length or commit step")
+        execute_horizon = self._execution_config.inference_horizon
+        if execute_horizon is not None and length + execute_horizon > horizon:
+            raise ObsValidationError("RTC prefix + inference_horizon exceeds action horizon")
+        try:
+            prefix = np.asarray(obs.get("action_prefix"), dtype=np.float32)
+        except (ValueError, TypeError) as exc:
+            raise ObsValidationError("action_prefix must be numeric") from exc
+        width = self._ckpt_contract().get("raw_action_dim", self.engine.architecture.action_dim)
+        if length == 0 and prefix.shape == (0,):
+            prefix = prefix.reshape(0, width)
+        if prefix.shape != (length, width) or not np.isfinite(prefix).all():
+            raise ObsValidationError(f"action_prefix must be finite [{length},{width}]")
+        t0 = time.monotonic()
+        processed = self._obs_preprocessor.preprocess(dict(obs))
+        conditions = self._policy._build_conditions(processed)
+        conditions.update(action_prefix=prefix, prefix_length=length)
+        actions = np.asarray(self.engine.generate(conditions)["actions"], dtype=np.float32)
+        if actions.shape != (horizon, width) or not np.isfinite(actions).all():
+            raise RuntimeError("RTC generation returned invalid actions")
+        # Preserve the physical-space wire prefix exactly (normalization can clip).
+        actions[:length] = prefix
+        self._request_count += 1
+        return {
+            "actions": actions.tolist(), "count": horizon,
+            "latency_ms": (time.monotonic() - t0) * 1000,
+            **{key: obs[key] for key in (
+                "episode_id", "request_id", "observation_step", "commit_step", "prefix_length"
+            )},
         }
 
     def reset(self):
@@ -259,8 +385,16 @@ class PolicyServer:
                             result = self.predict(data)
                             result["type"] = ACTION
                             await websocket.send(json.dumps(result))
+                        elif msg_type == OBS_CHUNK:
+                            result = self.predict_chunk(data, data.get("count"))
+                            result["type"] = ACTION_CHUNK
+                            await websocket.send(json.dumps(result))
+                        elif msg_type == OBS_RTC:
+                            result = self.predict_rtc(data)
+                            result["type"] = ACTION_CHUNK
+                            await websocket.send(json.dumps(result))
                         elif msg_type == PING:
-                            await websocket.send(json.dumps({"type": PONG, **self._pong_payload()}))
+                            await websocket.send(json.dumps({"type": PONG, **self._pong_payload(), **self._protocol_capabilities()}))
                         else:
                             await websocket.send(
                                 json.dumps(
@@ -513,7 +647,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--inference-mode",
-        choices=("sync", "async"),
+        choices=("sync", "async", "training_rtc"),
         default=None,
         dest="inference_mode",
         help="Override inference.inference_mode executor (separate from denoise_mode).",

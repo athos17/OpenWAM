@@ -60,6 +60,8 @@ class WAMPolicy:
         values between the two legal commands. Threshold 0.5 preserves the
         downstream command contract for the WS server and direct consumers.
         """
+        if self._execution_config.mode == "training_rtc":
+            raise ValueError("training_rtc requires obs_rtc chunk requests")
         action = self._executor.predict_action(self._build_conditions(obs))
         dims = getattr(getattr(self.engine, "architecture", None), "binary_command_dims", ()) or ()
         if dims:
