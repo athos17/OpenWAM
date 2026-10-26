@@ -50,6 +50,10 @@ training:
   use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
                                          # costs ~1 extra forward (standard term; cf. PyTorch/HF)
   use_gradient_checkpointing_offload: false  # Offload checkpointed activations to CPU
+  gradient_checkpointing_layers: null    # dual_system/joint_self_attn: layers with full-layer recompute when
+                                         # use_gradient_checkpointing=true. null/"all" = every layer; int n = every
+                                         # n-th layer; list = layer ids. Other layers keep only the mixed-attention
+                                         # recompute (model.architecture.mot_checkpoint_mixed_attn).
   initialize_model_on_cpu: false         # Load model on CPU, let DeepSpeed move to GPU
   offload_optimizer_device: none         # DeepSpeed ZeRO optimizer-state offload: none / cpu
 

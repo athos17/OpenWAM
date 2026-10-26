@@ -852,13 +852,18 @@ class BaseWAMArchitecture(ABC, nn.Module):
         use_gradient_checkpointing_offload: bool = False,
         max_timestep_boundary: float = 1.0,
         min_timestep_boundary: float = 0.0,
+        gradient_checkpointing_layers=None,
     ) -> None:
         """Set forward-time training flags consumed by ``prepare_inputs``.
 
         Trainers call this once during construction. Keeping these on the
         architecture keeps ``prepare_inputs(batch)`` self-contained — the
         trainer no longer needs to thread these flags through every loss call.
+        ``gradient_checkpointing_layers`` selects which layers take full-layer
+        recompute (architectures with a per-layer driver honor it; see
+        ``mot_driver.resolve_checkpoint_layers``).
         """
+        self._gradient_checkpointing_layers = gradient_checkpointing_layers
         self._use_gradient_checkpointing = bool(use_gradient_checkpointing)
         self._use_gradient_checkpointing_offload = bool(use_gradient_checkpointing_offload)
         self._max_timestep_boundary = float(max_timestep_boundary)

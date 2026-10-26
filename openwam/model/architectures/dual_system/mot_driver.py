@@ -35,6 +35,28 @@ if TYPE_CHECKING:
     from openwam.model.video_backbone.base import BlockLoopState, VideoBackbone
 
 
+def resolve_checkpoint_layers(spec, num_layers: int) -> Optional[frozenset]:
+    """``training.gradient_checkpointing_layers`` -> layers that take full-layer recompute.
+
+    ``None`` / ``"all"``: every layer (the default). Integer ``n``: every n-th layer
+    (``layer_id % n == 0``); ``0`` disables full-layer recompute everywhere. A list
+    names the layer ids explicitly. Returns None for "every layer".
+    """
+    if spec is None or spec == "all":
+        return None
+    if isinstance(spec, bool):
+        raise ValueError("gradient_checkpointing_layers must be 'all', an integer stride, or a list of layer ids")
+    if isinstance(spec, int):
+        if spec < 0:
+            raise ValueError(f"gradient_checkpointing_layers stride must be >= 0, got {spec}")
+        return frozenset() if spec == 0 else frozenset(range(0, num_layers, spec))
+    layers = frozenset(int(i) for i in spec)
+    bad = sorted(i for i in layers if not 0 <= i < num_layers)
+    if bad:
+        raise ValueError(f"gradient_checkpointing_layers out of range [0, {num_layers}): {bad}")
+    return layers
+
+
 class DualSystemMoTDriver:
     """Drives joint self-attention across a video backbone and an action backbone.
 
@@ -89,11 +111,18 @@ class DualSystemMoTDriver:
         self.num_heads = vb.num_heads
         self.head_dim = vb.head_dim
         self.mot_checkpoint_mixed_attn = bool(mot_checkpoint_mixed_attn)
+        # Layers that take full-layer recompute under use_gradient_checkpointing
+        # (None = every layer). The rest keep only the mixed-attention recompute
+        # (``mot_checkpoint_mixed_attn``), trading activation memory for compute.
+        self.checkpoint_layers: Optional[frozenset] = None
         self.attention_mask_mode = attention_mask_mode
 
         # Allow the architecture / config to override the video v↔v sub-mode.
         # When None we defer to whatever ``vb.video_attention_mask_mode`` reports.
         set_video_attention_mask_mode(vb, video_attention_mask_mode)
+
+    def layer_checkpointed(self, layer_id: int) -> bool:
+        return self.checkpoint_layers is None or layer_id in self.checkpoint_layers
 
     # ------------------------------------------------------------------
     # Mixed attention
@@ -182,7 +211,7 @@ class DualSystemMoTDriver:
         to avoid nested-checkpoint waste — the outer wrapper already
         recomputes mixed attention.
         """
-        if use_gradient_checkpointing and self.ab.training:
+        if use_gradient_checkpointing and self.ab.training and self.layer_checkpointed(layer_id):
             return self._step_checkpointed(
                 layer_id, vstate, astate, attn_mask=attn_mask, offload=use_gradient_checkpointing_offload
             )
@@ -360,4 +389,4 @@ class DualSystemMoTDriver:
         return vstate, astate
 
 
-__all__ = ["DualSystemMoTDriver"]
+__all__ = ["DualSystemMoTDriver", "resolve_checkpoint_layers"]

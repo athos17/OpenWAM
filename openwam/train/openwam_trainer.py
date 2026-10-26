@@ -56,6 +56,13 @@ from openwam.train.utils.training_utils import (
 logger = logging.getLogger(__name__)
 
 
+def _checkpoint_layers_spec(spec):
+    """``training.gradient_checkpointing_layers`` as a plain Python value (ListConfig -> list)."""
+    if spec is None or isinstance(spec, (int, str)):
+        return spec
+    return [int(i) for i in spec]
+
+
 class OpenWAMTrainer:
     """Joint video-action trainer for OpenWAM. See module docstring for call order.
 
@@ -179,6 +186,7 @@ class OpenWAMTrainer:
             use_gradient_checkpointing_offload=bool(t.use_gradient_checkpointing_offload),
             max_timestep_boundary=float(t.max_timestep_boundary),
             min_timestep_boundary=float(t.min_timestep_boundary),
+            gradient_checkpointing_layers=_checkpoint_layers_spec(t.get("gradient_checkpointing_layers")),
         )
 
         self.model = self  # self-reference some external callers expect
