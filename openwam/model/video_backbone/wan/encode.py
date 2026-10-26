@@ -13,6 +13,7 @@ import torch
 from torch import Tensor
 
 from openwam.model.video_backbone.wan.preprocess import preprocess_video as _preprocess_video_native
+from openwam.model.video_backbone.wan.preprocess import preprocess_video_batch as _preprocess_video_batch_native
 from openwam.model.video_backbone.wan.preprocess import vae_output_to_video
 
 
@@ -25,12 +26,17 @@ def encode_text(prompts: list, *, tokenizer, text_encoder, device) -> Tuple[Tens
         padding="max_length",
         truncation=True,
     )
+    # Lengths and the zero-fill mask come from the CPU-side tokenizer mask: slicing
+    # ``context[i, v:]`` with a device scalar ``v`` would block the host until the
+    # encoder finishes, serializing the CPU video preprocessing behind it.
+    seq_lens = mask.gt(0).sum(dim=1).long()
+    pad = torch.arange(mask.shape[1]).unsqueeze(0) >= seq_lens.unsqueeze(1)
     ids = ids.to(device)
     mask = mask.to(device)
-    seq_lens = mask.gt(0).sum(dim=1).long()
+    pad = pad.to(device)
+    seq_lens = seq_lens.to(device)
     context = text_encoder(ids, mask)
-    for i, v in enumerate(seq_lens):
-        context[i, v:] = 0
+    context.masked_fill_(pad.unsqueeze(-1), 0)
     return context, seq_lens
 
 
@@ -52,6 +58,13 @@ def preprocess_video(frames, *, encoder=None, dtype, device) -> Tensor:
     if encoder is not None:
         return encoder.preprocess_video(frames)
     return _preprocess_video_native(frames, dtype=dtype, device=device)
+
+
+def preprocess_video_batch(clips, *, encoder=None, dtype, device) -> Tensor:
+    """Batch of clips -> stacked ``[B, C, T, H, W]`` pixels (one uint8 upload on the native path)."""
+    if encoder is not None:
+        return torch.cat([encoder.preprocess_video(c) for c in clips], dim=0)
+    return _preprocess_video_batch_native(clips, dtype=dtype, device=device)
 
 
 def encode_video(video_tensor: Tensor, *, vae, encoder=None) -> Tensor:

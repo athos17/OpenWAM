@@ -32,6 +32,43 @@ def preprocess_video(video, *, dtype, device, pattern="B C T H W", min_value=-1,
     return video
 
 
+def stack_video_uint8(clips) -> torch.Tensor | None:
+    """List[List[PIL.Image]] -> uint8 ``[B, T, H, W, C]`` CPU tensor, or None.
+
+    None when the clips are not one uniform RGB uint8 shape (the caller then keeps
+    the per-frame path). Pinned when CUDA is available so the upload can be async.
+    """
+    if not clips or not all(clips):
+        return None
+    arrays = [[np.asarray(image) for image in clip] for clip in clips]
+    first = arrays[0][0]
+    if first.dtype != np.uint8 or first.ndim != 3:
+        return None
+    if any(len(clip) != len(arrays[0]) for clip in arrays) or any(
+        a.shape != first.shape or a.dtype != np.uint8 for clip in arrays for a in clip
+    ):
+        return None
+    video = torch.from_numpy(np.stack([np.stack(clip) for clip in arrays]))
+    return video.pin_memory() if torch.cuda.is_available() else video
+
+
+def preprocess_video_batch(clips, *, dtype, device, min_value=-1, max_value=1) -> torch.Tensor:
+    """List of clips (List[PIL.Image]) -> ``[B, C, T, H, W]`` in ``[min_value, max_value]``.
+
+    One uint8 upload per batch instead of one float32 upload per frame. Bitwise equal
+    to ``torch.cat([preprocess_video(c) for c in clips])``: uint8 -> ``dtype`` is exact
+    for 0..255 and the scale/offset run as the same two elementwise ops on ``device``.
+    The pinned, non-blocking upload also keeps the host from waiting on queued GPU
+    work (e.g. the text encoder), which a pageable copy would do.
+    """
+    video = stack_video_uint8(clips)
+    if video is None:
+        return torch.cat([preprocess_video(c, dtype=dtype, device=device, min_value=min_value, max_value=max_value) for c in clips])
+    video = video.to(device=device, non_blocking=True).to(dtype=dtype)
+    video = video * ((max_value - min_value) / 255) + min_value
+    return video.permute(0, 4, 1, 2, 3).contiguous()
+
+
 def _vae_output_to_image(vae_output, pattern="B C H W", min_value=-1, max_value=1):
     if pattern != "H W C":
         vae_output = reduce(vae_output, f"{pattern} -> H W C", reduction="mean")

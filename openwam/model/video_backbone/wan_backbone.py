@@ -781,15 +781,12 @@ class WanBase(VideoBackbone):
                 text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
             )
 
+        # Runs on the host while the text encoder executes: nothing above syncs, and
+        # the batch upload is pinned + non-blocking.
         with self._timed("preprocess_video"):
-            all_input_videos = []
-            for clip_frames in frames:
-                all_input_videos.append(
-                    wan_encode.preprocess_video(
-                        clip_frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
-                    )
-                )
-            stacked_inputs = torch.cat(all_input_videos, dim=0)
+            stacked_inputs = wan_encode.preprocess_video_batch(
+                frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
+            )
         with self._timed("encode_video"):
             input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
         input_latents = input_latents.to(dtype=dtype, device=device)
