@@ -32,4 +32,6 @@ bash scripts/train.sh \
   training.step_timing.enabled=true training.step_timing.summary_every=10 training.max_gpu_memory_gib=79 \
   training.output_path="$PERF_ROOT/$TAG" project.output_dir="$PERF_ROOT/$TAG" project.seed=42 project.wandb=null \
   "$@" > "$LOG" 2>&1
-echo "exit $?" >> "$LOG"
+status=$?
+echo "exit $status" >> "$LOG"
+exit "$status"
