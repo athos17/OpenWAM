@@ -1,0 +1,15 @@
+# 4-node comparison: s7d plus the VAE options (cuDNN autotune for the frozen VAE encode and
+# channels_last_3d Conv3d; the latter is a bf16-level rounding change). 250 updates, enough to
+# overlap the first 249 steps of the stopped base / s7d runs.
+defaults:
+  - train_accel_cmp_s7d
+  - _self_
+
+training:
+  max_steps: 250
+  output_path: /mnt/pfs/v89atp/workspace/outputs/accel_cmp_32gpu/s7d_vae
+  vae_cudnn_benchmark: true
+  vae_channels_last: true
+
+project:
+  name: openwam-accel-cmp-s7d-vae

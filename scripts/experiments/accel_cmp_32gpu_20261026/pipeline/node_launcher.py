@@ -3,7 +3,7 @@ from pathlib import Path
 R=Path('/mnt/pfs/v89atp/workspace/setup/accel_cmp_32gpu_20261026')
 NODES=4
 variant=sys.argv[1]
-assert variant in ('base','s7d'),variant
+assert variant in ('base','s7d','s7d_vae','s7e_vae'),variant
 keys=['MASTER_ADDR','MASTER_PORT','RANK','WORLD_SIZE','NODE_RANK','GROUP_RANK','LOCAL_RANK','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES','NCCL_IB_DISABLE']
 env={key:os.environ.get(key) for key in keys}
 print('NODE_LAUNCH',json.dumps({'host':socket.gethostname(),'variant':variant,'env':env}),flush=True)

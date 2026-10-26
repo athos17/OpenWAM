@@ -2,7 +2,7 @@
 import json,time
 from pathlib import Path
 R=Path('/mnt/pfs/v89atp/workspace/setup/accel_cmp_32gpu_20261026')
-for variant in ('base','s7d'):
+for variant in ('base','s7d','s7d_vae','s7e_vae'):
     reports=[json.loads(p.read_text()) for p in sorted((R/'results').glob(f'{variant}_rank*.json'))]
     if not reports:continue
     steps=[r['history'][-1]['step'] if r['history'] else 0 for r in reports]

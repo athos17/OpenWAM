@@ -1,4 +1,4 @@
-"""Production trainer on 32 GPUs with the 8-node recipe; one run per variant (base | s7d).
+"""Production trainer on 32 GPUs with the 8-node recipe; one run per variant (base | s7d | s7d_vae | s7e_vae).
 
 Checks: exact retained pretrained weights, identical fresh ActionDiT on every rank, per-sample
 batch shapes, finite losses, and all three sources seen. Rank 0 appends every step (sample ids,
@@ -25,6 +25,7 @@ from scripts.train import _apply_gpu_memory_cap, _build_accelerator, _inject_pro
 
 R=Path('/mnt/pfs/v89atp/workspace/setup/accel_cmp_32gpu_20261026')
 WORLD=32
+VARIANTS=['base','s7d','s7d_vae','s7e_vae']
 
 def sha(t):
     return hashlib.sha256(t.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes()).hexdigest()
@@ -116,7 +117,7 @@ class ExperimentTrainer(OpenWAMTrainer):
             'elapsed_seconds':time.time()-self.started})
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('variant',choices=['base','s7d']);a=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('variant',choices=VARIANTS);a=p.parse_args()
     torch.set_num_threads(4);logging.basicConfig(level=logging.WARNING)
     torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
     torch.distributed.init_process_group('nccl',timeout=timedelta(seconds=1200))

@@ -1,6 +1,6 @@
 """Use the existing authenticated AIHC client on dev-cpu. Never export credentials.
 
-One 4-node job per variant (base | s7d); each runs the NCCL probe, then the training run.
+One 4-node job per variant (base | s7d | s7d_vae | s7e_vae); each runs the NCCL probe, then the training run.
 """
 import argparse,hashlib,json,sys
 from datetime import datetime,timezone
@@ -9,7 +9,8 @@ sys.path.insert(0,'/root/aihc-gpu-smoke-20261022')
 import api
 R=Path('/mnt/pfs/v89atp/workspace/setup/accel_cmp_32gpu_20261026')
 P='aihc-serverless';Q='aihcq-7crsdg0y5p20'
-p=argparse.ArgumentParser();p.add_argument('operation',choices=['create','status','logs','stop']);p.add_argument('variant',choices=['base','s7d']);a=p.parse_args()
+VARIANTS=['base','s7d','s7d_vae','s7e_vae']
+p=argparse.ArgumentParser();p.add_argument('operation',choices=['create','status','logs','stop']);p.add_argument('variant',choices=VARIANTS);a=p.parse_args()
 if a.operation=='create':
  manifest=json.loads((R/'results/release_manifest.json').read_text())
  for name,expected in manifest['files'].items():

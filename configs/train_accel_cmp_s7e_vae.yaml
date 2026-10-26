@@ -1,0 +1,11 @@
+# 4-node comparison: s7d + VAE options, full recompute on layers 0-21 only (skip the last 8 of 30).
+defaults:
+  - train_accel_cmp_s7d_vae
+  - _self_
+
+training:
+  output_path: /mnt/pfs/v89atp/workspace/outputs/accel_cmp_32gpu/s7e_vae
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]  # skip the last 8 of 30
+
+project:
+  name: openwam-accel-cmp-s7e-vae
