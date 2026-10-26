@@ -690,3 +690,28 @@ def test_architecture_variant_strings_for_sampler_guard():
         "single_system_moe",
     ):
         assert normalize_architecture_spec(name).variant != "joint_self_attn"
+
+
+def test_save_checkpoint_accepts_channels_last_weights():
+    """training.vae_channels_last leaves Conv3d weights non-contiguous; saving must still work."""
+    from openwam.model.architectures.base import BaseWAMArchitecture
+
+    class _ConvArch(BaseWAMArchitecture):
+        def __init__(self):
+            super().__init__(cfg=None)
+            self.conv = nn.Conv3d(3, 4, kernel_size=3)
+
+        def forward(self, *args, **kwargs):  # pragma: no cover
+            raise NotImplementedError
+
+    arch = _ConvArch()
+    arch.conv.to(memory_format=torch.channels_last_3d)
+    assert not arch.conv.weight.is_contiguous()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = str(Path(tmpdir) / "conv_ckpt.safetensors")
+        arch.save_checkpoint(ckpt_path)
+
+        reloaded = _ConvArch()
+        reloaded.load_checkpoint(ckpt_path)
+        assert torch.equal(reloaded.conv.weight, arch.conv.weight)

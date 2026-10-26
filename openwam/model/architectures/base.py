@@ -673,6 +673,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if state_dict is None:
             state_dict = self.state_dict()
         state_dict = _exclude_vlm_from_state_dict(state_dict)
+        # safetensors rejects non-contiguous tensors, e.g. the frozen VAE Conv3d weights
+        # under training.vae_channels_last (channels_last_3d); save them in the default layout.
+        state_dict = {k: v if v.is_contiguous() else v.contiguous() for k, v in state_dict.items()}
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         save_file(state_dict, path)
 
