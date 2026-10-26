@@ -1,0 +1,30 @@
+# 8-node three-source run (train_action_random_64gpu, unchanged recipe) with the s7d
+# acceleration options; the VAE options stay off. Same seed and data order as the
+# 2026-10-22 run, so the two can be compared step by step.
+defaults:
+  - train_action_random_64gpu
+  - _self_
+
+training:
+  output_path: /mnt/pfs/v89atp/workspace/outputs/action_random_64gpu_s7d
+  deepspeed_zero:
+    overlap_comm: true
+    contiguous_gradients: true
+    reduce_bucket_size: 200000000
+    allgather_bucket_size: 500000000
+  text_padding: longest
+  text_dedup: true
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]  # skip the last 6 of 30
+  loss_log_csv: true
+  step_timing:
+    enabled: true
+    summary_every: 50
+    mfu: true
+    peak_tflops: 312               # A800 dense bf16
+
+model:
+  architecture:
+    mot_split_attention: true
+
+project:
+  name: openwam-action-random-64gpu-s7d
