@@ -576,7 +576,10 @@ class OpenWAMTrainer:
         ``training.vae_cudnn_benchmark`` / ``training.vae_channels_last`` (VAE encode).
         All default to the reference path.
         """
-        t = self.cfg.training
+        cfg = getattr(self, "cfg", None)  # tests may build the trainer without a cfg
+        if cfg is None:
+            return
+        t = cfg.training
         vb = getattr(arch, "video_backbone", None)
         padding = str(t.get("text_padding", "max_length") or "max_length")
         dedup = bool(t.get("text_dedup", False))
