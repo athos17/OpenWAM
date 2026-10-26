@@ -44,7 +44,10 @@ training:
   step_timing:
     enabled: false                # per-stage CPU / CUDA-event timing; STEP_TIMING summary every N steps
     summary_every: 50
+    mfu: false                    # count the step's FLOPs once (first step) and report MFU in STEP_TIMING
+    peak_tflops: null             # dense bf16 peak per GPU; null = by device name (H20 148, A800/A100 312, H100/H800 989)
   max_gpu_memory_gib: null        # cap the CUDA allocator per process (e.g. 79 to emulate an 80 GB A800 on a 96 GB H20)
+  loss_log_csv: false             # write <run dir>/debug_loss_history.csv every step (rank 0) outside debug mode
 
   # --- Frozen-encoder input options (all default to the reference path) ---
   text_padding: max_length        # UMT5: max_length = pad to 512; longest = pad to the batch's longest prompt

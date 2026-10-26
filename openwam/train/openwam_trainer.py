@@ -647,16 +647,17 @@ class OpenWAMTrainer:
         if not isinstance(batch, list):
             batch = [batch]
 
-        with self.step_timer.stage("prepare_inputs"):
+        with self.step_timer.stage("prepare_inputs"), self.step_timer.count_flops("encoder"):
             inputs = self.architecture.prepare_inputs(batch)
         if self.lambda_action > 0 and inputs.get("actions") is None:
             raise ValueError("lambda_action > 0 but no action in data.")
 
-        result = self.architecture.compute_loss(
-            **inputs,
-            lambda_video=self.lambda_video,
-            lambda_action=self.lambda_action,
-        )
+        with self.step_timer.count_flops("model"):
+            result = self.architecture.compute_loss(
+                **inputs,
+                lambda_video=self.lambda_video,
+                lambda_action=self.lambda_action,
+            )
 
         return {
             "total": result["loss"],
@@ -709,9 +710,23 @@ class OpenWAMTrainer:
                 log_dict[f"train/loss_{name}"] = metrics[key]
             wandb_run.log(log_dict, step=global_step)
 
-        if not debug:
-            return
         is_main = self.accelerator is None or self.accelerator.is_main_process
+        cfg = getattr(self, "cfg", None)
+        loss_csv = bool(cfg.training.get("loss_log_csv", False)) if cfg is not None else False
+        if not debug:
+            # training.loss_log_csv: the per-step CSV without the debug run overrides.
+            if loss_csv and is_main and output_path:
+                write_debug_loss_row(
+                    output_path,
+                    labels=labels,
+                    metrics=metrics,
+                    global_step=global_step,
+                    opt_step=opt_step,
+                    epoch=epoch,
+                    lr=lr,
+                    steps_per_sec=steps_per_sec,
+                )
+            return
         if not is_main:
             return
         loss_parts = " ".join(f"{name}={metrics[key]:.6f}" for name, key in labels)

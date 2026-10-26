@@ -14,6 +14,15 @@ reported with the following step.
 Every ``summary_every`` steps all ranks exchange their window medians and rank 0
 prints ``STEP_TIMING {...}`` and appends it to ``<output>/step_timing.jsonl``
 (per-stage median of the rank medians and the rank max, plus samples/s).
+
+MFU (``step_timing.mfu``): the FLOPs of one step are counted once, on the first
+step, with ``torch.utils.flop_counter.FlopCounterMode`` around the trainable
+model's forward (``model``) and the frozen-encoder input path (``encoder``).
+Model FLOPs per step are ``3 x`` the forward (forward + backward; activation
+recompute is not counted, so this is MFU, not HFU). ``mfu`` divides them by the
+step time and the GPU's dense bf16 peak; ``mfu_incl_encoders`` adds the frozen
+encoders' forward FLOPs. Kernels outside ATen (e.g. the ``flash_attn`` package)
+are not counted; the training attention paths here go through ATen SDPA.
 """
 
 from __future__ import annotations
@@ -28,6 +37,31 @@ from typing import Optional
 
 import torch
 
+# Dense bf16 tensor-core peak per GPU (TFLOP/s, no sparsity), matched against the
+# CUDA device name. Override with training.step_timing.peak_tflops.
+PEAK_BF16_TFLOPS = (
+    ("H20", 148.0),
+    ("H800", 989.0),
+    ("H100", 989.0),
+    ("H200", 989.0),
+    ("A800", 312.0),
+    ("A100", 312.0),
+    ("L40S", 362.0),
+    ("L20", 119.5),
+    ("RTX 4090", 165.2),
+)
+
+
+def detect_peak_tflops(device_name: Optional[str] = None) -> Optional[float]:
+    if device_name is None:
+        if not torch.cuda.is_available():
+            return None
+        device_name = torch.cuda.get_device_name()
+    for key, tflops in PEAK_BF16_TFLOPS:
+        if key in device_name:
+            return tflops
+    return None
+
 
 class StepTimer:
     def __init__(
@@ -38,12 +72,20 @@ class StepTimer:
         samples_per_step: int = 0,
         output_path: Optional[str] = None,
         is_main: bool = True,
+        mfu: bool = False,
+        peak_tflops: Optional[float] = None,
     ):
         self.enabled = bool(enabled)
         self.summary_every = int(summary_every)
         self.samples_per_step = int(samples_per_step)
         self.output_path = output_path
         self.is_main = is_main
+        self.mfu = self.enabled and bool(mfu)
+        self.peak_tflops = float(peak_tflops) if peak_tflops else (detect_peak_tflops() if self.mfu else None)
+        # Forward FLOPs of one step per counted scope ("model", "encoder"); filled on
+        # the first step, then reused (shapes are fixed by the batch size).
+        self.forward_flops: dict = {}
+        self._counting_done = False
         self._cuda = torch.cuda.is_available()
         self._pending: list = []
         self._window: dict = defaultdict(list)
@@ -56,7 +98,44 @@ class StepTimer:
     @classmethod
     def from_cfg(cls, cfg, **kw) -> "StepTimer":
         cfg = cfg or {}
-        return cls(enabled=bool(cfg.get("enabled", False)), summary_every=int(cfg.get("summary_every", 50)), **kw)
+        return cls(
+            enabled=bool(cfg.get("enabled", False)),
+            summary_every=int(cfg.get("summary_every", 50)),
+            mfu=bool(cfg.get("mfu", False)),
+            peak_tflops=cfg.get("peak_tflops"),
+            **kw,
+        )
+
+    # ------------------------------------------------------------------ FLOPs
+
+    @contextlib.contextmanager
+    def count_flops(self, scope: str):
+        """Count the FLOPs of the wrapped code once (first step only) under ``scope``."""
+        if not self.mfu or self._counting_done:
+            yield
+            return
+        from torch.utils.flop_counter import FlopCounterMode
+
+        counter = FlopCounterMode(display=False)
+        with counter:
+            yield
+        self.forward_flops[scope] = self.forward_flops.get(scope, 0) + counter.get_total_flops()
+
+    def _flops_fields(self, iteration_s: Optional[float]) -> dict:
+        model = self.forward_flops.get("model")
+        if model is None:
+            return {}
+        model_step = 3 * model  # forward + backward (2x forward)
+        out = {"model_tflop_per_step": model_step / 1e12}
+        encoder = self.forward_flops.get("encoder")
+        if encoder is not None:
+            out["encoder_tflop_per_step"] = encoder / 1e12
+        if iteration_s and self.peak_tflops:
+            out["model_tflops_per_sec"] = model_step / iteration_s / 1e12
+            out["mfu"] = model_step / (iteration_s * self.peak_tflops * 1e12)
+            if encoder is not None:
+                out["mfu_incl_encoders"] = (model_step + encoder) / (iteration_s * self.peak_tflops * 1e12)
+        return out
 
     # ------------------------------------------------------------------ recording
 
@@ -115,6 +194,8 @@ class StepTimer:
             # Allocator high-water mark since start (GiB); a running max, not per step.
             out["peak_allocated_gib"] = torch.cuda.max_memory_allocated() / (1 << 30)
             out["peak_reserved_gib"] = torch.cuda.max_memory_reserved() / (1 << 30)
+        if self.forward_flops:
+            self._counting_done = True
         for k, v in out.items():
             self._window[k].append(v)
         self.last = out
@@ -131,6 +212,7 @@ class StepTimer:
         if not self.enabled or self.summary_every <= 0 or global_step % self.summary_every != 0:
             return None
         local = {k: statistics.median(v) for k, v in self._window.items() if v}
+        local.update(self._flops_fields(local.get("iteration_cpu_s")))
         n = len(self._window.get("step_cpu_s", []))
         self._window.clear()
         gathered = [local]
@@ -149,6 +231,11 @@ class StepTimer:
         it = stages.get("iteration_cpu_s")
         if it and self.samples_per_step:
             summary["samples_per_sec"] = self.samples_per_step / it["median_of_ranks"]
+        if "mfu" in stages:
+            summary["mfu"] = stages["mfu"]["median_of_ranks"]
+            summary["peak_tflops"] = self.peak_tflops
+        if "mfu_incl_encoders" in stages:
+            summary["mfu_incl_encoders"] = stages["mfu_incl_encoders"]["median_of_ranks"]
         if self.is_main:
             line = json.dumps(summary)
             print("STEP_TIMING " + line, flush=True)
