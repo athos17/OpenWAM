@@ -1,0 +1,28 @@
+# 4-node (32 A800) speed / consistency comparison: reference path.
+# Same recipe as the 8-node three-source run (train_action_random_64gpu): per-GPU batch 48,
+# GA 1, AdamW 1e-4, cosine with 5% warmup, ZeRO-2, full gradient checkpointing, seed 42,
+# fresh Alpha Wan + proprio with a random ActionDiT. Every acceleration option stays off.
+defaults:
+  - train_action_random_64gpu
+  - _self_
+
+training:
+  gradient_accumulation_steps: 1   # 4 nodes * 8 GPUs * 48 = 1536
+  max_steps: 1200                  # first 1200 updates of the formal LR curve (warmup ends at 1192)
+  output_path: /mnt/pfs/v89atp/workspace/outputs/accel_cmp_32gpu/base
+  save_steps: 2000                 # > max_steps: only the final weights are written
+  save_full_states_for_resume: false
+  loss_log_csv: true               # <run>/debug_loss_history.csv, one row per step
+  step_timing:
+    enabled: true
+    summary_every: 10
+    mfu: true
+    peak_tflops: 312               # A800 dense bf16
+
+experiment:
+  # The 8-node run's cosine horizon (optimizer updates per epoch at 64 GPUs), so the LR at
+  # every step equals the formal run's instead of a schedule compressed into max_steps.
+  lr_horizon_opt_steps: 23845
+
+project:
+  name: openwam-accel-cmp-base
