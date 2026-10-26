@@ -111,6 +111,10 @@ class StepTimer:
             if start is not None:
                 out[f"{name}_gpu_s"] = out.get(f"{name}_gpu_s", 0.0) + start.elapsed_time(end) / 1000.0
         self._pending.clear()
+        if self._cuda:
+            # Allocator high-water mark since start (GiB); a running max, not per step.
+            out["peak_allocated_gib"] = torch.cuda.max_memory_allocated() / (1 << 30)
+            out["peak_reserved_gib"] = torch.cuda.max_memory_reserved() / (1 << 30)
         for k, v in out.items():
             self._window[k].append(v)
         self.last = out

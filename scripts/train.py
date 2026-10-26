@@ -122,6 +122,28 @@ def _train(cfg: DictConfig) -> None:
     _train_openwam(cfg)
 
 
+def _apply_gpu_memory_cap(cfg: DictConfig) -> None:
+    """``training.max_gpu_memory_gib``: cap this process's CUDA caching allocator.
+
+    Lets memory-bound choices (batch size, recompute strategy) made on larger GPUs
+    (e.g. 96 GB H20) hold on the target GPU (e.g. 80 GB A800). Allocations beyond
+    the cap raise OOM exactly as they would on the smaller card.
+    """
+    cap_gib = OmegaConf.select(cfg, "training.max_gpu_memory_gib", default=None)
+    if cap_gib is None:
+        return
+    import torch
+
+    device = int(os.environ.get("LOCAL_RANK", 0))
+    total = torch.cuda.get_device_properties(device).total_memory
+    fraction = float(cap_gib) * (1 << 30) / total
+    if not 0 < fraction <= 1:
+        raise ValueError(f"training.max_gpu_memory_gib={cap_gib} must be in (0, {total / (1 << 30):.1f}]")
+    torch.cuda.set_per_process_memory_fraction(fraction, device=device)
+    if device == 0:
+        logger.info("GPU memory capped at %.1f GiB (fraction %.4f of %.1f GiB)", float(cap_gib), fraction, total / (1 << 30))
+
+
 def _train_openwam(cfg: DictConfig) -> None:
     """Original OpenWAM training path."""
     from openwam.dataloader.registry import build_dataset
@@ -139,6 +161,7 @@ def _train_openwam(cfg: DictConfig) -> None:
         rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
         seed_everything(int(project_seed), rank=rank)
 
+    _apply_gpu_memory_cap(cfg)
     accelerator = _build_accelerator(cfg)
 
     # Build dataset via registry

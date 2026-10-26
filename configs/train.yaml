@@ -44,6 +44,7 @@ training:
   step_timing:
     enabled: false                # per-stage CPU / CUDA-event timing; STEP_TIMING summary every N steps
     summary_every: 50
+  max_gpu_memory_gib: null        # cap the CUDA allocator per process (e.g. 79 to emulate an 80 GB A800 on a 96 GB H20)
 
   # --- Memory optimization ---
   use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
