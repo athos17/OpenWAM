@@ -83,6 +83,15 @@ def _build_accelerator(cfg: DictConfig):
         offload_optimizer_device=str(t.offload_optimizer_device),
     )
 
+    # training.deepspeed_zero: non-null keys override DeepSpeed's zero_optimization
+    # defaults (e.g. overlap_comm / reduce_bucket_size); the plugin's config dict is the
+    # one handed to deepspeed.initialize at prepare().
+    zero_overrides = {k: v for k, v in (t.get("deepspeed_zero") or {}).items() if v is not None}
+    if zero_overrides:
+        plugin.deepspeed_config["zero_optimization"].update(zero_overrides)
+        if os.environ.get("LOCAL_RANK", "0") == "0":
+            logger.info("DeepSpeed zero_optimization = %s", plugin.deepspeed_config["zero_optimization"])
+
     return accelerate.Accelerator(
         gradient_accumulation_steps=grad_accum,
         deepspeed_plugin=plugin,

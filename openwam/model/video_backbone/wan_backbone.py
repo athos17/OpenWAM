@@ -15,6 +15,7 @@ code reaches them only through the ABC methods.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from typing import Callable, Optional, Tuple
@@ -114,6 +115,7 @@ class WanBase(VideoBackbone):
         self._wan_blocks_compile_enabled = False
         self._wan_blocks_compile_kwargs: dict | None = None
         self._compiled_wan_blocks: dict[int, Callable[..., Tensor]] = {}
+        self._stage_timer = None  # trainer's StepTimer (training.step_timing), else None
 
     # ================================================================
     # Internal properties
@@ -752,6 +754,10 @@ class WanBase(VideoBackbone):
     # ABC: Unified preprocessing (1)
     # ================================================================
 
+    def _timed(self, name: str):
+        timer = getattr(self, "_stage_timer", None)
+        return timer.stage(name) if timer is not None else contextlib.nullcontext()
+
     def preprocess_input_for_train(self, *, frames=None, text=None, **kw) -> dict:
         """Unified train preprocessing: raw data (``frames``/``text``, optional
         ``vace_videos``/``ref_images`` in kw) → the denoising-loop input dict.
@@ -770,19 +776,22 @@ class WanBase(VideoBackbone):
         )
 
         batch_size = len(frames)
-        context, seq_lens = wan_encode.encode_text(
-            text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
-        )
-
-        all_input_videos = []
-        for clip_frames in frames:
-            all_input_videos.append(
-                wan_encode.preprocess_video(
-                    clip_frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
-                )
+        with self._timed("encode_text"):
+            context, seq_lens = wan_encode.encode_text(
+                text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
             )
-        stacked_inputs = torch.cat(all_input_videos, dim=0)
-        input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
+
+        with self._timed("preprocess_video"):
+            all_input_videos = []
+            for clip_frames in frames:
+                all_input_videos.append(
+                    wan_encode.preprocess_video(
+                        clip_frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
+                    )
+                )
+            stacked_inputs = torch.cat(all_input_videos, dim=0)
+        with self._timed("encode_video"):
+            input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
         # Variant-specific first-frame / control conditioning lives in
