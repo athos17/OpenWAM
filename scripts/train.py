@@ -198,12 +198,9 @@ def main(cfg: DictConfig) -> None:
     try:
         _train(cfg)
     except BaseException:
-        # destroy_process_group below is a collective. If only this rank
-        # raised, the other ranks are still in mid-training collectives
-        # (e.g. accelerate's RNG-state broadcast inside dataloader.__iter__),
-        # and destroy will block forever waiting for them — masking the
-        # actual rank-0 exception. Mirror the alternate path's pre-destroy
-        # traceback print so the real error survives the deadlock.
+        # A failed rank cannot safely participate in NCCL teardown while peers
+        # are still in training collectives. Flush the error, then let torchrun
+        # observe a failed worker and terminate the remaining ranks.
         import traceback as _tb
 
         rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "?"))
@@ -213,8 +210,12 @@ def main(cfg: DictConfig) -> None:
         sys.stderr.write(_tb.format_exc())
         sys.stderr.flush()
         sys.stdout.flush()
+        if "TORCHELASTIC_RUN_ID" in os.environ:
+            # Bypass Python/CUDA destructors too: they can wait on outstanding
+            # collectives even when explicit destroy_process_group is skipped.
+            os._exit(1)
         raise
-    finally:
+    else:
         # Avoid `destroy_process_group() was not called before program exit`
         # warning on shutdown by tearing down the NCCL process group cleanly.
         import torch.distributed as dist
