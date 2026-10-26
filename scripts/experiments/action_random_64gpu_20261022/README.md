@@ -17,11 +17,19 @@ Formal training does not resume the previous 32-GPU run or verification runs.
   Usage is sampled every 15 seconds to `results/*_resources_node*.jsonl`.
 - One epoch, AdamW LR 1e-4, betas (0.9, 0.95), weight decay 0.01,
   clip norm 1, cosine schedule with 5% warmup; full-state checkpoint every
-  100 optimizer updates, retain two checkpoints.
+  2,000 optimizer updates, retain every weight checkpoint (`keep_last_k_ckpts: -1`).
+  Full resume states are kept throughout training and cleaned up at normal
+  completion as before; all periodic weights and the final weights remain.
 - EgoDex video-only + AgiBot + SharpaDex mixed by the existing modality sampler.
   AgiBot quantile normalization and SharpaDex min-max normalization unchanged.
 
 ## Release and launch
+
+The source recipe was updated on 2026-10-26 to save every 2,000 steps and keep
+all weights. The completed 2026-10-22 experiment used every 100 steps / last 2.
+Its frozen `release/`, manifest, results, and output config remain historical
+records. A future submission must package and verify a new release from the
+updated source; the commands below address the old immutable experiment.
 
 Server repository: `/mnt/pfs/v89atp/workspace/OpenWAM`.
 Experiment root: `/mnt/pfs/v89atp/workspace/setup/action_random_64gpu_20261022`.

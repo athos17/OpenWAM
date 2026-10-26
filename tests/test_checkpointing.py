@@ -115,6 +115,18 @@ def test_finalize_default_keeps_only_final_weight(tmp_path):
     assert remaining == ["checkpoint_step_300.safetensors"]
 
 
+def test_finalize_unlimited_keeps_every_weight_including_final(tmp_path):
+    steps = (2000, 4000, 6000, 6387)
+    for step in steps:
+        (tmp_path / f"checkpoint_step_{step}.safetensors").write_text(str(step))
+    for step in steps[:-1]:
+        _make_accel_state(tmp_path, step, marker=True)
+    finalize_keep_weights_only(str(tmp_path), keep_last_k=-1)
+    for step in steps:
+        assert (tmp_path / f"checkpoint_step_{step}.safetensors").read_text() == str(step)
+    assert not list(tmp_path.glob("accel_state_step_*"))
+
+
 # --- manage_checkpoints: weights + accel_state pruned in lockstep ---
 
 
@@ -127,6 +139,19 @@ def test_manage_checkpoints_prunes_accel_state_in_lockstep(tmp_path):
     states = sorted(p.name for p in tmp_path.glob("accel_state_step_*"))
     assert weights == ["checkpoint_step_200.safetensors", "checkpoint_step_300.safetensors"]
     assert states == ["accel_state_step_200", "accel_state_step_300"]
+
+
+def test_manage_checkpoints_unlimited_preserves_each_periodic_save(tmp_path):
+    steps = (2000, 4000, 6000, 8000)
+    for step in steps:
+        (tmp_path / f"checkpoint_step_{step}.safetensors").write_text(str(step))
+        _make_accel_state(tmp_path, step, marker=True)
+        manage_checkpoints(str(tmp_path), keep_last_k=-1)
+        for previous in steps:
+            if previous > step:
+                break
+            assert (tmp_path / f"checkpoint_step_{previous}.safetensors").read_text() == str(previous)
+            assert (tmp_path / f"accel_state_step_{previous}" / "trainer_state.json").is_file()
 
 
 # --- save/load_full_state metadata round-trip + atomic completion marker ---

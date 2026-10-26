@@ -389,8 +389,11 @@ def manage_checkpoints(output_dir: str, keep_last_k: int):
 
     Prunes ``checkpoint_step_*`` (weights, files) and ``accel_state_step_*``
     (resume state, dirs) in lockstep so a kept weights file always retains its
-    sibling state dir.
+    sibling state dir. A negative limit disables periodic pruning of both.
     """
+    if keep_last_k < 0:
+        return
+
     import shutil
 
     files = _glob.glob(os.path.join(output_dir, "checkpoint_step_*"))
@@ -416,7 +419,8 @@ def finalize_keep_weights_only(output_dir: str, keep_last_k: int = 1):
     """Training-complete cleanup: drop all resume state, keep recent weights.
 
     Removes every ``accel_state_step_*`` dir and every ``checkpoint_step_*.safetensors``
-    except the most recent *keep_last_k*. Rank-0 only — caller must guard.
+    except the most recent *keep_last_k*. A negative limit retains every weight
+    checkpoint; resume-state cleanup is unchanged. Rank-0 only — caller must guard.
     """
     import shutil
 
@@ -427,6 +431,9 @@ def finalize_keep_weights_only(output_dir: str, keep_last_k: int = 1):
                 logger.info("Removed accelerate state dir: %s", d)
             except OSError as e:
                 logger.warning("Failed to remove accelerate state dir %s: %s", d, e)
+
+    if keep_last_k < 0:
+        return
 
     files = _glob.glob(os.path.join(output_dir, "checkpoint_step_*.safetensors"))
     files.sort(key=lambda p: step_num(p, "checkpoint_step_"))
