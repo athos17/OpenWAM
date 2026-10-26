@@ -1,0 +1,34 @@
+# Marvin Pro + SharpaWave real-robot dataset (converted LeRobot v3; scripts/convert_marvin_lerobot_v3.py).
+type: marvin
+dataset_dir: /data/dataset/openwam/pick_place_2_3_openwam_v3
+action_mode: eef
+
+# Raw reader layout (62-D): L EEF9, L hand22, R EEF9, R hand22.
+# Gripper slots 9/43 and the final two 24-DoF hand slots remain masked.
+unify_action: true
+unify_action_map: [0-8, 10-31, 34-42, 44-65]
+unify_state_map: [0-8, 10-31, 34-42, 44-65]
+
+# Fixed OpenWAM-alpha temporal and normalization contract.
+normalize_mode: min-max
+num_frames: 33
+video_stride: 4
+window_stride: 1
+split: train
+
+# Three-camera L-shaped canvas expected by the foundation model.
+height: 384
+width: 320
+multiview: true
+camera_layout:
+  - observation.images.left_head
+  - observation.images.left_wrist
+  - observation.images.right_wrist
+target_camera: null
+
+color_jitter:
+  enabled: false
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0
