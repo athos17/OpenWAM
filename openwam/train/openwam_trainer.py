@@ -561,12 +561,37 @@ class OpenWAMTrainer:
         # Propagate device down through architecture; frozen modules (T5/VAE) idempotent move.
         arch.set_dtype_device(arch.dtype, self.accelerator.device)
         arch.move_frozen_to_device(self.accelerator.device)
+        self._configure_input_fast_paths(arch)
         logger.info(
             "architecture wrapped (%s), device=%s",
             type(self.architecture).__name__,
             self.accelerator.device,
         )
         return optimizer, dataloader, scheduler
+
+    def _configure_input_fast_paths(self, arch) -> None:
+        """Opt-in frozen-encoder input options; runs after frozen modules reach the device.
+
+        ``training.text_padding`` / ``training.text_dedup`` (UMT5) and
+        ``training.vae_cudnn_benchmark`` / ``training.vae_channels_last`` (VAE encode).
+        All default to the reference path.
+        """
+        t = self.cfg.training
+        vb = getattr(arch, "video_backbone", None)
+        padding = str(t.get("text_padding", "max_length") or "max_length")
+        dedup = bool(t.get("text_dedup", False))
+        if padding != "max_length" or dedup:
+            if not hasattr(vb, "set_text_encode_options"):
+                raise ValueError("training.text_padding / text_dedup need a Wan video backbone")
+            vb.set_text_encode_options(padding=padding, dedup=dedup)
+            logger.info("text encode: padding=%s dedup=%s", padding, dedup)
+        cudnn_benchmark = bool(t.get("vae_cudnn_benchmark", False))
+        channels_last = bool(t.get("vae_channels_last", False))
+        if cudnn_benchmark or channels_last:
+            if not hasattr(vb, "set_vae_encode_options"):
+                raise ValueError("training.vae_cudnn_benchmark / vae_channels_last need a Wan video backbone")
+            vb.set_vae_encode_options(cudnn_benchmark=cudnn_benchmark, channels_last=channels_last)
+            logger.info("VAE encode: cudnn_benchmark=%s channels_last=%s", cudnn_benchmark, channels_last)
 
     def _setup_step_timer(self, samples_per_step: int, output_path: str, is_main: bool) -> None:
         """``training.step_timing``: stage timers, incl. DeepSpeed's backward / step inside

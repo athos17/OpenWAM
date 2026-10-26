@@ -46,6 +46,13 @@ training:
     summary_every: 50
   max_gpu_memory_gib: null        # cap the CUDA allocator per process (e.g. 79 to emulate an 80 GB A800 on a 96 GB H20)
 
+  # --- Frozen-encoder input options (all default to the reference path) ---
+  text_padding: max_length        # UMT5: max_length = pad to 512; longest = pad to the batch's longest prompt
+                                  # (also shortens DiT/ActionDiT cross-attention K/V; masked, so equivalent)
+  text_dedup: false               # UMT5: encode each distinct prompt in the batch once
+  vae_cudnn_benchmark: false      # cuDNN autotune for the frozen VAE encode only (training stays as configured)
+  vae_channels_last: false        # channels_last_3d VAE Conv3d weights + input (bf16-level rounding change)
+
   # --- Memory optimization ---
   use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
                                          # costs ~1 extra forward (standard term; cf. PyTorch/HF)

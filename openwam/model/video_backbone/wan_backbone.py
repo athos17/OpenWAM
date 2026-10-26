@@ -46,6 +46,21 @@ from openwam.model.video_backbone.wan.shared.core.gradient.gradient_checkpoint i
 logger = logging.getLogger(__name__)
 
 
+@contextlib.contextmanager
+def _cudnn_autotune(enabled: bool):
+    """Temporarily enable cuDNN autotune (non-deterministic algorithm choice) for one call."""
+    if not enabled:
+        yield
+        return
+    backends = torch.backends.cudnn
+    previous = (backends.benchmark, backends.deterministic)
+    backends.benchmark, backends.deterministic = True, False
+    try:
+        yield
+    finally:
+        backends.benchmark, backends.deterministic = previous
+
+
 class WanBase(VideoBackbone):
     """Exposes the Wan modules through the VideoBackbone interface.
 
@@ -116,6 +131,9 @@ class WanBase(VideoBackbone):
         self._wan_blocks_compile_kwargs: dict | None = None
         self._compiled_wan_blocks: dict[int, Callable[..., Tensor]] = {}
         self._stage_timer = None  # trainer's StepTimer (training.step_timing), else None
+        # Train-time text encode options (set_text_encode_options); defaults = reference path.
+        self._text_padding = "max_length"
+        self._text_dedup = False
 
     # ================================================================
     # Internal properties
@@ -754,6 +772,35 @@ class WanBase(VideoBackbone):
     # ABC: Unified preprocessing (1)
     # ================================================================
 
+    def set_text_encode_options(self, *, padding: str = "max_length", dedup: bool = False) -> None:
+        """Train-time UMT5 options (``training.text_padding`` / ``training.text_dedup``).
+
+        ``padding="longest"`` shortens both the UMT5 input and the DiT/ActionDiT
+        cross-attention context to the batch's longest prompt; masked keys make it
+        equivalent to 512-token padding up to bf16 rounding. Deploy is unaffected.
+        """
+        if padding not in wan_encode.TEXT_PADDING_MODES:
+            raise ValueError(f"text padding must be one of {wan_encode.TEXT_PADDING_MODES}, got {padding!r}")
+        self._text_padding = padding
+        self._text_dedup = bool(dedup)
+
+    def set_vae_encode_options(self, *, cudnn_benchmark: bool = False, channels_last: bool = False) -> None:
+        """Train-time options for the frozen native VAE encode only.
+
+        ``cudnn_benchmark`` lets cuDNN autotune the VAE convs (and lifts
+        ``cudnn.deterministic``) inside the encode call; the trainable DiT keeps the
+        global setting. ``channels_last`` stores the VAE Conv3d weights and input in
+        ``channels_last_3d``. Both change VAE rounding only at the bf16 level.
+        """
+        self._vae_cudnn_benchmark = bool(cudnn_benchmark)
+        self._vae_channels_last = bool(channels_last)
+        if self._vae_channels_last:
+            if self.vae is None:
+                raise ValueError("vae channels_last needs the native Wan VAE")
+            for module in self.vae.modules():
+                if isinstance(module, nn.Conv3d):
+                    module.to(memory_format=torch.channels_last_3d)
+
     def _timed(self, name: str):
         timer = getattr(self, "_stage_timer", None)
         return timer.stage(name) if timer is not None else contextlib.nullcontext()
@@ -778,7 +825,12 @@ class WanBase(VideoBackbone):
         batch_size = len(frames)
         with self._timed("encode_text"):
             context, seq_lens = wan_encode.encode_text(
-                text, tokenizer=self._tokenizer, text_encoder=self.text_encoder, device=self.device
+                text,
+                tokenizer=self._tokenizer,
+                text_encoder=self.text_encoder,
+                device=self.device,
+                padding=getattr(self, "_text_padding", "max_length"),
+                dedup=getattr(self, "_text_dedup", False),
             )
 
         # Runs on the host while the text encoder executes: nothing above syncs, and
@@ -787,8 +839,11 @@ class WanBase(VideoBackbone):
             stacked_inputs = wan_encode.preprocess_video_batch(
                 frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
             )
-        with self._timed("encode_video"):
-            input_latents = wan_encode.encode_video(stacked_inputs, vae=self.vae, encoder=self.video_encoder)
+        with self._timed("encode_video"), _cudnn_autotune(getattr(self, "_vae_cudnn_benchmark", False)):
+            vae_inputs = stacked_inputs
+            if getattr(self, "_vae_channels_last", False):
+                vae_inputs = stacked_inputs.contiguous(memory_format=torch.channels_last_3d)
+            input_latents = wan_encode.encode_video(vae_inputs, vae=self.vae, encoder=self.video_encoder)
         input_latents = input_latents.to(dtype=dtype, device=device)
 
         # Variant-specific first-frame / control conditioning lives in
