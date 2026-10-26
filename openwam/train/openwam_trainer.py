@@ -138,6 +138,20 @@ class OpenWAMTrainer:
             resolved_arch.canonical.variant,
         )
 
+        from openwam.model.training_rtc import rtc_config
+
+        self.architecture.training_rtc = rtc_config(t.get("rtc"))
+        rtc = self.architecture.training_rtc
+        if resume_path and rtc != rtc_config(ckpt_cfg.training.get("rtc")):
+            raise ValueError("Resume requires the checkpoint RTC config; use finetune_ckpt_path to change it")
+        if rtc.enabled:
+            if resolved_arch.canonical.framework != "dual_system" or resolved_arch.canonical.variant != "joint_self_attn":
+                raise ValueError("Training RTC currently supports dual_system/joint_self_attn")
+            if rtc.max_delay_steps >= int(cfg.dataloader.num_frames) - 1:
+                raise ValueError("RTC maximum delay must be < action horizon")
+            if float(t.lambda_action) <= 0:
+                raise ValueError("Training RTC requires lambda_action > 0")
+
         # Device placement: skip .to(device) when initialize_model_on_cpu and a real
         # training Accelerator is present — DeepSpeed's prepare() then handles the move.
         _init_on_cpu = bool(t.get("initialize_model_on_cpu", False))

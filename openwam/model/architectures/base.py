@@ -1004,6 +1004,12 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         if all_action_masks[0] is not None:
             inputs["action_is_pad"] = torch.stack([~m for m in all_action_masks], dim=0).to(device=_device)
+        # Data-side RTC delays (subtask readers pick the prompt from the first generated step).
+        rtc_delays = [s.get("rtc_delay") for s in samples]
+        if any(d is not None for d in rtc_delays):
+            if not all(d is not None for d in rtc_delays):
+                raise ValueError("Mixed samples with/without 'rtc_delay' in batch")
+            inputs["rtc_delay"] = torch.tensor([int(d) for d in rtc_delays], dtype=torch.long, device=_device)
         if all_video_masks[0] is not None:
             # ``latent[0]`` is a clean conditioning frame (and must be excluded
             # from the loss mask) when either:
@@ -1126,6 +1132,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 a_sigma_bc = action_sigmas.unsqueeze(-1)
             noisy_actions = action_scheduler.add_noise(actions, action_noise, a_sigma_bc)
             action_target = action_scheduler.training_target(actions, action_noise)
+            from openwam.model.training_rtc import condition_training_actions, rtc_config
+
+            rtc = rtc_config(getattr(self, "training_rtc", None))
+            if rtc.enabled:
+                noisy_actions, action_timesteps, inputs["action_is_pad"] = condition_training_actions(
+                    actions, noisy_actions, action_timesteps, inputs.get("action_is_pad"), rtc, inputs.get("rtc_delay")
+                )
 
         # --- Joint forward pass ---
         forward_inputs = dict(inputs)
@@ -1138,6 +1151,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # MoT design, attention itself does not consume sample-level padding.
         forward_inputs.pop("action_is_pad", None)
         forward_inputs.pop("video_is_pad", None)
+        forward_inputs.pop("rtc_delay", None)
 
         # Route per-sample proprio_mask through pipeline_inputs to
         # ``_append_proprio_context_token``. Internal-only key; pop'd there.
@@ -1385,6 +1399,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
         cfg_scale: float = 1.0,
         cfg_merge: bool = False,
         active_action_mask: Optional[Tensor] = None,
+        action_prefix: Optional[Tensor] = None,
+        prefix_length: int = 0,
         **extra_pipeline_inputs: Any,
     ) -> dict:
         """Execute joint video-action denoising driven by a schedule.
@@ -1494,6 +1510,19 @@ class BaseWAMArchitecture(ABC, nn.Module):
             generator=torch.Generator(device=device).manual_seed(seed),
         )
 
+        prefix_mask = None
+        if action_prefix is not None:
+            if isinstance(prefix_length, bool) or not isinstance(prefix_length, int):
+                raise ValueError("prefix_length must be integer")
+            if not 0 <= prefix_length < action_latents.shape[1]:
+                raise ValueError("prefix_length must be in [0, H)")
+            action_prefix = torch.as_tensor(action_prefix, device=device, dtype=dtype)
+            if action_prefix.shape != action_latents.shape or not torch.isfinite(action_prefix).all():
+                raise ValueError("action_prefix must be finite normalized [1,H,D]")
+            prefix_mask = torch.arange(action_latents.shape[1], device=device)[None, :, None] < prefix_length
+        elif prefix_length:
+            raise ValueError("prefix_length requires action_prefix")
+
         # Unified-action checkpoints scatter raw actions into a larger zero-padded
         # space.  The inactive dimensions may be excluded from the training loss,
         # so their predicted flow is unconstrained.  Keep those dimensions on the
@@ -1528,6 +1557,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
             # only gates the *update* below, never the forward inputs.
             v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
             a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
+            if prefix_mask is not None:
+                action_latents = torch.where(prefix_mask, action_prefix, action_latents)
+                a_timestep = torch.where(prefix_mask.squeeze(-1), 0.0, a_timestep)
 
             if (
                 dit_cache is not None
@@ -1581,6 +1613,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 )
                 if inactive_action_dims is not None:
                     action_latents[..., inactive_action_dims] = inactive_action_noise * float(sigma_a_next)
+            if prefix_mask is not None:
+                action_latents = torch.where(prefix_mask, action_prefix, action_latents)
 
         if profile:
             if torch.cuda.is_available():

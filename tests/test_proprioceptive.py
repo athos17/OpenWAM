@@ -52,7 +52,8 @@ def test_proprio_context_validates_dim():
         arch._append_proprio_context_token({"context": torch.randn(1, 4, 16)}, torch.randn(1, 6))
 
 
-def test_action_dit_rejects_per_token_timestep():
+def test_action_dit_per_token_timestep_must_match_horizon():
+    """Training RTC feeds per-token [B, H] timesteps; any other 2-D shape is rejected."""
     from openwam.model.action_backbone.separate_action_dit import ActionDiT
 
     dit = ActionDiT(
@@ -65,10 +66,11 @@ def test_action_dit_rejects_per_token_timestep():
         bridge_layers=(0,),
         variant="joint_self_attn",
     )
-    with pytest.raises(ValueError, match="action timestep must be 1D"):
-        context = torch.randn(2, 4, dit.text_dim)
-        context_mask = torch.ones(2, 4, dtype=torch.bool)
-        dit.prepare_state(torch.randn(2, 5, 7), torch.randn(2, 5), context=context, context_mask=context_mask)
+    context = torch.randn(2, 4, dit.text_dim)
+    context_mask = torch.ones(2, 4, dtype=torch.bool)
+    dit.prepare_state(torch.randn(2, 5, 7), torch.rand(2, 5), context=context, context_mask=context_mask)
+    with pytest.raises(ValueError, match=r"action timestep must be \[B\], \[1\], or \[B,H\]"):
+        dit.prepare_state(torch.randn(2, 5, 7), torch.rand(2, 6), context=context, context_mask=context_mask)
 
 
 def test_action_dit_rejects_proprio_constructor_flags():
