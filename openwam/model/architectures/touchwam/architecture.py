@@ -44,6 +44,11 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
         if self.training_mode not in ("new_only", "action_finetune", "joint_finetune"):
             raise ValueError("V2 training_mode must be new_only, action_finetune or joint_finetune")
         super().__init__(cfg)
+        self._init_tactile(cfg)
+        self.tactile_scheduler = ActionScheduler()
+        self._apply_training_policy()
+
+    def _init_tactile(self, cfg):
         defaults = dict(
             history=4,
             map_size=32,
@@ -98,8 +103,6 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
         ):
             raise ValueError("bridge_layers must contain layers unique, ordered, existing VA layer indices")
         self.touch_v2 = TactileFlowStream(s, self.video_backbone.dim, self.action_backbone.dim)
-        self.tactile_scheduler = ActionScheduler()
-        self._apply_training_policy()
 
     @property
     def checkpoint_metadata(self):
@@ -256,24 +259,11 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
-        history, history_valid = (
-            self._history(tactile_maps, tactile_valid, noisy_actions.shape[0])
-            if touch_condition is None
-            else touch_condition
+        history, history_valid, future, time, tactile_future_valid = self._prepare_tactile(
+            noisy_actions, noisy_tactile, tactile_timestep, tactile_future_valid,
+            tactile_maps, tactile_valid, touch_condition,
         )
-        s, codec = self.tactile_spec, self.touch_v2.codec
-        shape = (noisy_actions.shape[0], s["future_frames"] * codec.tokens_per_frame, codec.patch_dim)
-        if noisy_tactile is None:
-            noisy_tactile = noisy_actions.new_zeros(shape)
-            tactile_future_valid = torch.zeros(shape[:2], dtype=torch.bool, device=noisy_actions.device)
-            tactile_timestep = torch.zeros(noisy_actions.shape[0], device=noisy_actions.device)
-        elif tactile_timestep is None or tactile_future_valid is None:
-            raise ValueError("Noisy future touch requires timestep and token validity")
-        if tactile_future_valid.shape != shape[:2] or tactile_future_valid.dtype != torch.bool:
-            raise ValueError("tactile_future_valid must be bool [B,future_tokens]")
-        noisy_tactile = noisy_tactile.masked_fill(~tactile_future_valid[..., None], 0)
-        future, time = self.touch_v2.prepare_future(noisy_tactile, tactile_timestep)
-        future = future.masked_fill(~tactile_future_valid[..., None], 0)
+        s = self.tactile_spec
         driver = self.mot_driver
         per_frame = driver._video_tokens_per_frame(vstate)
         mask = driver._build_attention_mask(
@@ -315,6 +305,53 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
                 vstate.hidden_states, astate.payload.x_action = vx, ax
         prediction = self.touch_v2.output(future).masked_fill(~tactile_future_valid[..., None], 0)
         return vb.finalize(vstate), ab.extract_prediction(astate), prediction
+
+    def _prepare_tactile(self, noisy_actions, noisy_tactile, tactile_timestep, tactile_future_valid,
+                         tactile_maps, tactile_valid, touch_condition):
+        history, history_valid = (
+            self._history(tactile_maps, tactile_valid, noisy_actions.shape[0])
+            if touch_condition is None
+            else touch_condition
+        )
+        s, codec = self.tactile_spec, self.touch_v2.codec
+        shape = (noisy_actions.shape[0], s["future_frames"] * codec.tokens_per_frame, codec.patch_dim)
+        if noisy_tactile is None:
+            noisy_tactile = noisy_actions.new_zeros(shape)
+            tactile_future_valid = torch.zeros(shape[:2], dtype=torch.bool, device=noisy_actions.device)
+            tactile_timestep = torch.zeros(noisy_actions.shape[0], device=noisy_actions.device)
+        elif tactile_timestep is None or tactile_future_valid is None:
+            raise ValueError("Noisy future touch requires timestep and token validity")
+        if tactile_future_valid.shape != shape[:2] or tactile_future_valid.dtype != torch.bool:
+            raise ValueError("tactile_future_valid must be bool [B,future_tokens]")
+        noisy_tactile = noisy_tactile.masked_fill(~tactile_future_valid[..., None], 0)
+        future, time = self.touch_v2.prepare_future(noisy_tactile, tactile_timestep)
+        future = future.masked_fill(~tactile_future_valid[..., None], 0)
+        return history, history_valid, future, time, tactile_future_valid
+
+    def prepare_tactile_generation(self, maps, valid, **options):
+        if any(value is not None for value in options.values()):
+            raise ValueError("Regional tactile options require a touchwam_regions checkpoint")
+        condition = self._history(maps, valid, 1)
+        s, codec = self.tactile_spec, self.touch_v2.codec
+        sites = condition[1].reshape(1, s["history"], 10, codec.patches_per_site).all(-1).any(1)
+        future_valid = sites[:, None].expand(-1, s["future_frames"], -1)
+        token_valid = future_valid.flatten(1).repeat_interleave(codec.patches_per_site, dim=1)
+        return condition, future_valid, token_valid
+
+    def sample_tactile_noise(self, condition, token_valid, seed):
+        return torch.randn(
+            token_valid.shape[0], token_valid.shape[1], self.touch_v2.codec.patch_dim,
+            device=self.device, dtype=self.dtype,
+            generator=torch.Generator(device=self.device).manual_seed(seed + 1),
+        ).masked_fill(~token_valid[..., None], 0)
+
+    def decode_tactile_generation(self, tokens, future_valid, condition):
+        maps = self.touch_v2.codec.decode(tokens).masked_fill(~future_valid[..., None, None, None], 0)
+        return dict(
+            future_tactile_maps=maps[0].float().cpu().numpy(),
+            future_tactile_valid=future_valid[0].cpu().numpy(),
+            tactile_contact_channel="probability",
+        )
 
     def compute_loss(self, *, actions=None, lambda_video=1.0, lambda_action=1.0, **inputs):
         """Independent V/A/T noise levels, clean history, future-only tactile loss."""

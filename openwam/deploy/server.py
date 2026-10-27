@@ -208,6 +208,13 @@ class PolicyServer:
         self._init_policy()
         t0 = time.monotonic()
 
+        include_tactile = obs.get("include_tactile", False)
+        if not isinstance(include_tactile, bool):
+            raise ValueError("include_tactile must be boolean")
+        if include_tactile:
+            # Validate support before advancing the action executor.
+            self._policy.get_tactile_prediction()
+
         obs = self._obs_preprocessor.preprocess(obs)
         action = self._policy.predict_action(obs)
 
@@ -215,11 +222,18 @@ class PolicyServer:
         self._request_count += 1
         self._total_latency += latency_ms
 
-        return {
+        response = {
             "action": action.tolist(),
             "step": self._request_count,
             "latency_ms": round(latency_ms, 2),
         }
+        if include_tactile:
+            prediction = self._policy.get_tactile_prediction()
+            response["tactile"] = None if prediction is None else {
+                key: value.tolist() if hasattr(value, "tolist") else value
+                for key, value in prediction.items()
+            }
+        return response
 
     def reset(self):
         """Reset policy state."""

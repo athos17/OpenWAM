@@ -433,7 +433,8 @@ def test_hydra_and_extra_loss_logging():
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_real_wan_ti2v_and_action_forward_backward(monkeypatch, dtype):
+@pytest.mark.parametrize("variant", ["touchwam_v2", "touchwam_regions"])
+def test_real_wan_ti2v_and_action_forward_backward(monkeypatch, dtype, variant):
     from openwam.model.action_backbone.scheduler import ActionScheduler
     from openwam.model.video_backbone.wan.models.dit import WanModel
     from openwam.model.video_backbone.wan_backbone import Wan21
@@ -482,10 +483,15 @@ def test_real_wan_ti2v_and_action_forward_backward(monkeypatch, dtype):
             future_stride=1,
         ),
     )
-    model = build_architecture("touchwam_v2", cfg)
+    model = build_architecture(variant, cfg)
     model.set_dtype_device(dtype, torch.device("cpu"))
     model.init_training_schedulers()
-    args = loss_inputs()
+    if variant == "touchwam_regions":
+        from tests.test_touchwam_regions import regional_loss_inputs
+
+        args = regional_loss_inputs()
+    else:
+        args = loss_inputs()
     args["input_latents"] = torch.randn(2, 4, 3, 4, 4)
     args["first_frame_latents"] = args["input_latents"][:, :, :1].clone()
     args["fuse_vae_embedding_in_latents"] = True

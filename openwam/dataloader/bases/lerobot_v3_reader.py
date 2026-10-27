@@ -874,6 +874,7 @@ class LeRobotV3Reader(BaseDataset):
         # 3) action + 4) proprio (hooks → normalized 20-D payload or None)
         action, action_mask = self._finalize_action(self._action_20d(win), actual_raw_len)
         proprio, proprio_mask = self._finalize_proprio(self._proprio_20d(win))
+        extras = self._observation_extras(idx, row, offset, valid_start, valid_end, win)
 
         # 5) video — decode head (+ optional wrist) frames into the canvas
         real_local_indices = self._video_sample_indices[self._video_sample_indices < actual_raw_len]
@@ -896,6 +897,7 @@ class LeRobotV3Reader(BaseDataset):
         video_mask = torch.from_numpy(self._video_sample_indices < actual_raw_len)
 
         return {
+            **extras,
             "video": video,
             "vace_video": None,
             "first_frame_image": [video[0]] if video else [],
@@ -906,6 +908,10 @@ class LeRobotV3Reader(BaseDataset):
             "proprio_mask": torch.from_numpy(proprio_mask),
             "prompt": prompt,
         }
+
+    def _observation_extras(self, idx, row, offset, valid_start, valid_end, win) -> dict:
+        """Attach modalities to the actual window, including after a safe-get retry."""
+        return {}
 
     # ----- action / proprio finalization -----------------------------------
 

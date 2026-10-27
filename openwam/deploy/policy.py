@@ -77,6 +77,12 @@ class WAMPolicy:
         """Clear executor state between episodes."""
         self._executor.reset()
 
+    def get_tactile_prediction(self):
+        """Maps from the same sync plan as the returned action, including its index."""
+        if self._async:
+            raise ValueError("Tactile prediction responses currently require synchronous execution")
+        return self._executor.tactile_prediction
+
     def shutdown(self):
         """Release executor resources (background threads in async mode)."""
         self._executor.shutdown()

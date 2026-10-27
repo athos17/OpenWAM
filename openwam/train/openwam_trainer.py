@@ -100,8 +100,8 @@ class OpenWAMTrainer:
         resume_path = cfg_get(t, "resume_ckpt_path", None) or None
         if finetune_path and resume_path:
             raise ValueError("finetune_ckpt_path and resume_ckpt_path are mutually exclusive; set at most one.")
-        if cfg_get(t, "initialize_touch_from_openwam", False) and not finetune_path:
-            raise ValueError("initialize_touch_from_openwam requires finetune_ckpt_path; disable it for resume")
+        if (cfg_get(t, "initialize_touch_from_openwam", False) or cfg_get(t, "initialize_touch_from_legacy", False)) and not finetune_path:
+            raise ValueError("TouchWAM initialization requires finetune_ckpt_path; disable initialization for resume")
         action_init = cfg_get(t, "action_backbone_init", "pretrained")
         if action_init not in ("pretrained", "random"):
             raise ValueError("training.action_backbone_init must be pretrained or random")

@@ -339,7 +339,8 @@ class JointInferenceEngine(BaseInferenceEngine):
 
         tactile_kwargs = {}
         observation = conditions.get("observation") or {}
-        for key in ("tactile_maps", "tactile_valid"):
+        for key in ("tactile_maps", "tactile_valid", "tactile_region_ids", "tactile_layout_present",
+                    "tactile_query_mask", "tactile_spatial_valid", "tactile_sensor_ids", "tactile_palm_mode"):
             value = conditions.get(key, observation.get(key))
             if value is not None:
                 tactile_kwargs[key] = value

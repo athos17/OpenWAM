@@ -1,5 +1,10 @@
 # TouchWAM
 
+新增 **单通道 deform、逐区域预测、可选掌面** 的实现为 `touchwam_regions`，
+训练入口是 `configs/train_touchwam_regions.yaml`。
+数据合同、真机／仿真 reader、旧权重迁移和推理协议见 [regions.md](regions.md)。
+下文记录保留的 `touchwam_v2` 距离／接触版；它与 deform 是不同表示，不能混用缓存。
+
 在现有 OpenWAM 上增加触觉生成分支。模型保留原视觉／动作主干及 Alpha 80 维动作表示，
 新增 6 个触觉交互块，预测未来距离图和接触概率。默认联合微调视觉、动作、状态与触觉；
 VAE、文本编码器等预处理模块继续冻结。

@@ -1,0 +1,28 @@
+defaults:
+  - dual_system
+  - _self_
+
+architecture:
+  variant: touchwam_regions
+  training_mode: joint_finetune
+  tactile:
+    codec: sharpa_deform_gray_v1
+    region_names: [right.thumb.tip, right.index.tip, right.middle.tip, right.ring.tip, right.pinky.tip, left.thumb.tip, left.index.tip, left.middle.tip, left.ring.tip, left.pinky.tip, right.palm, left.palm]
+    sensor_names: [sharpa_real, bench2dex_sim]
+    history: 4
+    map_size: 32
+    patch_size: 16
+    width: 256
+    heads: 8
+    layers: 6
+    history_layers: 2
+    bridge_layers: null
+    future_frames: 8
+    future_stride: 3
+    fps: 30
+    palm_mode: auto
+    palm_dropout: 0.0       # Enable only when training with actual palm maps.
+    history_dropout: 0.0
+    allow_missing_history: false
+    loss_weight: 1.0
+    foreground_weight: 1.0

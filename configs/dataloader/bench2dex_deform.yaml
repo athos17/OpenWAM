@@ -1,0 +1,6 @@
+defaults:
+  - bench2dex_tactile
+  - _self_
+
+type: bench2dex_deform
+tactile_cache_root: null  # Legacy distance/contact caches are rejected.

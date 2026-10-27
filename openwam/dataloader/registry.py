@@ -98,6 +98,11 @@ def _register_builtins():
     from openwam.dataloader.bench2dex_tactile import Bench2DexTactileMixture
 
     register_dataset("bench2dex_tactile")(Bench2DexTactileMixture)
+    from openwam.dataloader.bench2dex_deform import Bench2DexDeformMixture
+    from openwam.dataloader.marvin_deform import MarvinDeformDataset
+
+    register_dataset("bench2dex_deform")(Bench2DexDeformMixture)
+    register_dataset("marvin_deform")(MarvinDeformDataset)
     register_dataset("robotwin")(MultiTaskRoboTwinDataset)
     register_dataset("robodojo")(MultiTaskRoboDojoDataset)
     register_dataset("agibotworld")(MultiAgiBotWorldDataset)

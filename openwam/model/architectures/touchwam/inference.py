@@ -49,6 +49,12 @@ def generate_three_stream(
     *,
     tactile_maps=None,
     tactile_valid=None,
+    tactile_region_ids=None,
+    tactile_layout_present=None,
+    tactile_query_mask=None,
+    tactile_spatial_valid=None,
+    tactile_sensor_ids=None,
+    tactile_palm_mode=None,
     vace_video=None,
     first_frame_image=None,
     num_frames=9,
@@ -72,8 +78,8 @@ def generate_three_stream(
 ):
     """Touch follows the action sigma schedule, including asynchronous plateaus.
 
-    Future sensor availability is inferred from observed history, never from
-    future labels/contact. Missing sites stay masked and are reported invalid.
+    The architecture defines query availability: legacy V2 uses history;
+    regional models use explicit layout and requests, never future labels.
     """
     model.eval()
     if dit_cache is not None:
@@ -90,7 +96,7 @@ def generate_three_stream(
         raise ValueError("Denoising timesteps outside [0,num_train_timesteps]")
     if any(v1 > v0 or a1 > a0 for (v0, a0), (v1, a1) in zip(schedule, schedule[1:])):
         raise ValueError("Denoising schedule must be non-increasing")
-    s, codec = model.tactile_spec, model.touch_v2.codec
+    s = model.tactile_spec
     action_num_frames = int(action_num_frames if action_num_frames is not None else 33)
     if action_num_frames - 1 < s["future_frames"] * s["future_stride"]:
         raise ValueError("Action chunk must cover the configured future tactile horizon")
@@ -124,11 +130,13 @@ def generate_three_stream(
         if proprio is None:
             raise ValueError("use_proprioception=True requires proprio")
         shared["proprio"] = torch.as_tensor(proprio, device=device, dtype=dtype)
-    history = model._history(tactile_maps, tactile_valid, 1)
+    history, future_valid, token_valid = model.prepare_tactile_generation(
+        tactile_maps, tactile_valid, region_ids=tactile_region_ids,
+        layout_present=tactile_layout_present, query_mask=tactile_query_mask,
+        spatial_valid=tactile_spatial_valid, sensor_ids=tactile_sensor_ids,
+        palm_mode=tactile_palm_mode,
+    )
     shared["touch_condition"] = history
-    site_valid = history[1].reshape(1, s["history"], 10, codec.patches_per_site).all(-1).any(1)
-    future_valid = site_valid[:, None].expand(-1, s["future_frames"], -1)
-    token_valid = future_valid.reshape(1, -1).repeat_interleave(codec.patches_per_site, dim=1)
     shared["tactile_future_valid"] = token_valid
     actions = torch.randn(
         1,
@@ -139,15 +147,7 @@ def generate_three_stream(
         generator=torch.Generator(device=device).manual_seed(seed),
     )
     # A separate RNG preserves Alpha's initial action noise for paired checks.
-    touch = torch.randn(
-        1,
-        token_valid.shape[1],
-        codec.patch_dim,
-        device=device,
-        dtype=dtype,
-        generator=torch.Generator(device=device).manual_seed(seed + 1),
-    )
-    touch = touch.masked_fill(~token_valid[..., None], 0)
+    touch = model.sample_tactile_noise(history, token_valid, seed)
     inactive = model._resolve_inactive_action_dims(active_action_mask, device)
     inactive_noise = actions[..., inactive].clone() if inactive is not None else None
     for (tv, ta), (tv_next, ta_next) in zip(schedule, schedule[1:]):
@@ -172,16 +172,13 @@ def generate_three_stream(
     normalizer = getattr(model, "normalizer", None)
     if normalizer is not None:
         actions = normalizer.unnormalize(actions)
-    maps = codec.decode(touch).masked_fill(~future_valid[..., None, None, None], 0)
     result = dict(
         video=video,
         actions=actions,
-        future_tactile_maps=maps[0].float().cpu().numpy(),
-        future_tactile_valid=future_valid[0].cpu().numpy(),
+        **model.decode_tactile_generation(touch, future_valid, history),
         future_tactile_offsets=torch.arange(1, s["future_frames"] + 1).numpy() * s["future_stride"],
         tactile_fps=s["fps"],
         tactile_prediction_kind="generated",
-        tactile_contact_channel="probability",
     )
     if profile:
         if device.type == "cuda":

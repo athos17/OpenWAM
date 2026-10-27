@@ -13,6 +13,7 @@ construction time.
 
 from collections import deque
 from typing import Optional
+from uuid import uuid4
 
 import numpy as np
 
@@ -39,6 +40,8 @@ class SyncInferenceExecutor:
         self.inference_horizon = inference_horizon
 
         self._action_buffer: deque = deque()
+        self.tactile_prediction = None
+        self._chunk_action_index = -1
 
     def predict_action(self, conditions: dict) -> np.ndarray:
         """Pop the next action, regenerating after the configured horizon."""
@@ -46,6 +49,9 @@ class SyncInferenceExecutor:
             self._generate_and_enqueue(conditions)
 
         action = self._action_buffer.popleft()
+        self._chunk_action_index += 1
+        if self.tactile_prediction is not None:
+            self.tactile_prediction["action_index"] = self._chunk_action_index
         return action
 
     def _generate_and_enqueue(self, conditions: dict):
@@ -65,10 +71,22 @@ class SyncInferenceExecutor:
 
         self._action_buffer.clear()
         self._action_buffer.extend(actions[:inference_horizon])
+        self._chunk_action_index = -1
+        tactile = {key: value for key, value in result.items()
+                   if key.startswith(("future_tactile_", "tactile_"))}
+        self.tactile_prediction = None
+        if tactile:
+            self.tactile_prediction = dict(
+                prediction_id=uuid4().hex,
+                observation_timestamp_s=(conditions.get("observation") or {}).get("timestamp_s"),
+                **tactile,
+            )
 
     def reset(self):
         """Clear state between episodes."""
         self._action_buffer.clear()
+        self.tactile_prediction = None
+        self._chunk_action_index = -1
 
     def shutdown(self):
         """No background resources; present for executor-interface symmetry."""
