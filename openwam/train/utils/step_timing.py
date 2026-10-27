@@ -94,6 +94,8 @@ class StepTimer:
         self._loop_end = None
         self._data_wait = 0.0
         self.last: dict = {}
+        # Set by the trainer under training.torch_profile: stages emit stage/<name> ranges.
+        self.annotate = False
 
     @classmethod
     def from_cfg(cls, cfg, **kw) -> "StepTimer":
@@ -150,7 +152,11 @@ class StepTimer:
             start.record()
         t0 = time.perf_counter()
         try:
-            yield
+            if self.annotate:
+                with torch.profiler.record_function(f"stage/{name}"):
+                    yield
+            else:
+                yield
         finally:
             t1 = time.perf_counter()
             if end is not None:

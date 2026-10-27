@@ -46,6 +46,14 @@ training:
     summary_every: 50
     mfu: false                    # count the step's FLOPs once (first step) and report MFU in STEP_TIMING
     peak_tflops: null             # dense bf16 peak per GPU; null = by device name (H20 148, A800/A100 312, H100/H800 989)
+  torch_profile:                  # torch.profiler window -> <run dir>/torch_profile/rank<r>.json.gz (needs step_timing)
+    enabled: false
+    wait: 5                       # steps skipped before warmup
+    warmup: 2
+    active: 3                     # profiled steps
+    ranks: [0]
+    record_shapes: false
+    with_stack: false
   max_gpu_memory_gib: null        # cap the CUDA allocator per process (e.g. 79 to emulate an 80 GB A800 on a 96 GB H20)
   loss_log_csv: false             # write <run dir>/debug_loss_history.csv every step (rank 0) outside debug mode
 

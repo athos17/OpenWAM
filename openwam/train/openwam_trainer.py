@@ -44,6 +44,7 @@ from openwam.train.utils.checkpointing import (
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sampler_seed
 from openwam.train.utils.step_timing import StepTimer
+from openwam.train.utils.torch_profile import TorchProfile
 from openwam.train.utils.training_utils import (
     build_cosine_scheduler,
     cfg_get,
@@ -329,6 +330,10 @@ class OpenWAMTrainer:
 
         self._setup_step_timer(batch_size * n_proc, output_path, is_main)
         timer = self.step_timer
+        profile = TorchProfile.from_cfg(self.cfg.training.get("torch_profile"), output_path=output_path,
+                                        rank=self.accelerator.process_index)
+        # Stage ranges come from StepTimer, so profiling needs training.step_timing.enabled.
+        timer.annotate = profile.enabled and timer.enabled
 
         _step_t0 = _time.monotonic()
         pbar = tqdm(total=total_steps, desc="Training", unit="step", initial=min(global_step, total_steps))
@@ -415,13 +420,16 @@ class OpenWAMTrainer:
                         if is_main:
                             manage_checkpoints(output_path, keep_last_k)
                 timer.finish_iteration()
+                profile.step()
 
                 if max_steps and global_step >= max_steps:
                     pbar.close()
+                    profile.stop()
                     self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run)
                     return
 
         pbar.close()
+        profile.stop()
         self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run)
 
     # (3) Called by train() first — AdamW over the per-module (action/video) LR param groups.

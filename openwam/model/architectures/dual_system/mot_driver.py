@@ -367,7 +367,9 @@ class DualSystemMoTDriver:
             local_astate.payload = local_payload
             local_vstate.hidden_states = vx
             local_payload.x_action = ax
-            self._step_impl(layer_id, local_vstate, local_astate, attn_mask=attn_mask, suppress_inner_attn_ckpt=True)
+            # Profiler range; the copies that run inside backward are the recompute.
+            with torch.profiler.record_function("mot_layer"):
+                self._step_impl(layer_id, local_vstate, local_astate, attn_mask=attn_mask, suppress_inner_attn_ckpt=True)
             return local_vstate.hidden_states, local_payload.x_action
 
         vx0 = vstate.hidden_states

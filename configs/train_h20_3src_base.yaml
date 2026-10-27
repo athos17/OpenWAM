@@ -1,0 +1,45 @@
+# Single-node H20 (txy) probe of the three-source recipe (train_action_random_64gpu:
+# bs48/GPU, GA1, full gradient checkpointing) on local subsets: EgoDex 48 of 111 tasks,
+# AgiBot 6 of 75 tasks, SharpaDex global in full. Manual weights pin the full-data
+# mix of the 2026-10-26 64-GPU run (egodex .442 / agibot .201 / sharpa .357), so the
+# video-only vs robot step ratio matches it. The allocator cap emulates an 80 GB A800.
+# For timing and profiling only; not a training recipe.
+defaults:
+  - train_action_random_64gpu
+  - _self_
+
+dataloader:
+  weight_strategy: manual
+  datasets:
+    egodex:
+      dataset_dir: /data/lyh/datasets/h20_profile_subset/egodex_300h_video_v1_sub
+      weight: 0.4423
+    agibot:
+      dataset_dir: /data/lyh/datasets/h20_profile_subset/agibot_pretrain_v1_sub
+      weight: 0.2007
+    sharpa:
+      dataset_dir: /data/lyh/datasets/sharpadex_eef_global_v1/buckets
+      weight: 0.3570
+
+training:
+  finetune_ckpt_path: /data/models/OpenWAM-Alpha-Pretrain-Foundation-Model/checkpoint_step_154000.safetensors
+  output_path: /data/lyh/perf_runs/h20_3src/base
+  num_epochs: null
+  max_steps: 40
+  save_steps: 0
+  save_full_states_for_resume: false
+  max_gpu_memory_gib: 79
+  loss_log_csv: true
+  step_timing:
+    enabled: true
+    summary_every: 10
+    mfu: true
+    peak_tflops: 148               # H20 dense bf16
+  torch_profile:
+    enabled: false
+    wait: 10
+    warmup: 2
+    active: 4
+
+project:
+  name: openwam-h20-3src

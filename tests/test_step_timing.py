@@ -71,3 +71,30 @@ def test_mfu_counts_first_step_only(tmp_path):
     it = stages["iteration_cpu_s"]["median_of_ranks"]
     assert abs(summary["mfu"] - model_step / (it * 1e12)) / summary["mfu"] < 1e-6
     assert summary["mfu_incl_encoders"] > summary["mfu"]
+
+
+def test_torch_profile_records_stage_ranges(tmp_path):
+    import gzip
+
+    import torch
+
+    from openwam.train.utils.torch_profile import TorchProfile
+
+    assert not TorchProfile(enabled=True, ranks=[0], rank=1, output_path=str(tmp_path)).enabled
+    t = StepTimer(enabled=True, summary_every=100)
+    t._cuda = False
+    prof = TorchProfile(enabled=True, wait=1, warmup=1, active=2, output_path=str(tmp_path), rank=0)
+    t.annotate = prof.enabled
+    for _ in range(5):
+        t.begin_step()
+        with t.stage("compute_loss"):
+            with torch.profiler.record_function("mot_layer"):
+                torch.ones(4) @ torch.ones(4)
+        t.end_step()
+        t.finish_iteration()
+        prof.step()
+    prof.stop()
+    with gzip.open(tmp_path / "torch_profile" / "rank0.json.gz", "rt") as f:
+        names = [e.get("name") for e in json.load(f)["traceEvents"]]
+    assert names.count("stage/compute_loss") == 2 and names.count("mot_layer") == 2
+    assert (tmp_path / "torch_profile" / "rank0_ops.txt").is_file()
