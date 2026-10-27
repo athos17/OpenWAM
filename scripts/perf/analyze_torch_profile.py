@@ -65,17 +65,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("trace")
     ap.add_argument("--json")
+    ap.add_argument("--per-step", action="store_true",
+                    help="also print each profiled step (robot = has mot_layer ranges, else video-only)")
     args = ap.parse_args()
     opener = gzip.open if args.trace.endswith(".gz") else open
     with opener(args.trace, "rt") as f:
         events = json.load(f)["traceEvents"]
 
-    stages, layers, launches, kernels = [], [], {}, []
+    stages, layers, launches, kernels, steps = [], [], {}, [], []
     for ev in events:
         if ev.get("ph") != "X":
             continue
         cat, name = ev.get("cat", ""), ev.get("name", "")
-        if cat == "user_annotation" and name.startswith("stage/"):
+        if cat == "user_annotation" and name.startswith("ProfilerStep#"):
+            steps.append((ev["ts"], ev["ts"] + ev["dur"], name))
+        elif cat == "user_annotation" and name.startswith("stage/"):
             stages.append((ev["ts"], ev["ts"] + ev["dur"], name[6:]))
         elif cat == "user_annotation" and name == "mot_layer":
             layers.append((ev["ts"], ev["ts"] + ev["dur"]))
@@ -100,9 +104,17 @@ def main():
         i = bisect.bisect_right(layer_starts, t) - 1
         return any(layers[j][0] <= t <= layers[j][1] for j in range(max(0, i - 2), i + 1))
 
+    steps.sort()
+    step_starts = [s for s, _, _ in steps]
+
+    def step_of(t):
+        i = bisect.bisect_right(step_starts, t) - 1
+        return steps[i][2] if i >= 0 and t <= steps[i][1] else None
+
     per = defaultdict(lambda: defaultdict(float))
     spans = defaultdict(list)
     comm, compute = defaultdict(list), defaultdict(list)
+    step_spans = defaultdict(lambda: defaultdict(list))  # step -> stage -> kernel intervals
     for k in kernels:
         t = launches.get(k.get("args", {}).get("correlation"))
         stage = innermost(t) if t is not None else "outside_stages"
@@ -113,6 +125,9 @@ def main():
         per[stage][kind] += k["dur"]
         spans[stage].append(iv)
         (comm if kind == "nccl" else compute)[stage].append(iv)
+        if t is not None and step_of(t):
+            step_spans[step_of(t)][stage].append(iv)
+            step_spans[step_of(t)][f"{stage}.{kind}"].append(iv)
 
     rows = {}
     for stage, kinds in per.items():
@@ -139,6 +154,23 @@ def main():
         print(f"{stage:<26}{r['busy_s']:>8.3f}" + "".join(f"{r['kernel_s'].get(k, 0):>12.3f}" for k in kinds)
               + f"{r['nccl_exposed_s']:>10.3f}")
     print("stage CPU wall (s/step): " + ", ".join(f"{k} {v:.3f}" for k, v in sorted(walls.items(), key=lambda kv: -kv[1])))
+
+    if args.per_step and steps:
+        per_step = {}
+        for s0, s1, name in steps:
+            wall = defaultdict(float)
+            for s, e, stage in stages:
+                if s0 <= s <= s1:
+                    wall[stage] += (e - s) / 1e6
+            robot = any(s0 <= s <= s1 for s, _ in layers)
+            busy = {stage: union_len(iv) / 1e6 for stage, iv in step_spans[name].items()}
+            per_step[name] = {"modality": "robot" if robot else "video_only", "cpu_wall_s": dict(wall),
+                              "gpu_busy_s": busy, "step_span_s": (s1 - s0) / 1e6}
+            print(f"{name} [{per_step[name]['modality']}] span {(s1 - s0) / 1e6:.3f} s | wall: "
+                  + ", ".join(f"{k} {v:.3f}" for k, v in sorted(wall.items(), key=lambda kv: -kv[1]))
+                  + " | gpu busy: " + ", ".join(f"{k} {v:.3f}" for k, v in sorted(busy.items(), key=lambda kv: -kv[1])
+                                               if "." not in k or k == "ds_backward.recompute"))
+        report["per_step"] = per_step
     if args.json:
         with open(args.json, "w") as f:
             json.dump(report, f, indent=2)
