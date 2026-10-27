@@ -1,5 +1,8 @@
-# Phase 1 on top of train_h20_3src_s7p: VAE encode in channels_last_3d with cuDNN autotune,
-# fp32 fused Wan RoPE. (CausalConv3d keeps spatial padding inside the conv; no option.)
+# Phase 1 on top of train_h20_3src_s7p: VAE encode in channels_last_3d with cuDNN autotune
+# (CausalConv3d keeps spatial padding inside the conv; no option). VAE 2.91 -> 2.40 s/step on
+# H20; the bf16 latents differ from the default path by 2.5e-3 relative but have the same
+# error against an fp32 encode (5.51e-3). training.rope_impl=fp32 is left off: same loss,
+# but no step-time gain inside the checkpointed training loop on H20.
 defaults:
   - train_h20_3src_s7p
   - _self_
@@ -8,4 +11,3 @@ training:
   output_path: /data/lyh/perf_runs/h20_3src/s8a
   vae_cudnn_benchmark: true
   vae_channels_last: true
-  rope_impl: fp32
