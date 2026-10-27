@@ -1,5 +1,7 @@
 # train_h20_3src_s8b recomputing layers 0-19 (skip the last 10 of 30), under the ~86 GiB cap
 # that matches 8-node A800 ZeRO-2 memory on one H20 node (8-way instead of 64-way shards).
+# Measured (txy_2, 40 steps): 8.91 s/step vs 9.09 for s8b, peak reserved 80.8 GiB (~73 GiB expected
+# on 8-node A800); ~4.1 GiB per extra skipped layer, so skipping 12 would exceed the cap.
 defaults:
   - train_h20_3src_s8b
   - _self_
