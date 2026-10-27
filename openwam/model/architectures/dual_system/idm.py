@@ -31,7 +31,11 @@ from torch import Tensor
 from openwam.model.action_backbone.components import rope_apply_1d
 from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
-from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
+from openwam.model.architectures.dual_system.mot_driver import (
+    DualSystemMoTDriver,
+    resolve_checkpoint_layers,
+    run_video_blocks,
+)
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.architectures.utils.mask_modes import widen_mask_for_prefix_kv
@@ -768,9 +772,8 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
             **pipeline_inputs,
         )
-        for block_id in range(vb.num_layers):
-            vstate = vb.run_block(block_id, vstate)
-        return vb.finalize(vstate)
+        layers = resolve_checkpoint_layers(self.video_only_checkpoint_spec(), vb.num_layers)
+        return vb.finalize(run_video_blocks(vb, vstate, layers))
 
     # ------------------------------------------------------------------
     # Training: IDM compute_loss with 3 branches

@@ -1,0 +1,12 @@
+# train_h20_3src_s7d plus the two host-side P0 options: frames stacked to uint8 in the
+# DataLoader workers (pinned by the loader) and the loss CSV written 50 rows at a time.
+# Video-only batches follow gradient_checkpointing_layers like robot batches (the
+# default since gradient_checkpointing_layers_video_only was added).
+defaults:
+  - train_h20_3src_s7d
+  - _self_
+
+training:
+  output_path: /data/lyh/perf_runs/h20_3src/s7p
+  video_uint8_in_workers: true
+  log_flush_every: 50

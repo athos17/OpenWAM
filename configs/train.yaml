@@ -56,6 +56,9 @@ training:
     with_stack: false
   max_gpu_memory_gib: null        # cap the CUDA allocator per process (e.g. 79 to emulate an 80 GB A800 on a 96 GB H20)
   loss_log_csv: false             # write <run dir>/debug_loss_history.csv every step (rank 0) outside debug mode
+  log_flush_every: 1              # loss_log_csv rows per file append (also flushed before checkpoints / at the end)
+  video_uint8_in_workers: false   # DataLoader workers stack the frames to uint8 and the loader pins them; the
+                                  # training process only uploads (bitwise-identical input, Wan backbone)
 
   # --- Frozen-encoder input options (all default to the reference path) ---
   text_padding: max_length        # UMT5: max_length = pad to 512; longest = pad to the batch's longest prompt
@@ -71,7 +74,10 @@ training:
   gradient_checkpointing_layers: null    # dual_system/joint_self_attn: layers with full-layer recompute when
                                          # use_gradient_checkpointing=true. null/"all" = every layer; int n = every
                                          # n-th layer; list = layer ids. Other layers keep only the mixed-attention
-                                         # recompute (model.architecture.mot_checkpoint_mixed_attn).
+                                         # recompute (model.architecture.mot_checkpoint_mixed_attn). Also applies
+                                         # to video-only batches (whole Wan blocks).
+  gradient_checkpointing_layers_video_only: null  # override for video-only batches (no action tokens, less
+                                         # activation memory); null = gradient_checkpointing_layers
   initialize_model_on_cpu: false         # Load model on CPU, let DeepSpeed move to GPU
   offload_optimizer_device: none         # DeepSpeed ZeRO optimizer-state offload: none / cpu
 

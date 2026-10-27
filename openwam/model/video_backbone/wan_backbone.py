@@ -837,7 +837,8 @@ class WanBase(VideoBackbone):
         # the batch upload is pinned + non-blocking.
         with self._timed("preprocess_video"):
             stacked_inputs = wan_encode.preprocess_video_batch(
-                frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device
+                frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device,
+                uint8_clips=kw.get("frames_uint8"),
             )
         with self._timed("encode_video"), _cudnn_autotune(getattr(self, "_vae_cudnn_benchmark", False)):
             vae_inputs = stacked_inputs

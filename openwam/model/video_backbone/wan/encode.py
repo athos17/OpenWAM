@@ -83,11 +83,12 @@ def preprocess_video(frames, *, encoder=None, dtype, device) -> Tensor:
     return _preprocess_video_native(frames, dtype=dtype, device=device)
 
 
-def preprocess_video_batch(clips, *, encoder=None, dtype, device) -> Tensor:
-    """Batch of clips -> stacked ``[B, C, T, H, W]`` pixels (one uint8 upload on the native path)."""
+def preprocess_video_batch(clips, *, encoder=None, dtype, device, uint8_clips=None) -> Tensor:
+    """Batch of clips -> stacked ``[B, C, T, H, W]`` pixels (one uint8 upload on the native path;
+    ``uint8_clips`` = the clips pre-stacked in the DataLoader workers)."""
     if encoder is not None:
         return torch.cat([encoder.preprocess_video(c) for c in clips], dim=0)
-    return _preprocess_video_batch_native(clips, dtype=dtype, device=device)
+    return _preprocess_video_batch_native(clips, dtype=dtype, device=device, uint8_clips=uint8_clips)
 
 
 def encode_video(video_tensor: Tensor, *, vae, encoder=None) -> Tensor:

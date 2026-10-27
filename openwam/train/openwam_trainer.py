@@ -46,8 +46,10 @@ from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sample
 from openwam.train.utils.step_timing import StepTimer
 from openwam.train.utils.torch_profile import TorchProfile
 from openwam.train.utils.training_utils import (
+    LossCsvLog,
     build_cosine_scheduler,
     cfg_get,
+    collate_samples_with_video_uint8,
     init_wandb,
     log_parameter_counts,
     reduce_step_metrics,
@@ -195,6 +197,9 @@ class OpenWAMTrainer:
             max_timestep_boundary=float(t.max_timestep_boundary),
             min_timestep_boundary=float(t.min_timestep_boundary),
             gradient_checkpointing_layers=_checkpoint_layers_spec(t.get("gradient_checkpointing_layers")),
+            gradient_checkpointing_layers_video_only=_checkpoint_layers_spec(
+                t.get("gradient_checkpointing_layers_video_only")
+            ),
         )
 
         self.model = self  # self-reference some external callers expect
@@ -414,6 +419,7 @@ class OpenWAMTrainer:
                 # save_full_states_for_resume=true), then prune in lockstep.
                 if save_steps and global_step > 0 and global_step % save_steps == 0:
                     with timer.stage("checkpoint"):
+                        self._flush_logs()
                         save_weights(self.accelerator, self.architecture, output_path, global_step, final=False)
                         if save_full_states_for_resume:
                             save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
@@ -466,7 +472,9 @@ class OpenWAMTrainer:
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=int(t.dataset_num_workers),
-            collate_fn=list,
+            # video_uint8_in_workers: frames stacked to uint8 in the workers, pinned by
+            # the DataLoader (bitwise-identical model input).
+            collate_fn=collate_samples_with_video_uint8 if getattr(t, "video_uint8_in_workers", False) else list,
             pin_memory=True,
         )
         if not shuffle:
@@ -716,6 +724,12 @@ class OpenWAMTrainer:
         }
 
     # (10) Called each step in train()'s loop — progress bar, wandb log, debug loss-history CSV.
+    def _flush_logs(self) -> None:
+        """Write buffered per-step rows (training.log_flush_every) before checkpoints / exit."""
+        log = getattr(self, "_loss_csv_log", None)
+        if log is not None:
+            log.flush()
+
     def log_step(
         self,
         *,
@@ -766,9 +780,11 @@ class OpenWAMTrainer:
         if not debug:
             # training.loss_log_csv: the per-step CSV without the debug run overrides.
             if loss_csv and is_main and output_path:
-                write_debug_loss_row(
-                    output_path,
-                    labels=labels,
+                if getattr(self, "_loss_csv_log", None) is None:
+                    self._loss_csv_log = LossCsvLog(
+                        output_path, labels=labels, flush_every=int(cfg.training.get("log_flush_every", 1) or 1)
+                    )
+                self._loss_csv_log.add(
                     metrics=metrics,
                     global_step=global_step,
                     opt_step=opt_step,
@@ -821,6 +837,7 @@ class OpenWAMTrainer:
         removes every ``accel_state_step_*`` and retains the configured number of recent
         weight checkpoints (rank-0, post-barrier).
         """
+        self._flush_logs()
         if save_steps:
             save_weights(self.accelerator, self.architecture, output_path, global_step, final=True)
         self.accelerator.wait_for_everyone()

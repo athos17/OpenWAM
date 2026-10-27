@@ -98,3 +98,25 @@ def test_torch_profile_records_stage_ranges(tmp_path):
         names = [e.get("name") for e in json.load(f)["traceEvents"]]
     assert names.count("stage/compute_loss") == 2 and names.count("mot_layer") == 2
     assert (tmp_path / "torch_profile" / "rank0_ops.txt").is_file()
+
+
+def test_loss_csv_log_buffers_rows(tmp_path):
+    from openwam.train.utils.training_utils import LossCsvLog, write_debug_loss_row
+
+    labels = [("action", "loss_action")]
+    metrics = {"loss_total": 1.5, "loss_video": 0.5, "loss_action": 1.0, "grad_norm": 0.25}
+    row = dict(metrics=metrics, opt_step=1, epoch=0, lr=1e-4, steps_per_sec=0.1)
+    log = LossCsvLog(str(tmp_path), labels=labels, flush_every=3)
+    path = tmp_path / "debug_loss_history.csv"
+    for step in (1, 2):
+        log.add(global_step=step, **row)
+    assert not path.exists()
+    log.add(global_step=3, **row)
+    log.add(global_step=4, **row)
+    assert len(path.read_text().splitlines()) == 4  # header + 3 rows
+    log.flush()
+    ref = tmp_path / "ref"
+    ref.mkdir()
+    for step in range(1, 5):
+        write_debug_loss_row(str(ref), labels=labels, global_step=step, **row)
+    assert path.read_text() == (ref / "debug_loss_history.csv").read_text()

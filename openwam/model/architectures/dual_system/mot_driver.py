@@ -57,6 +57,25 @@ def resolve_checkpoint_layers(spec, num_layers: int) -> Optional[frozenset]:
     return layers
 
 
+def run_video_blocks(vb, vstate, checkpoint_layers: Optional[frozenset]):
+    """Video-only block loop: full-layer recompute only on ``checkpoint_layers``.
+
+    ``checkpoint_layers`` comes from :func:`resolve_checkpoint_layers` (None = every
+    layer, the previous behaviour). The state's checkpoint flags are switched off for
+    the other layers and restored afterwards; recompute does not change the result.
+    """
+    use_gc = vstate.use_gradient_checkpointing
+    offload = vstate.use_gradient_checkpointing_offload
+    for block_id in range(vb.num_layers):
+        on = checkpoint_layers is None or block_id in checkpoint_layers
+        vstate.use_gradient_checkpointing = use_gc and on
+        vstate.use_gradient_checkpointing_offload = offload and on
+        vstate = vb.run_block(block_id, vstate)
+    vstate.use_gradient_checkpointing = use_gc
+    vstate.use_gradient_checkpointing_offload = offload
+    return vstate
+
+
 def plan_split_attention(mask: Tensor) -> Optional[Tuple[Tuple[int, int, int, int], ...]]:
     """Split a 2-D bool ``[Sq, Sk]`` mask into unmasked attention runs, or None.
 
@@ -448,4 +467,4 @@ class DualSystemMoTDriver:
         return vstate, astate
 
 
-__all__ = ["DualSystemMoTDriver", "plan_split_attention", "resolve_checkpoint_layers"]
+__all__ = ["DualSystemMoTDriver", "plan_split_attention", "resolve_checkpoint_layers", "run_video_blocks"]

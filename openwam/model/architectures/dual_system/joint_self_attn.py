@@ -20,7 +20,11 @@ from torch import Tensor
 
 from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
-from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver, resolve_checkpoint_layers
+from openwam.model.architectures.dual_system.mot_driver import (
+    DualSystemMoTDriver,
+    resolve_checkpoint_layers,
+    run_video_blocks,
+)
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
@@ -218,8 +222,8 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         )
 
         if noisy_actions is None or ab is None:
-            for block_id in range(vb.num_layers):
-                vstate = vb.run_block(block_id, vstate)
+            layers = resolve_checkpoint_layers(self.video_only_checkpoint_spec(), vb.num_layers)
+            vstate = run_video_blocks(vb, vstate, layers)
             return vb.finalize(vstate), None
 
         driver = self._mot_driver

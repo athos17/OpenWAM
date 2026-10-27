@@ -134,3 +134,33 @@ def test_preprocess_video_batch_falls_back_on_ragged_clips():
     # the concat exactly as the reference loop would.
     with pytest.raises(RuntimeError):
         preprocess_video_batch(clips, dtype=torch.float32, device="cpu")
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_preprocess_video_batch_from_worker_uint8_bitwise(device, dtype):
+    from openwam.train.utils.training_utils import collate_samples_with_video_uint8
+
+    rng = np.random.default_rng(2)
+    samples = collate_samples_with_video_uint8([{"video": _clip(rng), "prompt": "p"} for _ in range(3)])
+    clips = [s["video"] for s in samples]
+    assert all(s["video_uint8"].dtype == torch.uint8 and s["video_uint8"].shape == (5, 8, 6, 3) for s in samples)
+    ref = torch.cat([preprocess_video(c, dtype=dtype, device=device) for c in clips])
+    out = preprocess_video_batch(clips, dtype=dtype, device=device, uint8_clips=[s["video_uint8"] for s in samples])
+    assert out.dtype == ref.dtype and out.is_contiguous()
+    assert torch.equal(out, ref)
+
+
+def test_worker_uint8_skips_non_uniform_clips_and_falls_back():
+    from openwam.train.utils.training_utils import collate_samples_with_video_uint8
+
+    rng = np.random.default_rng(3)
+    gray = [Image.fromarray(rng.integers(0, 256, (8, 6), dtype=np.uint8)) for _ in range(5)]
+    mixed = _clip(rng)[:4] + [_clip(rng, h=4)[0]]
+    samples = collate_samples_with_video_uint8([{"video": gray}, {"video": mixed}, {"prompt": "no video"}])
+    assert all("video_uint8" not in s for s in samples)
+    # A batch where only some clips were stacked takes the host path.
+    clips = [_clip(rng), _clip(rng)]
+    ref = preprocess_video_batch(clips, dtype=torch.float32, device="cpu")
+    out = preprocess_video_batch(clips, dtype=torch.float32, device="cpu", uint8_clips=[None, None])
+    assert torch.equal(out, ref)
