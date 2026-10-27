@@ -1,0 +1,86 @@
+# Marvin Pro + SharpaWave pick_place_2_3 (87 episodes, 212,615 windows/epoch) fine-tune with the
+# H20 accelerated recipe (train_h20_3src_s8b_gc20), matched to the 2026-10-22 reference run on the
+# same data, wan_init_ow_wan_pick_place_2_3_v3_3node_bs16ga2_rtc16_ep20:
+#   reference: 3 x 8 H20, micro-batch 16, GA 2 -> global 768; 20 epochs = 5,540 optimizer updates
+#              (11,080 micro-steps); lr 5e-5 cosine (5% warmup, min 1%); RTC 16 uniform; no colour
+#              jitter; cached VAE/T5 latents; no activation recompute; Wan loaded from the foundation
+#              checkpoint, ActionDiT + proprio freshly initialized; 7.4 h.
+#   this run:  2 x 8 H20, micro-batch 48, GA 1 -> the same global 768 and 5,540 updates; VAE/T5 encode
+#              online (this branch has no offline encode cache); recompute layers 0-19.
+#
+#   NNODES=2 NODE_RANK=<0|1> MASTER_ADDR=<node-0 ip> NCCL_ALGO=Ring \
+#     bash scripts/train.sh --config-name train_marvin_pick_place_2_3_accel
+defaults:
+  - train
+  - override dataloader: marvin
+  - _self_
+
+dataloader:
+  dataset_dir: /data/dataset/openwam/pick_place_2_3_openwam_v3
+  color_jitter:
+    enabled: false
+
+model:
+  architecture:
+    mot_split_attention: true
+
+training:
+  finetune_ckpt_path: /data/models/OpenWAM-Alpha-Pretrain-Foundation-Model
+  # Reference loaded only video_backbone.*; random keeps the foundation proprio encoder and Wan,
+  # re-initializes the ActionDiT. Set pretrained to warm-start the foundation ActionDiT as well.
+  action_backbone_init: random
+  action_init_seed: 42
+
+  batch_size: 48
+  gradient_accumulation_steps: 1  # 2 nodes x 8 GPUs x 48 = 768 (= reference 3 x 8 x 16 x 2)
+  num_epochs: 20                  # 277 updates/epoch -> 5,540
+  max_steps: null
+  learning_rate: 5e-5
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  lr_min_ratio: 0.01
+  mixed_precision: bf16
+  zero_stage: 2
+  rtc:
+    enabled: true
+    max_delay_steps: 16
+    delay_distribution: uniform
+
+  # Accelerated recipe (s7d + phase 1/2), all validated on H20 against the reference path.
+  deepspeed_zero:
+    overlap_comm: true
+    contiguous_gradients: true
+    reduce_bucket_size: 200000000
+    allgather_bucket_size: 500000000
+  text_padding: longest
+  text_dedup: true
+  video_uint8_in_workers: true
+  vae_cudnn_benchmark: true
+  vae_channels_last: true
+  frame_time_modulation: true
+  use_gradient_checkpointing: true
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  max_gpu_memory_gib: null        # ~76 GiB expected peak with 16-way ZeRO-2 shards; H20 has 96 GB
+
+  dataset_num_workers: 8
+  output_path: /data/lyh/OpenWAM/outputs/accel_pick_place_2_3_v3
+  save_steps: 500                 # = reference's 1000 micro-steps at GA 2
+  save_full_states_for_resume: true
+  keep_resume_state_at_end: false
+  keep_last_k_ckpts: -1           # keep every weight checkpoint (~25 GB each, 12 in total) for robot A/B
+  step_timing:
+    enabled: true
+    summary_every: 50
+    mfu: true
+    peak_tflops: 148
+  loss_log_csv: true
+  log_flush_every: 50
+
+project:
+  name: openwam
+  output_dir: outputs/accel_s8b_pick_place_2_3_v3_2node_bs48ga1_rtc16_ep20
+  seed: 42
+  wandb:
+    project: openwam-acceptance
+    entity: -harbin-institute-of-technology
+    run_name: accel_s8b_pick_place_2_3_v3_2node_bs48ga1_rtc16_ep20
