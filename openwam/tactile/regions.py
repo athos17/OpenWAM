@@ -6,11 +6,9 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
+from .registry import FINGERTIP_NAMES, REGION_NAMES, validate_registry
+
 SCHEMA = "tactile_regions_v1"
-FINGERTIP_NAMES = tuple(
-    f"{side}.{finger}.tip" for side in ("right", "left") for finger in ("thumb", "index", "middle", "ring", "pinky")
-)
-REGION_NAMES = (*FINGERTIP_NAMES, "right.palm", "left.palm")
 CODEC = "sharpa_deform_gray_v1"
 
 
@@ -40,13 +38,19 @@ def collate_regions(
     """
     if not samples:
         raise ValueError("Cannot collate an empty tactile batch")
+    validate_registry(region_names)
     ns = []
     for sample in samples:
         if sample.get("tactile_codec") != CODEC:
             raise ValueError("Expected explicit tactile_codec=sharpa_deform_gray_v1")
         names = list(sample["tactile_region_names"])
-        if not names or len(names) != len(set(names)) or set(names) - set(region_names):
-            raise ValueError("Region names must be nonempty, unique and registered")
+        if not names or set(names) - set(region_names):
+            raise ValueError("Region names must be nonempty and registered")
+        surfaces = torch.as_tensor(sample.get("tactile_surface_ids", [0] * len(names)))
+        if surfaces.dtype != torch.long or surfaces.shape != (len(names),) or ((surfaces < 0) | (surfaces > 65535)).any():
+            raise ValueError("Invalid tactile_surface_ids")
+        if len(set(zip(names, surfaces.tolist()))) != len(names):
+            raise ValueError("Duplicate region/surface identities")
         ns.append(len(names))
     n = max(ns)
     out = {}
@@ -60,6 +64,7 @@ def collate_regions(
         "tactile_spatial_valid": ((n, 1, map_size, map_size), torch.bool, False),
         "tactile_sensor_ids": ((n,), torch.long, 0),
         "tactile_region_ids": ((n,), torch.long, -1),
+        "tactile_surface_ids": ((n,), torch.long, 0),
     }
     device = torch.as_tensor(samples[0]["tactile_maps"]).device
     for key, (shape, dtype, fill) in specs.items():
@@ -89,6 +94,7 @@ def collate_regions(
                 "tactile_query_mask": layout[None].expand(future_frames, -1),
                 "tactile_spatial_valid": torch.ones(count, 1, map_size, map_size, dtype=torch.bool, device=device),
                 "tactile_sensor_ids": torch.zeros(count, dtype=torch.long, device=device),
+                "tactile_surface_ids": torch.zeros(count, dtype=torch.long, device=device),
             }
             if key == "tactile_sensor_ids" and "tactile_sensor_names" in sample:
                 names = list(sample["tactile_sensor_names"])
@@ -120,10 +126,23 @@ class DeformHistory:
     """
 
     def __init__(
-        self, region_names=FINGERTIP_NAMES, *, history=4, size=32, fps=30, sensor_id=0, registry_names=REGION_NAMES
+        self, region_names=FINGERTIP_NAMES, *, history=4, size=32, fps=30, sensor_id=0, registry_names=REGION_NAMES,
+        surface_ids=None, surface_keys=None,
     ):
-        if not region_names or len(set(region_names)) != len(region_names) or set(region_names) - set(registry_names):
+        validate_registry(registry_names)
+        if not region_names or set(region_names) - set(registry_names):
             raise ValueError("Invalid region layout")
+        self.surface_ids = np.asarray([0] * len(region_names) if surface_ids is None else surface_ids)
+        self.keys = tuple(region_names if surface_keys is None else surface_keys)
+        if (
+            self.surface_ids.dtype.kind not in "iu" or self.surface_ids.shape != (len(region_names),)
+            or ((self.surface_ids < 0) | (self.surface_ids > 65535)).any()
+            or len(set(zip(region_names, self.surface_ids.tolist()))) != len(region_names)
+            or len(self.keys) != len(region_names) or len(set(self.keys)) != len(self.keys)
+            or any(not isinstance(k, str) or not k for k in self.keys)
+        ):
+            raise ValueError("Invalid or duplicate surface identities/keys")
+        self.surface_ids = self.surface_ids.astype(np.int64)
         if history < 1 or size < 1 or not np.isfinite(fps) or fps <= 0:
             raise ValueError("Invalid history settings")
         self.names = tuple(region_names)
@@ -137,7 +156,7 @@ class DeformHistory:
         self.last_time = None
 
     def append(self, timestamp_s, images_by_region):
-        if not np.isfinite(timestamp_s) or set(images_by_region) - set(self.names):
+        if not np.isfinite(timestamp_s) or set(images_by_region) - set(self.keys):
             raise ValueError("Invalid timestamp or unexpected region")
         if self.last_time is not None and not np.isclose(
             timestamp_s - self.last_time, 1 / self.fps, rtol=0.1, atol=1e-6
@@ -145,7 +164,7 @@ class DeformHistory:
             self.reset()
         maps = torch.zeros(len(self.names), 1, self.size, self.size)
         valid = torch.zeros(len(self.names), dtype=torch.bool)
-        for i, name in enumerate(self.names):
+        for i, name in enumerate(self.keys):
             if images_by_region.get(name) is not None:
                 maps[i] = resize_deform(images_by_region[name], self.size)
                 valid[i] = True
@@ -159,6 +178,7 @@ class DeformHistory:
             tactile_maps=history.numpy(),
             tactile_valid=mask.numpy(),
             tactile_region_ids=np.array([self.registry_names.index(name) for name in self.names], dtype=np.int64),
+            tactile_surface_ids=self.surface_ids.copy(),
             tactile_layout_present=np.ones(len(self.names), dtype=bool),
             tactile_sensor_ids=np.full(len(self.names), self.sensor_id, dtype=np.int64),
         )

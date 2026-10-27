@@ -89,7 +89,7 @@ class RegionalTactileFlowStream(nn.Module):
         )
         self.output = nn.Sequential(nn.LayerNorm(width), nn.Linear(width, self.codec.patch_dim))
 
-    def embed(self, tokens, ids, sensors, spatial, times):
+    def embed(self, tokens, ids, sensors, spatial, times, surface_ids=None):
         b, n = ids.shape
         p = self.codec.patches_per_site
         side = self.spec["map_size"] // self.spec["patch_size"]
@@ -100,18 +100,26 @@ class RegionalTactileFlowStream(nn.Module):
         position = torch.cat((position, times[:, None, None].expand(-1, p, 1)), dim=-1)
         positional = self.position_projection(position)[None, :, None]
         identity = (self.region_embedding(ids.clamp_min(0)) + self.sensor_embedding(sensors))[:, None, :, None]
+        if surface_ids is not None:
+            # Stable per-region instance IDs; no expanding learned identity table.
+            # ID 0 is exactly zero, preserving the original twelve-region model.
+            width = self.spec["width"]
+            frequencies = torch.exp(-math.log(10000) * torch.arange(width // 2, device=tokens.device).float() / (width // 2))
+            phase = surface_ids.float()[..., None] * frequencies
+            instance = torch.cat((phase.sin(), phase.cos() - 1), dim=-1).to(tokens.dtype)
+            identity = identity + instance[:, None, :, None]
         spatial_tokens = self.codec.patchify(spatial[:, None]).to(tokens.dtype)
         spatial_features = self.spatial_projection(spatial_tokens).reshape(b, 1, n, p, -1)
         return self.input_projection(tokens) + (positional + identity + spatial_features).reshape(
             b, -1, self.spec["width"]
         )
 
-    def encode_history(self, maps, valid, ids, sensors, spatial):
+    def encode_history(self, maps, valid, ids, sensors, spatial, surface_ids=None):
         tokens, observed = self.codec.encode(maps, valid, spatial)
         pixels = self.codec.pixel_mask(observed, spatial)
         mask = pixels.any(-1)
         times = torch.arange(1 - self.spec["history"], 1, device=maps.device, dtype=tokens.dtype) / self.spec["fps"]
-        tokens = self.embed(tokens, ids, sensors, spatial, times).masked_fill(~mask[..., None], 0)
+        tokens = self.embed(tokens, ids, sensors, spatial, times, surface_ids).masked_fill(~mask[..., None], 0)
         tokens = torch.cat((tokens.new_zeros(tokens.shape[0], 1, tokens.shape[-1]), tokens), dim=1)
         keys = torch.cat((torch.ones(mask.shape[0], 1, dtype=torch.bool, device=mask.device), mask), dim=1)
         frames = torch.cat(
@@ -125,14 +133,14 @@ class RegionalTactileFlowStream(nn.Module):
         result = self.history_encoder(tokens, mask=frames[None] > frames[:, None], src_key_padding_mask=~keys)[:, 1:]
         return result.masked_fill(~mask[..., None], 0), mask, observed.any(1)
 
-    def prepare_future(self, noisy, timestep, ids, sensors, spatial):
+    def prepare_future(self, noisy, timestep, ids, sensors, spatial, surface_ids=None):
         width = self.spec["width"]
         frequencies = torch.exp(-math.log(10000) * torch.arange(width // 2, device=noisy.device).float() / (width // 2))
         phase = timestep.float().reshape(-1, 1) * frequencies[None]
         time = self.time_mlp(torch.cat((phase.cos(), phase.sin()), dim=-1).to(noisy.dtype))
         times = torch.arange(1, self.spec["future_frames"] + 1, device=noisy.device, dtype=noisy.dtype)
         times = times * self.spec["future_stride"] / self.spec["fps"]
-        return self.embed(noisy, ids, sensors, spatial, times), time
+        return self.embed(noisy, ids, sensors, spatial, times, surface_ids), time
 
 
 def regional_flow_loss(codec, prediction, target, clean, pixel_valid, num_regions, foreground_weight=1.0):

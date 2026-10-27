@@ -15,8 +15,11 @@ from tests.test_touchwam import pair as legacy_pair
 
 @pytest.fixture
 def models(monkeypatch, tmp_path):
-    base, legacy, alpha = legacy_pair.__wrapped__(monkeypatch, tmp_path)
-    regional = build_architecture("touchwam_regions", tiny_config())
+    # Keep initialization reproducible regardless of test collection/order.
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(42)
+        base, legacy, alpha = legacy_pair.__wrapped__(monkeypatch, tmp_path)
+        regional = build_architecture("touchwam_regions", tiny_config())
     regional.set_dtype_device(torch.float32, torch.device("cpu"))
     regional.init_training_schedulers()
     regional.load_openwam_checkpoint(str(alpha))

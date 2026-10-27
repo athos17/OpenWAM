@@ -1,0 +1,588 @@
+{
+  "version": "touchwam_regions_64_v1",
+  "sha256": "15ec04d9d4bc5262f2aa9af960e58595ec3e4329d4f40f3b33e3c52d7c2464a4",
+  "regions": [
+    {
+      "id": 0,
+      "name": "right.thumb.tip",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "right.index.tip",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "right.middle.tip",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "right.ring.tip",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "right.pinky.tip",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "left.thumb.tip",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "left.index.tip",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "left.middle.tip",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "left.ring.tip",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "left.pinky.tip",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger",
+        "fingertip"
+      ]
+    },
+    {
+      "id": 10,
+      "name": "right.palm",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 11,
+      "name": "left.palm",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 12,
+      "name": "right.thumb.proximal",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 13,
+      "name": "right.thumb.base_thenar",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger",
+        "palm",
+        "composite"
+      ]
+    },
+    {
+      "id": 14,
+      "name": "right.index.middle",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 15,
+      "name": "right.index.proximal",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 16,
+      "name": "right.index.base",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 17,
+      "name": "right.middle.middle",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 18,
+      "name": "right.middle.proximal",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 19,
+      "name": "right.middle.base",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 20,
+      "name": "right.ring.middle",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 21,
+      "name": "right.ring.proximal",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 22,
+      "name": "right.ring.base",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 23,
+      "name": "right.pinky.middle",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 24,
+      "name": "right.pinky.proximal",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 25,
+      "name": "right.pinky.base",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 26,
+      "name": "right.palm.thenar",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 27,
+      "name": "right.palm.hypothenar",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 28,
+      "name": "right.palm.central",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 29,
+      "name": "right.palm.distal",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 30,
+      "name": "right.palm.proximal",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 31,
+      "name": "right.hand.dorsal",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "dorsal"
+      ]
+    },
+    {
+      "id": 32,
+      "name": "right.hand.other",
+      "family": "hand",
+      "side": "right",
+      "groups": [
+        "generic"
+      ]
+    },
+    {
+      "id": 33,
+      "name": "right.wrist",
+      "family": "arm",
+      "side": "right",
+      "groups": []
+    },
+    {
+      "id": 34,
+      "name": "right.forearm",
+      "family": "arm",
+      "side": "right",
+      "groups": []
+    },
+    {
+      "id": 35,
+      "name": "left.thumb.proximal",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 36,
+      "name": "left.thumb.base_thenar",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger",
+        "palm",
+        "composite"
+      ]
+    },
+    {
+      "id": 37,
+      "name": "left.index.middle",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 38,
+      "name": "left.index.proximal",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 39,
+      "name": "left.index.base",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 40,
+      "name": "left.middle.middle",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 41,
+      "name": "left.middle.proximal",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 42,
+      "name": "left.middle.base",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 43,
+      "name": "left.ring.middle",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 44,
+      "name": "left.ring.proximal",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 45,
+      "name": "left.ring.base",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 46,
+      "name": "left.pinky.middle",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 47,
+      "name": "left.pinky.proximal",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 48,
+      "name": "left.pinky.base",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "finger"
+      ]
+    },
+    {
+      "id": 49,
+      "name": "left.palm.thenar",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 50,
+      "name": "left.palm.hypothenar",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 51,
+      "name": "left.palm.central",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 52,
+      "name": "left.palm.distal",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 53,
+      "name": "left.palm.proximal",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "palm"
+      ]
+    },
+    {
+      "id": 54,
+      "name": "left.hand.dorsal",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "dorsal"
+      ]
+    },
+    {
+      "id": 55,
+      "name": "left.hand.other",
+      "family": "hand",
+      "side": "left",
+      "groups": [
+        "generic"
+      ]
+    },
+    {
+      "id": 56,
+      "name": "left.wrist",
+      "family": "arm",
+      "side": "left",
+      "groups": []
+    },
+    {
+      "id": 57,
+      "name": "left.forearm",
+      "family": "arm",
+      "side": "left",
+      "groups": []
+    },
+    {
+      "id": 58,
+      "name": "gripper.jaw_a.surface",
+      "family": "gripper",
+      "side": "none",
+      "groups": [
+        "gripper"
+      ]
+    },
+    {
+      "id": 59,
+      "name": "gripper.jaw_b.surface",
+      "family": "gripper",
+      "side": "none",
+      "groups": [
+        "gripper"
+      ]
+    },
+    {
+      "id": 60,
+      "name": "gripper.base",
+      "family": "gripper",
+      "side": "none",
+      "groups": [
+        "gripper"
+      ]
+    },
+    {
+      "id": 61,
+      "name": "generic.surface",
+      "family": "generic",
+      "side": "unspecified",
+      "groups": [
+        "generic"
+      ]
+    },
+    {
+      "id": 62,
+      "name": "generic.tool",
+      "family": "generic",
+      "side": "unspecified",
+      "groups": [
+        "generic"
+      ]
+    },
+    {
+      "id": 63,
+      "name": "generic.body",
+      "family": "generic",
+      "side": "unspecified",
+      "groups": [
+        "generic"
+      ]
+    }
+  ]
+}

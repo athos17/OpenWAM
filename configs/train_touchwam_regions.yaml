@@ -8,6 +8,7 @@ training:
   finetune_ckpt_path: ???
   initialize_touch_from_openwam: true
   initialize_touch_from_legacy: false
+  initialize_touch_registry: false
   initialize_model_on_cpu: true
   resume_ckpt_path: null
   num_epochs: null

@@ -13,6 +13,7 @@ from openwam.deploy.engine import JointInferenceEngine
 from openwam.deploy.policy import WAMPolicy
 from openwam.deploy.server import PolicyServer
 from openwam.model import resolve_architecture_config
+from openwam.tactile.registry import REGION_NAMES
 from openwam.train.utils.ckpt_model_loader import build_architecture_from_ckpt_dir
 from tests.test_touchwam import open_gates, tiny_config
 from tests.test_touchwam_regions import models as regional_models
@@ -37,6 +38,7 @@ def test_new_hydra_training_configs_keep_legacy_geometry_separate():
             ],
         )
     assert resolve_architecture_config(real.model).registry_name == "touchwam_regions"
+    assert tuple(real.model.architecture.tactile.region_names) == REGION_NAMES
     assert real.dataloader.tactile_fps == 30 and real.dataloader.tactile_future_stride == 3
     assert sim.dataloader.type == "bench2dex_deform" and sim.dataloader.tactile_fps == 20
 
@@ -109,10 +111,12 @@ def test_engine_forwards_layout_queries_and_palm_disable(models):
         if key in ("tactile_maps", "tactile_valid", "tactile_region_ids", "tactile_layout_present")
     }
     observation.update(state=args["proprio"], tactile_palm_mode="off")
+    observation["tactile_surface_ids"] = torch.arange(12)[None]
     model.normalize_deploy_proprio = lambda x: x
     result = engine.generate(dict(prompt="pick", observation=observation))
     assert result["future_tactile_maps"].shape == (2, 10, 1, 8, 8)
     assert not any("palm" in name for name in result["tactile_region_names"])
+    assert result["tactile_surface_ids"].tolist() == list(range(10))
 
 
 def test_sync_server_returns_maps_for_the_action_plan_without_resampling():

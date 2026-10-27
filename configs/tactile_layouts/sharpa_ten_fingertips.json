@@ -1,0 +1,127 @@
+{
+  "schema": "touchwam_surface_layout_v1",
+  "registry": "touchwam_regions_64_v1",
+  "name": "sharpa_ten_fingertips",
+  "surfaces": [
+    {
+      "native_key": "right.thumb.tip",
+      "region": "right.thumb.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "right"
+    },
+    {
+      "native_key": "right.index.tip",
+      "region": "right.index.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "right"
+    },
+    {
+      "native_key": "right.middle.tip",
+      "region": "right.middle.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "right"
+    },
+    {
+      "native_key": "right.ring.tip",
+      "region": "right.ring.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "right"
+    },
+    {
+      "native_key": "right.pinky.tip",
+      "region": "right.pinky.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "right"
+    },
+    {
+      "native_key": "left.thumb.tip",
+      "region": "left.thumb.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "left"
+    },
+    {
+      "native_key": "left.index.tip",
+      "region": "left.index.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "left"
+    },
+    {
+      "native_key": "left.middle.tip",
+      "region": "left.middle.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "left"
+    },
+    {
+      "native_key": "left.ring.tip",
+      "region": "left.ring.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "left"
+    },
+    {
+      "native_key": "left.pinky.tip",
+      "region": "left.pinky.tip",
+      "sensor": "sharpa_real",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ],
+      "instance": "left"
+    }
+  ]
+}

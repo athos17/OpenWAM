@@ -1,0 +1,427 @@
+{
+  "schema": "touchwam_surface_layout_v1",
+  "registry": "touchwam_regions_64_v1",
+  "name": "touchscale_full_hand",
+  "surfaces": [
+    {
+      "native_key": "obs/tactile/raw/right/pad_0",
+      "region": "right.thumb.tip",
+      "native_name": "thumb_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        16,
+        10
+      ],
+      "instance": "right",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_1",
+      "region": "right.thumb.proximal",
+      "native_name": "thumb_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        4,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": "Vendor thumb_middle is mapped to the proximal thumb segment between the distal pad and base; retain native geometry, not a nonexistent third thumb phalanx."
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_2",
+      "region": "right.thumb.base_thenar",
+      "native_name": "thumb_base_thenar",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        13,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": "Composite thumb base/thenar coverage; belongs to the palm-disable group without duplicating its taxels."
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_3",
+      "region": "right.index.tip",
+      "native_name": "index_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        9,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_4",
+      "region": "right.index.middle",
+      "native_name": "index_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        3,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_5",
+      "region": "right.index.proximal",
+      "native_name": "index_proximal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        4,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_7",
+      "region": "right.middle.tip",
+      "native_name": "middle_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        9,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_8",
+      "region": "right.middle.middle",
+      "native_name": "middle_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        3,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_9",
+      "region": "right.middle.proximal",
+      "native_name": "middle_proximal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        4,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_11",
+      "region": "right.ring.tip",
+      "native_name": "ring_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        9,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_12",
+      "region": "right.ring.middle",
+      "native_name": "ring_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        3,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_13",
+      "region": "right.ring.proximal",
+      "native_name": "ring_proximal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        4,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_15",
+      "region": "right.pinky.tip",
+      "native_name": "little_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        9,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_16",
+      "region": "right.pinky.middle",
+      "native_name": "little_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        3,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/right/pad_18",
+      "region": "right.palm.hypothenar",
+      "native_name": "palm_hypothenar",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        13,
+        8
+      ],
+      "instance": "right",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_0",
+      "region": "left.thumb.tip",
+      "native_name": "thumb_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        16,
+        10
+      ],
+      "instance": "left",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_1",
+      "region": "left.thumb.proximal",
+      "native_name": "thumb_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        4,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": "Vendor thumb_middle is mapped to the proximal thumb segment between the distal pad and base; retain native geometry, not a nonexistent third thumb phalanx."
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_2",
+      "region": "left.thumb.base_thenar",
+      "native_name": "thumb_base_thenar",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        13,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": "Composite thumb base/thenar coverage; belongs to the palm-disable group without duplicating its taxels."
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_3",
+      "region": "left.index.tip",
+      "native_name": "index_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        9,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_4",
+      "region": "left.index.middle",
+      "native_name": "index_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        3,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_5",
+      "region": "left.index.proximal",
+      "native_name": "index_proximal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        4,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_7",
+      "region": "left.middle.tip",
+      "native_name": "middle_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        9,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_8",
+      "region": "left.middle.middle",
+      "native_name": "middle_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        3,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_9",
+      "region": "left.middle.proximal",
+      "native_name": "middle_proximal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        4,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_11",
+      "region": "left.ring.tip",
+      "native_name": "ring_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        9,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_12",
+      "region": "left.ring.middle",
+      "native_name": "ring_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        3,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_13",
+      "region": "left.ring.proximal",
+      "native_name": "ring_proximal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        4,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_15",
+      "region": "left.pinky.tip",
+      "native_name": "little_distal",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        9,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_16",
+      "region": "left.pinky.middle",
+      "native_name": "little_middle",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        3,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": ""
+    },
+    {
+      "native_key": "obs/tactile/raw/left/pad_18",
+      "region": "left.palm.hypothenar",
+      "native_name": "palm_hypothenar",
+      "sensor": "touchscale_glove",
+      "representation": "touchscale_normal_force_v1",
+      "units": "N_assumed_vendor_calibrated",
+      "native_shape": [
+        13,
+        8
+      ],
+      "instance": "left",
+      "mapping_note": ""
+    }
+  ]
+}

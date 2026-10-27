@@ -7,7 +7,72 @@ architecture:
   training_mode: joint_finetune
   tactile:
     codec: sharpa_deform_gray_v1
-    region_names: [right.thumb.tip, right.index.tip, right.middle.tip, right.ring.tip, right.pinky.tip, left.thumb.tip, left.index.tip, left.middle.tip, left.ring.tip, left.pinky.tip, right.palm, left.palm]
+    # Frozen public vocabulary; select active surfaces in the data layout.
+    region_names:
+      - right.thumb.tip
+      - right.index.tip
+      - right.middle.tip
+      - right.ring.tip
+      - right.pinky.tip
+      - left.thumb.tip
+      - left.index.tip
+      - left.middle.tip
+      - left.ring.tip
+      - left.pinky.tip
+      - right.palm
+      - left.palm
+      - right.thumb.proximal
+      - right.thumb.base_thenar
+      - right.index.middle
+      - right.index.proximal
+      - right.index.base
+      - right.middle.middle
+      - right.middle.proximal
+      - right.middle.base
+      - right.ring.middle
+      - right.ring.proximal
+      - right.ring.base
+      - right.pinky.middle
+      - right.pinky.proximal
+      - right.pinky.base
+      - right.palm.thenar
+      - right.palm.hypothenar
+      - right.palm.central
+      - right.palm.distal
+      - right.palm.proximal
+      - right.hand.dorsal
+      - right.hand.other
+      - right.wrist
+      - right.forearm
+      - left.thumb.proximal
+      - left.thumb.base_thenar
+      - left.index.middle
+      - left.index.proximal
+      - left.index.base
+      - left.middle.middle
+      - left.middle.proximal
+      - left.middle.base
+      - left.ring.middle
+      - left.ring.proximal
+      - left.ring.base
+      - left.pinky.middle
+      - left.pinky.proximal
+      - left.pinky.base
+      - left.palm.thenar
+      - left.palm.hypothenar
+      - left.palm.central
+      - left.palm.distal
+      - left.palm.proximal
+      - left.hand.dorsal
+      - left.hand.other
+      - left.wrist
+      - left.forearm
+      - gripper.jaw_a.surface
+      - gripper.jaw_b.surface
+      - gripper.base
+      - generic.surface
+      - generic.tool
+      - generic.body
     sensor_names: [sharpa_real, bench2dex_sim]
     history: 4
     map_size: 32
