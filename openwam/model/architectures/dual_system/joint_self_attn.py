@@ -172,6 +172,9 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         logger.info("Enabled dual self-attn MoT compile with torch.compile kwargs=%s", kwargs)
 
     supports_video_only_training = True
+    # vstate.time_mod only reaches the Wan blocks (MoT pre/post halves, video-only blocks),
+    # so the backbone may keep it per latent frame (training.frame_time_modulation).
+    supports_frame_time_modulation = True
 
     def forward(
         self,

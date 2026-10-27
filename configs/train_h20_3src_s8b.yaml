@@ -1,0 +1,9 @@
+# Phase 2 on top of train_h20_3src_s8a: Wan AdaLN time modulation kept per latent frame
+# (training.frame_time_modulation). Same recompute layers as s7d/s8a.
+defaults:
+  - train_h20_3src_s8a
+  - _self_
+
+training:
+  output_path: /data/lyh/perf_runs/h20_3src/s8b
+  frame_time_modulation: true

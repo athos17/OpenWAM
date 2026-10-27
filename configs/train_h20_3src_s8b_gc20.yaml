@@ -1,0 +1,10 @@
+# train_h20_3src_s8b recomputing layers 0-19 (skip the last 10 of 30), under the ~86 GiB cap
+# that matches 8-node A800 ZeRO-2 memory on one H20 node (8-way instead of 64-way shards).
+defaults:
+  - train_h20_3src_s8b
+  - _self_
+
+training:
+  output_path: /data/lyh/perf_runs/h20_3src/s8b_gc20
+  max_gpu_memory_gib: 86
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]

@@ -37,7 +37,7 @@ from openwam.model.video_backbone.wan import conditioning as wan_conditioning
 from openwam.model.video_backbone.wan import dit_forward as wan_dit_forward
 from openwam.model.video_backbone.wan import encode as wan_encode
 from openwam.model.video_backbone.wan import loader
-from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply
+from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply, split_time_modulation
 from openwam.model.video_backbone.wan.preprocess import (
     check_resize_height_width,
 )
@@ -395,11 +395,14 @@ class WanBase(VideoBackbone):
             num_clean_prefix_frames=num_clean_prefix_frames,
             zero_clean_prefix_t_mod=bool(kw.get("zero_clean_prefix_t_mod", False)),
             has_first_frame_latents=kw.get("first_frame_latents") is not None,
+            per_frame=getattr(self, "_frame_time_modulation", False),
         )
 
         if motion_bucket_id is not None and motion_controller is not None:
             motion_term = motion_controller(motion_bucket_id).unflatten(1, (6, dit.dim))  # (B, 6, dim)
-            if time_modulation.dim() == 4:
+            if time_modulation.dim() == 5:  # per latent frame (B, F, 1, 6, dim)
+                motion_term = motion_term[:, None, None]
+            elif time_modulation.dim() == 4:
                 # Broadcast (B, 6, dim) across L; without the unsqueeze the add
                 # right-aligns and aliases B onto L (mis-broadcasts when B == L).
                 motion_term = motion_term.unsqueeze(1)  # (B, 1, 6, dim)
@@ -546,15 +549,9 @@ class WanBase(VideoBackbone):
         """Compile-friendly Wan pre-attention half using a tensor tuple post-state."""
         block = state.extras["dit"].blocks[layer_id]
 
-        time_modulation = state.time_mod
-        has_seq = time_modulation.dim() == 4
-        chunk_dim = 2 if has_seq else 1
-        chunks = (
-            block.modulation.to(dtype=time_modulation.dtype, device=time_modulation.device) + time_modulation
-        ).chunk(6, dim=chunk_dim)
-        if has_seq:
-            chunks = tuple(c.squeeze(2) for c in chunks)
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = split_time_modulation(
+            block.modulation, state.time_mod
+        )
 
         residual_x = state.hidden_states
         attn_input = modulate(block.norm1(state.hidden_states), shift_msa, scale_msa)
@@ -613,7 +610,8 @@ class WanBase(VideoBackbone):
         dit = state.extras["dit"]
         head = dit.head
         time_embed = state.extras["time_embed"]
-        head_time_embed = time_embed if time_embed.dim() == 3 else time_embed.unsqueeze(1)
+        # (B, L, dim) per token / (B, F, 1, dim) per latent frame; (B, dim) -> (B, 1, dim)
+        head_time_embed = time_embed if time_embed.dim() >= 3 else time_embed.unsqueeze(1)
 
         hidden_states = head(state.hidden_states, head_time_embed)
 
@@ -783,6 +781,14 @@ class WanBase(VideoBackbone):
             raise ValueError(f"text padding must be one of {wan_encode.TEXT_PADDING_MODES}, got {padding!r}")
         self._text_padding = padding
         self._text_dedup = bool(dedup)
+
+    def set_frame_time_modulation(self, enabled: bool) -> None:
+        """Train-time option: keep the per-token timestep modulation per latent frame
+        (``time_mod`` (B, F, 1, 6, dim)) and broadcast it inside the blocks, instead of
+        materializing (B, L, 6, dim). Same values; for architectures that only feed
+        ``time_mod`` to the Wan blocks (``supports_frame_time_modulation``).
+        """
+        self._frame_time_modulation = bool(enabled)
 
     def set_vae_encode_options(self, *, cudnn_benchmark: bool = False, channels_last: bool = False) -> None:
         """Train-time options for the frozen native VAE encode only.

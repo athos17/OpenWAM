@@ -641,12 +641,24 @@ class OpenWAMTrainer:
             logger.info("VAE encode: cudnn_benchmark=%s channels_last=%s", cudnn_benchmark, channels_last)
 
     def _configure_compute_options(self, arch) -> None:
-        """Opt-in DiT compute options: ``training.rope_impl`` (Wan RoPE precision/kernel).
-        Defaults keep the reference path."""
+        """Opt-in DiT compute options: ``training.rope_impl`` (Wan RoPE precision/kernel) and
+        ``training.frame_time_modulation`` (per-latent-frame AdaLN modulation). Defaults keep
+        the reference path."""
         cfg = getattr(self, "cfg", None)
         if cfg is None:
             return
         t = cfg.training
+        if bool(t.get("frame_time_modulation", False)):
+            vb = getattr(arch, "video_backbone", None)
+            if not getattr(arch, "supports_frame_time_modulation", False) or not hasattr(
+                vb, "set_frame_time_modulation"
+            ):
+                raise ValueError(
+                    "training.frame_time_modulation needs a Wan video backbone and an architecture that "
+                    f"declares supports_frame_time_modulation (got {type(arch).__name__})"
+                )
+            vb.set_frame_time_modulation(True)
+            logger.info("Wan time modulation: per latent frame")
         rope_impl = str(t.get("rope_impl", "fp64") or "fp64")
         if rope_impl != "fp64":
             from openwam.model.video_backbone.wan.models import dit as wan_dit

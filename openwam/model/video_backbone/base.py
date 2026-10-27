@@ -25,7 +25,7 @@ class BlockLoopState:
 
     # Architecture may read/write
     hidden_states: Tensor  # (B, L, dim)
-    time_mod: Tensor  # (B, 6, dim) or (B, L, 6, dim) per-token
+    time_mod: Tensor  # (B, 6, dim), (B, L, 6, dim) per-token, or Wan (B, F, 1, 6, dim) per latent frame
     rope_freqs: Tensor
     context: Tensor  # text cross-attention embedding
     context_mask: Optional[Tensor] = None  # (B, L_context) bool, True = attend
