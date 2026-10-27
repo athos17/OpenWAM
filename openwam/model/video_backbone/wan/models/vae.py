@@ -23,15 +23,19 @@ class CausalConv3d(nn.Conv3d):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._padding = (self.padding[2], self.padding[2], self.padding[1], self.padding[1], 2 * self.padding[0], 0)
-        self.padding = (0, 0, 0)
+        # Spatial zero padding stays inside the conv (no padded copy of the input);
+        # only the causal temporal frames are prepended, from the cache or as zeros.
+        # Same result as F.pad over all dims (zero padding either way).
+        self.padding = (0, self.padding[1], self.padding[2])
 
     def forward(self, x, cache_x=None):
-        padding = list(self._padding)
+        pad_t = self._padding[4]
         if cache_x is not None and self._padding[4] > 0:
             cache_x = cache_x.to(x.device)
             x = torch.cat([cache_x, x], dim=2)
-            padding[4] -= cache_x.shape[2]
-        x = F.pad(x, padding)
+            pad_t -= cache_x.shape[2]
+        if pad_t:
+            x = F.pad(x, (0, 0, 0, 0, pad_t, 0))
 
         return super().forward(x)
 

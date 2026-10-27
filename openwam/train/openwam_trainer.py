@@ -605,6 +605,7 @@ class OpenWAMTrainer:
         arch.set_dtype_device(arch.dtype, self.accelerator.device)
         arch.move_frozen_to_device(self.accelerator.device)
         self._configure_input_fast_paths(arch)
+        self._configure_compute_options(arch)
         logger.info(
             "architecture wrapped (%s), device=%s",
             type(self.architecture).__name__,
@@ -638,6 +639,20 @@ class OpenWAMTrainer:
                 raise ValueError("training.vae_cudnn_benchmark / vae_channels_last need a Wan video backbone")
             vb.set_vae_encode_options(cudnn_benchmark=cudnn_benchmark, channels_last=channels_last)
             logger.info("VAE encode: cudnn_benchmark=%s channels_last=%s", cudnn_benchmark, channels_last)
+
+    def _configure_compute_options(self, arch) -> None:
+        """Opt-in DiT compute options: ``training.rope_impl`` (Wan RoPE precision/kernel).
+        Defaults keep the reference path."""
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return
+        t = cfg.training
+        rope_impl = str(t.get("rope_impl", "fp64") or "fp64")
+        if rope_impl != "fp64":
+            from openwam.model.video_backbone.wan.models import dit as wan_dit
+
+            wan_dit.set_rope_impl(rope_impl)
+            logger.info("Wan RoPE: %s", rope_impl)
 
     def _setup_step_timer(self, samples_per_step: int, output_path: str, is_main: bool) -> None:
         """``training.step_timing``: stage timers, incl. DeepSpeed's backward / step inside

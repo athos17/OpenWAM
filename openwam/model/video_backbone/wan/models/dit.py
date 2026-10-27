@@ -1,3 +1,4 @@
+import logging
 import math
 from typing import Optional, Tuple
 
@@ -116,7 +117,45 @@ def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0):
     return freqs_cis
 
 
+# "fp64": reference complex128 rotation. "fp32": the same rotation in float32 on real
+# cos/sin, one fused kernel (torch.compile) per direction; set by training.rope_impl.
+_ROPE_IMPL = "fp64"
+_rope_fp32_compiled = None
+
+
+def set_rope_impl(impl: str) -> None:
+    global _ROPE_IMPL
+    if impl not in ("fp64", "fp32"):
+        raise ValueError(f"rope impl must be 'fp64' or 'fp32', got {impl!r}")
+    _ROPE_IMPL = impl
+
+
+def _rope_fp32(x, cos, sin, num_heads: int):
+    b, s, _ = x.shape
+    xr = x.float().reshape(b, s, num_heads, -1, 2)
+    x1, x2 = xr[..., 0], xr[..., 1]
+    out = torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    return out.flatten(2).to(x.dtype)
+
+
+def _rope_apply_fp32(x, freqs, num_heads):
+    global _rope_fp32_compiled
+    cos = freqs.real.to(torch.float32)
+    sin = freqs.imag.to(torch.float32)
+    if _rope_fp32_compiled is None:
+        _rope_fp32_compiled = torch.compile(_rope_fp32, dynamic=False)
+    if _rope_fp32_compiled is not False:
+        try:
+            return _rope_fp32_compiled(x, cos, sin, num_heads)
+        except Exception as exc:  # pragma: no cover - compiler/toolchain specific
+            _rope_fp32_compiled = False
+            logging.getLogger(__name__).warning("fp32 RoPE torch.compile failed; running eager: %s", exc)
+    return _rope_fp32(x, cos, sin, num_heads)
+
+
 def rope_apply(x, freqs, num_heads):
+    if _ROPE_IMPL == "fp32":
+        return _rope_apply_fp32(x, freqs, num_heads)
     x = rearrange(x, "b s (n d) -> b s n d", n=num_heads)
     x_out = torch.view_as_complex(x.to(torch.float64).reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2))
     x_out = torch.view_as_real(x_out * freqs).flatten(2)

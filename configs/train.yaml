@@ -66,6 +66,8 @@ training:
   text_dedup: false               # UMT5: encode each distinct prompt in the batch once
   vae_cudnn_benchmark: false      # cuDNN autotune for the frozen VAE encode only (training stays as configured)
   vae_channels_last: false        # channels_last_3d VAE Conv3d weights + input (bf16-level rounding change)
+  rope_impl: fp64                 # Wan RoPE: fp64 = reference complex128; fp32 = float32 cos/sin, fused by
+                                  # torch.compile (bf16 output; rounding-level change)
 
   # --- Memory optimization ---
   use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
