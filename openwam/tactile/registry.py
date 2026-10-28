@@ -1,15 +1,17 @@
 """Frozen, sensor-independent tactile region vocabulary.
 
 IDs identify coarse physical regions, not taxels, sensor models or token offsets.
-New hardware uses a layout mapping and surface instances; never append names to
-this vocabulary. Unknown anatomy must explicitly use an ``other``/generic slot.
+Each sample uses at most one map per region. Native sensors sharing a region
+must be composed by the dataset adapter. Single-arm grippers use the right side.
 """
 
 import hashlib
 import json
 from dataclasses import asdict, dataclass
 
-REGISTRY_VERSION = "touchwam_regions_64_v1"
+REGISTRY_VERSION = "touchwam_regions_67_v2"
+PREVIOUS_REGISTRY_VERSION = "touchwam_regions_64_v1"
+PREVIOUS_REGISTRY_SHA256 = "15ec04d9d4bc5262f2aa9af960e58595ec3e4329d4f40f3b33e3c52d7c2464a4"
 FINGERS = ("thumb", "index", "middle", "ring", "pinky")
 FINGERTIP_NAMES = tuple(f"{side}.{finger}.tip" for side in ("right", "left") for finger in FINGERS)
 LEGACY_REGION_NAMES = (*FINGERTIP_NAMES, "right.palm", "left.palm")
@@ -48,15 +50,27 @@ def _build_registry():
         add(f"{side}.hand.other", "hand", side, "generic")
         add(f"{side}.wrist", "arm", side)
         add(f"{side}.forearm", "arm", side)
-    for name in ("gripper.jaw_a.surface", "gripper.jaw_b.surface", "gripper.base"):
-        add(name, "gripper", "none", "gripper")
+    # v2 explicitly assigns the old unsided gripper slots to the canonical
+    # right/single arm. This semantic change requires registry warm-start.
+    for part in ("jaw_a.surface", "jaw_b.surface", "base"):
+        add(f"right.gripper.{part}", "gripper", "right", "gripper")
     for name in ("generic.surface", "generic.tool", "generic.body"):
         add(name, "generic", "unspecified", "generic")
+    # Keep hand IDs and generic IDs unchanged.
+    for part in ("jaw_a.surface", "jaw_b.surface", "base"):
+        add(f"left.gripper.{part}", "gripper", "left", "gripper")
     return tuple(rows)
 
 
 REGIONS = _build_registry()
 REGION_NAMES = tuple(region.name for region in REGIONS)
+PREVIOUS_REGION_NAMES = (
+    *REGION_NAMES[:58],
+    "gripper.jaw_a.surface",
+    "gripper.jaw_b.surface",
+    "gripper.base",
+    *REGION_NAMES[61:64],
+)
 REGISTRY_SHA256 = hashlib.sha256(
     json.dumps([asdict(r) for r in REGIONS], sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
@@ -72,7 +86,9 @@ def region_spec(name):
 def validate_registry(names):
     """Legacy twelve-region models remain loadable with their original config."""
     if tuple(names) not in (REGION_NAMES, LEGACY_REGION_NAMES):
-        raise ValueError("region_names must be the frozen 64-region registry or the original 12-region registry")
+        raise ValueError(
+            "region_names must be the frozen 67-region registry or the original 12-region registry; migrate v1 explicitly"
+        )
 
 
 def registry_document():

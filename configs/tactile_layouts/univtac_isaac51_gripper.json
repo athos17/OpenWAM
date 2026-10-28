@@ -1,12 +1,12 @@
 {
-  "schema": "touchwam_surface_layout_v1",
-  "registry": "touchwam_regions_64_v1",
+  "schema": "touchwam_region_layout_v2",
+  "registry": "touchwam_regions_67_v2",
   "name": "univtac_isaac51_gripper",
   "surfaces": [
     {
       "native_key": "tactile/left_tactile/press_depth",
       "native_name": "left_tactile",
-      "region": "gripper.jaw_a.surface",
+      "region": "right.gripper.jaw_a.surface",
       "sensor": "univtac_isaac51",
       "representation": "univtac_indent_mm_v1",
       "units": "mm",
@@ -14,13 +14,12 @@
         240,
         320
       ],
-      "instance": "gripper_0",
-      "mapping_note": "A/B are stable dataset-native sides, not human left/right hands."
+      "mapping_note": "Single-arm convention: map this gripper to the canonical right arm. Native left_tactile/right_tactile are A/B faces of this ONE gripper."
     },
     {
       "native_key": "tactile/right_tactile/press_depth",
       "native_name": "right_tactile",
-      "region": "gripper.jaw_b.surface",
+      "region": "right.gripper.jaw_b.surface",
       "sensor": "univtac_isaac51",
       "representation": "univtac_indent_mm_v1",
       "units": "mm",
@@ -28,8 +27,7 @@
         240,
         320
       ],
-      "instance": "gripper_0",
-      "mapping_note": "A/B are stable dataset-native sides, not human left/right hands."
+      "mapping_note": "Single-arm convention: map this gripper to the canonical right arm. Native left_tactile/right_tactile are A/B faces of this ONE gripper."
     }
   ]
 }

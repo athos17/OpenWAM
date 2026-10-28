@@ -1,6 +1,6 @@
 {
-  "schema": "touchwam_surface_layout_v1",
-  "registry": "touchwam_regions_64_v1",
+  "schema": "touchwam_region_layout_v2",
+  "registry": "touchwam_regions_67_v2",
   "name": "sharpa_ten_fingertips",
   "surfaces": [
     {
@@ -12,8 +12,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "right"
+      ]
     },
     {
       "native_key": "right.index.tip",
@@ -24,8 +23,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "right"
+      ]
     },
     {
       "native_key": "right.middle.tip",
@@ -36,8 +34,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "right"
+      ]
     },
     {
       "native_key": "right.ring.tip",
@@ -48,8 +45,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "right"
+      ]
     },
     {
       "native_key": "right.pinky.tip",
@@ -60,8 +56,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "right"
+      ]
     },
     {
       "native_key": "left.thumb.tip",
@@ -72,8 +67,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "left"
+      ]
     },
     {
       "native_key": "left.index.tip",
@@ -84,8 +78,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "left"
+      ]
     },
     {
       "native_key": "left.middle.tip",
@@ -96,8 +89,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "left"
+      ]
     },
     {
       "native_key": "left.ring.tip",
@@ -108,8 +100,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "left"
+      ]
     },
     {
       "native_key": "left.pinky.tip",
@@ -120,8 +111,7 @@
       "native_shape": [
         240,
         240
-      ],
-      "instance": "left"
+      ]
     }
   ]
 }

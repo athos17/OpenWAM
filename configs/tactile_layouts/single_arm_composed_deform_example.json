@@ -1,0 +1,42 @@
+{
+  "schema": "touchwam_region_layout_v2",
+  "registry": "touchwam_regions_67_v2",
+  "name": "single_arm_composed_deform_example",
+  "surfaces": [
+    {
+      "native_key": "composed/jaw_a",
+      "region": "right.gripper.jaw_a.surface",
+      "sensor": "example_deform_sensor",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        480
+      ],
+      "tiles": [
+        {
+          "native_key": "jaw_a/pad_1",
+          "native_shape": [
+            240,
+            240
+          ],
+          "origin": [
+            0,
+            0
+          ]
+        },
+        {
+          "native_key": "jaw_a/pad_2",
+          "native_shape": [
+            240,
+            240
+          ],
+          "origin": [
+            0,
+            240
+          ]
+        }
+      ]
+    }
+  ]
+}

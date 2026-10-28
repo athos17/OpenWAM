@@ -1,6 +1,6 @@
 {
-  "schema": "touchwam_surface_layout_v1",
-  "registry": "touchwam_regions_64_v1",
+  "schema": "touchwam_region_layout_v2",
+  "registry": "touchwam_regions_67_v2",
   "name": "touchscale_full_hand",
   "surfaces": [
     {
@@ -14,7 +14,6 @@
         16,
         10
       ],
-      "instance": "right",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -28,7 +27,6 @@
         4,
         8
       ],
-      "instance": "right",
       "mapping_note": "Vendor thumb_middle is mapped to the proximal thumb segment between the distal pad and base; retain native geometry, not a nonexistent third thumb phalanx."
     },
     {
@@ -42,7 +40,6 @@
         13,
         8
       ],
-      "instance": "right",
       "mapping_note": "Composite thumb base/thenar coverage; belongs to the palm-disable group without duplicating its taxels."
     },
     {
@@ -56,7 +53,6 @@
         9,
         8
       ],
-      "instance": "right",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -70,7 +66,6 @@
         3,
         8
       ],
-      "instance": "right",
       "mapping_note": ""
     },
     {
@@ -84,7 +79,6 @@
         4,
         8
       ],
-      "instance": "right",
       "mapping_note": ""
     },
     {
@@ -98,7 +92,6 @@
         9,
         8
       ],
-      "instance": "right",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -112,7 +105,6 @@
         3,
         8
       ],
-      "instance": "right",
       "mapping_note": ""
     },
     {
@@ -126,7 +118,6 @@
         4,
         8
       ],
-      "instance": "right",
       "mapping_note": ""
     },
     {
@@ -140,7 +131,6 @@
         9,
         8
       ],
-      "instance": "right",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -154,7 +144,6 @@
         3,
         8
       ],
-      "instance": "right",
       "mapping_note": ""
     },
     {
@@ -168,7 +157,6 @@
         4,
         8
       ],
-      "instance": "right",
       "mapping_note": ""
     },
     {
@@ -182,7 +170,6 @@
         9,
         8
       ],
-      "instance": "right",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -196,7 +183,6 @@
         3,
         8
       ],
-      "instance": "right",
       "mapping_note": ""
     },
     {
@@ -210,7 +196,6 @@
         13,
         8
       ],
-      "instance": "right",
       "mapping_note": ""
     },
     {
@@ -224,7 +209,6 @@
         16,
         10
       ],
-      "instance": "left",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -238,7 +222,6 @@
         4,
         8
       ],
-      "instance": "left",
       "mapping_note": "Vendor thumb_middle is mapped to the proximal thumb segment between the distal pad and base; retain native geometry, not a nonexistent third thumb phalanx."
     },
     {
@@ -252,7 +235,6 @@
         13,
         8
       ],
-      "instance": "left",
       "mapping_note": "Composite thumb base/thenar coverage; belongs to the palm-disable group without duplicating its taxels."
     },
     {
@@ -266,7 +248,6 @@
         9,
         8
       ],
-      "instance": "left",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -280,7 +261,6 @@
         3,
         8
       ],
-      "instance": "left",
       "mapping_note": ""
     },
     {
@@ -294,7 +274,6 @@
         4,
         8
       ],
-      "instance": "left",
       "mapping_note": ""
     },
     {
@@ -308,7 +287,6 @@
         9,
         8
       ],
-      "instance": "left",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -322,7 +300,6 @@
         3,
         8
       ],
-      "instance": "left",
       "mapping_note": ""
     },
     {
@@ -336,7 +313,6 @@
         4,
         8
       ],
-      "instance": "left",
       "mapping_note": ""
     },
     {
@@ -350,7 +326,6 @@
         9,
         8
       ],
-      "instance": "left",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -364,7 +339,6 @@
         3,
         8
       ],
-      "instance": "left",
       "mapping_note": ""
     },
     {
@@ -378,7 +352,6 @@
         4,
         8
       ],
-      "instance": "left",
       "mapping_note": ""
     },
     {
@@ -392,7 +365,6 @@
         9,
         8
       ],
-      "instance": "left",
       "mapping_note": "Coarse distal-pad identity; preserve native coverage, not Sharpa pixel equivalence."
     },
     {
@@ -406,7 +378,6 @@
         3,
         8
       ],
-      "instance": "left",
       "mapping_note": ""
     },
     {
@@ -420,7 +391,6 @@
         13,
         8
       ],
-      "instance": "left",
       "mapping_note": ""
     }
   ]

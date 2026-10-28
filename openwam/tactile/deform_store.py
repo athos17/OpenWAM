@@ -55,15 +55,10 @@ class AlignedDeformStore:
             raise ValueError("Deform sidecar schema/codec/dataset identity/fps mismatch")
         self.fps = fps
         self.names = list(self.meta["region_names"])
-        self.surface_ids = np.asarray(self.meta.get("surface_ids", [0] * len(self.names)))
-        if (
-            not self.names or set(self.names) - set(REGION_NAMES)
-            or self.surface_ids.dtype.kind not in "iu" or self.surface_ids.shape != (len(self.names),)
-            or ((self.surface_ids < 0) | (self.surface_ids > 65535)).any()
-            or len(set(zip(self.names, self.surface_ids.tolist()))) != len(self.names)
-        ):
-            raise ValueError("Invalid sidecar region identities")
-        self.surface_ids = self.surface_ids.astype(np.int64)
+        if "surface_ids" in self.meta or "tactile_surface_ids" in self.meta:
+            raise ValueError("surface_id was removed; rebuild the sidecar with one map per region")
+        if not self.names or set(self.names) - set(REGION_NAMES) or len(set(self.names)) != len(self.names):
+            raise ValueError("Invalid or duplicate sidecar region identities; compose native sensors first")
         self.sensor_ids = np.asarray(self.meta["sensor_ids"], dtype=np.int64)
         if self.sensor_ids.shape != (len(self.names),) or (self.sensor_ids != 0).any():
             raise ValueError("This real Sharpa sidecar requires sensor_id=0 for each region")
@@ -135,7 +130,6 @@ class AlignedDeformStore:
             future_tactile_maps=fm,
             future_tactile_valid=fv,
             tactile_region_names=self.names,
-            tactile_surface_ids=torch.from_numpy(self.surface_ids.copy()),
             tactile_layout_present=torch.from_numpy(present.copy()),
             tactile_sensor_names=["sharpa_real"] * len(self.names),
             tactile_codec=CODEC,

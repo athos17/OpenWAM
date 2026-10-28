@@ -54,7 +54,6 @@ def generate_three_stream(
     tactile_query_mask=None,
     tactile_spatial_valid=None,
     tactile_sensor_ids=None,
-    tactile_surface_ids=None,
     tactile_palm_mode=None,
     vace_video=None,
     first_frame_image=None,
@@ -135,7 +134,6 @@ def generate_three_stream(
         tactile_maps, tactile_valid, region_ids=tactile_region_ids,
         layout_present=tactile_layout_present, query_mask=tactile_query_mask,
         spatial_valid=tactile_spatial_valid, sensor_ids=tactile_sensor_ids,
-        surface_ids=tactile_surface_ids,
         palm_mode=tactile_palm_mode,
     )
     shared["touch_condition"] = history

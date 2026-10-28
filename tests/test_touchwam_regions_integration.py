@@ -111,12 +111,14 @@ def test_engine_forwards_layout_queries_and_palm_disable(models):
         if key in ("tactile_maps", "tactile_valid", "tactile_region_ids", "tactile_layout_present")
     }
     observation.update(state=args["proprio"], tactile_palm_mode="off")
-    observation["tactile_surface_ids"] = torch.arange(12)[None]
     model.normalize_deploy_proprio = lambda x: x
     result = engine.generate(dict(prompt="pick", observation=observation))
     assert result["future_tactile_maps"].shape == (2, 10, 1, 8, 8)
     assert not any("palm" in name for name in result["tactile_region_names"])
-    assert result["tactile_surface_ids"].tolist() == list(range(10))
+    assert "tactile_surface_ids" not in result
+    observation["tactile_surface_ids"] = torch.zeros(1, 12, dtype=torch.long)
+    with pytest.raises(ValueError, match="removed"):
+        engine.generate(dict(prompt="pick", observation=observation))
 
 
 def test_sync_server_returns_maps_for_the_action_plan_without_resampling():

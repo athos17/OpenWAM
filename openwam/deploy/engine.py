@@ -339,8 +339,10 @@ class JointInferenceEngine(BaseInferenceEngine):
 
         tactile_kwargs = {}
         observation = conditions.get("observation") or {}
+        if "tactile_surface_ids" in conditions or "tactile_surface_ids" in observation:
+            raise ValueError("surface_id was removed; compose native sensors into unique regions")
         for key in ("tactile_maps", "tactile_valid", "tactile_region_ids", "tactile_layout_present",
-                    "tactile_query_mask", "tactile_spatial_valid", "tactile_sensor_ids", "tactile_surface_ids",
+                    "tactile_query_mask", "tactile_spatial_valid", "tactile_sensor_ids",
                     "tactile_palm_mode"):
             value = conditions.get(key, observation.get(key))
             if value is not None:

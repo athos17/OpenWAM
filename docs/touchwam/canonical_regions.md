@@ -1,25 +1,36 @@
-# 固定公共触觉区域：touchwam_regions_64_v1
+# 公共触觉区域：touchwam_regions_67_v2
 
-训练代码位于 dev-cpu 的 `/mnt/pfs/v89atp/workspace/OpenWAM-touchwam`。
-本次把公共区域定义固定为 **64 类**。新数据通过 layout 映射到这些身份，
-同一身份内的多个原生 pad 使用独立表面实例，不再为每个数据集追加公共区域。
-权威定义：`openwam/tactile/registry.py`；完整 ID、名称及分组：
-[`region_registry_v1.json`](region_registry_v1.json)。
+2026-10-28 更新。训练代码位于 dev-cpu 的 `/mnt/pfs/v89atp/workspace/OpenWAM-touchwam`。
+**一个公共区域对应一份触觉图；不再使用 surface_id 或实例编码。**
+同一区域的多个原生传感器由数据适配层按固定布局合成，再统一输入和预测。
+权威定义：`openwam/tactile/registry.py`；当前完整表：[region_registry_v2.json](region_registry_v2.json)。
+旧版 [region_registry_v1.json](region_registry_v1.json) 仅用于旧 checkpoint 审计，不是当前布局。
 
-## 固定的 64 类
+## 当前 67 类
 
 | ID | 类别 | 含义 |
 |---|---|---|
-| 0–4 | 右手五指 `.tip` | thumb / index / middle / ring / pinky |
-| 5–9 | 左手五指 `.tip` | 同上，保持旧 ID |
-| 10、11 | `right.palm`、`left.palm` | 原有整掌／未细分掌面 |
-| 12–34 | 右手及腕前臂细分 | 见下面的单侧表 |
-| 35–57 | 左手及腕前臂细分 | 与右侧逐项对应，ID 加 23 |
-| 58、59 | `gripper.jaw_a.surface`、`gripper.jaw_b.surface` | 同一夹爪的两个独立接触面 |
-| 60 | `gripper.base` | 夹爪基座接触面 |
-| 61 | `generic.surface` | 无可靠解剖映射的接触面，包括其他夹爪拓扑 |
-| 62 | `generic.tool` | 工具接触表面 |
-| 63 | `generic.body` | 其他身体／机器人机体接触表面 |
+| 0–4 / 5–9 | 右 / 左五指 `.tip` | 保留原 ID |
+| 10 / 11 | 右 / 左整掌 | 未细分掌面 |
+| 12–34 / 35–57 | 右 / 左手、腕、前臂 | 保留原 ID |
+| 58 / 59 / 60 | `right.gripper.jaw_a.surface` / `right.gripper.jaw_b.surface` / `right.gripper.base` | 右臂或单臂夹爪 |
+| 61 / 62 / 63 | `generic.surface` / `generic.tool` / `generic.body` | 保留原通用 ID |
+| 64 / 65 / 66 | `left.gripper.jaw_a.surface` / `left.gripper.jaw_b.surface` / `left.gripper.base` | 左臂夹爪 |
+
+67 = 原手部及腕前臂 58 + 左右夹爪各 3 + 通用区域 3。
+夹爪四个接触面分别为右 A=58、右 B=59、左 A=64、左 B=65；基座也按左右定义。
+只为实际使用的区域生成 token，不为未使用 ID 创建空图。
+
+## 单臂与双臂的映射规则
+
+- 双臂：按真实连接的机械臂映射左右，各自 A/B 面使用稳定的原生面定义。
+- 单臂：统一使用公共右臂夹爪 A/B（及基座）；这是跨数据集的规范映射。
+- UniVTAC 的 `left_tactile` 是同一个夹爪的 A 面 → 58；`right_tactile` 是 B 面 → 59。
+  它们不代表两条机械臂，不需要新增无侧别身份。
+- 单臂映射右侧只规范区域身份，不自动镜像图像、改写力方向或重排动作。
+  数据 reader 仍需说明坐标轴、A/B 方向和动作映射；动作侧别应与此约定一致。
+- 同一样本的有效区域 ID 必须唯一；重复区域会在 layout、collator、forward、历史和 sidecar 处报错。
+- `surface_id` / `tactile_surface_ids` 已从运行接口移除。旧字段不被静默忽略；旧数据需显式转换。
 
 | 右侧 ID | 后缀 | 分组／边界 |
 |---|---|---|
@@ -40,102 +51,89 @@
 监督目标。一个真实传感器跨越多个区域时，优先选择可信的复合／整体／generic
 身份并保留覆盖说明；没有原始几何依据时不切割、不重复计数。
 
-64 类覆盖约定的粗粒度身份，不是穷举所有未来硬件。generic 入口使新拓扑无需
+公共区域覆盖约定的粗粒度身份，不是穷举所有未来硬件。generic 入口使新拓扑无需
 改表，但只提供通用身份；精细几何和新的物理表示仍需要实际适配和训练。
 这张表不是每帧三维手模型，也不承担力、灰度、压入深度之间的物理标定。
 
-## 公共区域与表面实例
+## 同一区域的多个传感器合成
 
-模型输入的区域轴现在表示实际参与计算的 **表面**。每个表面由以下键确定：
+布局 schema 为 `touchwam_region_layout_v2`。每个 `surfaces` 条目是一份最终区域图，
+身份只有 `region`；该字段的名称沿用 surface（物理表面），不表示实例编号。
+一个区域可声明多个 `tiles`，记录原生 key、行列数、在合成图中的行列起点和旋转。
+`native_shape` 是最终区域图的固定原生尺寸。无 tiles 时直接读取 native_key 对应的单图。
 
-```text
-(region_id, surface_id)
+```json
+{
+  "schema": "touchwam_region_layout_v2",
+  "registry": "touchwam_regions_67_v2",
+  "name": "single_arm_composed_example",
+  "surfaces": [{
+    "native_key": "composed/jaw_a",
+    "region": "right.gripper.jaw_a.surface",
+    "sensor": "example_deform_sensor",
+    "representation": "sharpa_deform_gray_v1",
+    "units": "uint8_intensity",
+    "native_shape": [240, 480],
+    "tiles": [
+      {"native_key": "jaw_a/pad_1", "native_shape": [240, 240], "origin": [0, 0]},
+      {"native_key": "jaw_a/pad_2", "native_shape": [240, 240], "origin": [0, 240]}
+    ]
+  }]
+}
 ```
 
-- `region_id`：固定 0–63 的公共身份。
-- `surface_id`：该区域内稳定的整数实例号，范围 0–65535，默认 0。
-- 同一个样本中该二元组必须唯一；多个设备／pad 共用区域时分配不同实例号。
-- 实例号从 layout 读取；跨 episode、帧、区域筛选和顺序变化保持不变，不能按
-  当前可见 pad 重新编号。它是身份，不是强度、接触状态或时间步。
-- `instance`、`native_key` 在 layout 中保留设备名称和原生字段；native_key 唯一。
-  整数 surface_id 由 layout 作者明确分配，不会对字符串做不稳定的 hash。
-- 表面实例使用固定正余弦编码加入历史和未来 token，无新增可训练实例 embedding
-  表。实例 0 的编码严格为零，维持旧模型行为。不同布局编号没有解剖等价含义。
-
-双夹爪示例：
-
-| 物理表面 | region_id | surface_id | instance |
-|---|---|---|---|
-| 左臂夹爪 A 面 | 58 | 0 | left_gripper |
-| 左臂夹爪 B 面 | 59 | 0 | left_gripper |
-| 右臂夹爪 A 面 | 58 | 1 | right_gripper |
-| 右臂夹爪 B 面 | 59 | 1 | right_gripper |
-
-十个指尖仍然每帧只产生 40 个空间 token；固定 64 个区域不会自动分配 64 份图。
-batch 只补齐到最大实际表面数，补齐部分仍占计算，尚未实现完整 packing。
-同一表面内部仍保留多个空间 patch。新增 52 行区域 embedding 在 width=256 时
-增加 13,312 个参数（BF16 约 26 KiB），不增加额外触觉 Transformer。
-
-## 数据接入配置
-
-提供三份布局定义，均可用 `SurfaceLayout.load(path)` 校验：
-
-- `configs/tactile_layouts/sharpa_ten_fingertips.json`：10 个 240×240 灰度图。
-- `configs/tactile_layouts/touchscale_full_hand.json`：30 个原生 pad、1760 taxels。
-- `configs/tactile_layouts/univtac_isaac51_gripper.json`：两个 240×320 压入深度图。
-
-TouchScale 保留所有实际存在的指节和掌面 pad，不补不存在的小指近端 pad。
-原生 `thumb_middle` 映射到拇指近端粗粒度区域，名称保留为 native_name；这不是
-断言其几何边界与其他设备吻合。pad 2 保留 `thumb.base_thenar` 复合语义，pad 18
-映射 `palm.hypothenar`。`select('fingertips')` 返回 10 个 pad，
-`select('without_palm')` 返回 26 个 pad；二者不是同一筛选。
+此示例是合成布局，不是已采集的数据源；使用自定义来源前需注册模型 sensor_names。
+A 与 B 面仍是两个区域；合成发生在同一面的多个传感器之间。
 
 ```python
 from openwam.tactile.layout import SurfaceLayout
-layout = SurfaceLayout.load('configs/tactile_layouts/touchscale_full_hand.json')
-identity = layout.identity_fields()  # region_names / surface_ids / sensor_names
+layout = SurfaceLayout.load('configs/tactile_layouts/single_arm_composed_deform_example.json')
+frame = layout.compose(packets_by_native_key, observed=observed_by_key, dtype='uint8')
+# frame['maps'][region]、frame['valid'][region]、frame['spatial_valid'][region]
+# reader 再按 codec 统一尺寸和归一化，将 ROI 传给 tactile_spatial_valid。
 ```
 
-`identity_fields()` 仅返回身份信息，不读取原始数据、不生成 mask、不转换数值。
-`representation` 和 `units` 明确记录物理含义。TouchScale 的 N 单位仍沿用数据的
-厂商标定假设，不据此重复标定或删除负值。UniVTAC 的 mm 压入深度也不是压力。
-`geometry_ref` 可指向 reader 管理的原生局部坐标／轴／ROI 资料；此接口仅保存引用，
-当前 deform 网络仍使用自身 patch 局部网格，不会自动读取这些坐标或做三维配准。
+已实现 `composition.py` 中的固定二维拼接、90° 整数旋转、空白 ROI、输入校验。
+不重叠放置，不对两个测量直接求和、平均、逐帧 min-max；数值、负值和有效零值都保留。
+同一原生 key 不能重复用于不同区域的监督。多个 tile 先由 reader 对齐时间与物理单位。
 
-现有 deform sidecar manifest 可增加 `surface_ids` 数组；省略时全部为 0。
-在线 `DeformHistory` 可指定 `surface_ids` 和唯一 `surface_keys`，后者用于接收
-原生图像字典。输出携带整数实例号，部署返回同样的 `tactile_surface_ids`，
-显示端据 layout 找回设备和原生 pad 名称。
+目前采用保守有效性：任一组成传感器缺包、过期或非有限值，该区域整帧 observed=false；
+图置零仅用于存储，不能作为真实零标签。固定 ROI 在丢包时不变化，区域布局也不消失。
+reader 缩放合成图时要同步 ROI，避免有效空白混淆；当前通用合成函数不负责源 codec、
+实际几何标定、异步时钟、力值/深度归一化或跨帧插值。未知几何需明确固定布局，不能宣称物理配准。
 
-新数据的接入步骤：
+## 现有数据布局与模型
 
-1. 选择可信的公共区域，确定每个原生表面的稳定实例号；无法映射时显式使用
-   hand.other 或 generic，并填写 mapping_note，未知拼写不会自动落入兜底槽位。
-2. 记录原生字段、形状、设备、物理量、单位、覆盖说明及可用几何资料。
-3. reader 负责数值 codec、时间对齐、观测有效性、空间 ROI 和未来标签。
-4. 把身份字段与实际观测一起送入模型；缺失传感器、丢包和真实零值仍分别处理。
+- Sharpa：十个指尖，10 个区域，240×240 原图；当前 deform codec 32×32、patch16。
+- TouchScale：30 个区域、1760 taxels；fingertips 为 10，without_palm 为 26。
+- UniVTAC：单臂右夹爪 A/B 两个区域，240×320 毫米压入深度。
+- 双臂夹爪：4 个接触区域；已提供 `dual_gripper_deform_example.json` 结构示例。
 
-**实现边界：** 公共定义、三个布局配置、重复表面身份在 deform 前向／loss／生成／
-部署中的传递已实现。TouchScale 法向力 reader/codec、UniVTAC 深度 reader/codec、
-异步时间对齐、无动作／完全无触觉数据路由尚未实现。布局文件不宣称这些数据已可
-直接训练。模型仍拒绝将其他物理量伪装成 deform。
+当前 Sharpa 十指仍为每帧 40 token、历史160、未来320。同一个区域合成多个传感器后，
+其 token 数由最终图尺寸和 patch 大小决定；不会因原生传感器个数增加实例 token。
+高分辨率合成图缩小到32×32会损失细节，需要实际训练比较，不声称无损。
 
-## 掌面开关
+token = 内容投影 + 区域 embedding + 来源 embedding + 局部 x/y/物理时间投影 + ROI 投影。
+不再有实例编码。batch 仅补齐到最大实际区域数，padding仍占张量空间。
+当前默认触觉模块参数为30,534,924；67类比64类多768个参数（BF16约1.5KiB）。
 
-掌面组由注册表的 `groups` 显式定义，不再依赖字符串是否包含 `.palm`。
-`thumb.base_thenar` 属于掌面组；`palm_mode=off` 与 palm dropout 同时移除它的
-历史、未来请求及 loss。夹爪接触面不属于掌面组。
+掌面组仍由 registry groups 决定，包括 thumb.base_thenar；palm_mode=off 移除掌面条件、
+query和loss。夹爪不属于掌面组。
 
-## 版本及旧权重
+**能力边界：**公共定义、单区域身份、布局合成工具、deform前向/loss/生成/部署已实现。
+TouchScale力值与UniVTAC深度的完整reader/codec、缺动作ego训练及完整无触觉路由仍待实现。
+geometry_ref仅保存资料引用，不自动建立三维手或进行跨域标定。尚未训练本版模型。
 
-- 固定名字、ID、分组与版本 `touchwam_regions_64_v1`；JSON 和测试锁定内容哈希。
-- 原有 12 区域配置仍可加载原 regional checkpoint，未强制改其权重。
-- 新配置默认 64 类。旧 12 类权重不能直接当作 64 类严格加载或精确 resume。
-- 显式迁移仅扩区域 embedding：原 12 行及其余权重完全复用，52 行新增权重由
-  `project.seed` 确定。不会重置已训练的桥接 gates，不恢复旧优化器状态。
-- 迁移要求其余 tactile_spec、权重键和形状一致；改变 codec、顺序、帧率等会拒绝。
+## 版本与权重迁移
 
-从原 12 区域 checkpoint 开启新微调 run：
+旧12类配置仍可加载原regional checkpoint。旧64类不作为当前配置接受；
+显式warm-start可从12/64类迁移到67类，其余tactile_spec必须完全一致，旧64类需验证版本与哈希。
+
+- 12→67：复用原12行及其余参数，初始化55行。
+- 64→67：复用原64行及其余参数，新增左夹爪64–66行；原无侧别58–60行明确映射到右夹爪。
+- 保留已训练gates，不恢复旧优化器。新参数由project.seed保证各rank一致。
+- 使用过非零surface_id的旧模型不保证预测一致：实例编码已经移除，数据需重新合成并开启新微调run。
+- 固定旧分支/提交659cbed与快照标签，保留旧注册表JSON，不静默覆盖旧checkpoint语义。
 
 ```text
 training.initialize_touch_from_openwam=false
@@ -145,7 +143,4 @@ training.finetune_ckpt_path=/path/to/old_regional/checkpoint.safetensors
 training.resume_ckpt_path=null
 ```
 
-其余模型设置需与原 checkpoint 一致；新 `touchwam_regions` 配置提供完整 64 类。
-普通 64 类微调／resume 应把 initialize_touch_registry 设为 false。
-不允许在本版本随意重排或改写 region_names；新传感器来源和新 codec 的引入仍需
-独立版本与 checkpoint 管理，冻结公共区域不等于所有模型接口永远无需调整。
+原distance/contact模型迁移仍使用initialize_touch_from_legacy，与本迁移互斥。

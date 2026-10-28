@@ -8,8 +8,8 @@
 ## 实现范围
 
 - 支持每条样本不同数量、不同顺序的已注册区域；batch 内 padding。
-- 默认使用固定 64 类公共区域；保留原十指／双掌 ID。实际输入、输出只包含选中的表面。
-- 完整公共定义、TouchScale／夹爪映射和 12→64 迁移见 [canonical_regions.md](canonical_regions.md)。
+- 默认使用固定 67 类公共区域；保留原十指／双掌 ID。实际输入、输出只包含选中的表面。
+- 完整公共定义、TouchScale／夹爪映射和 12/64→67 迁移见 [canonical_regions.md](canonical_regions.md)。
 - 布局、历史观测、未来预测请求、未来标签、空间 ROI 分别设 mask。
 - `palm_mode=auto` 按布局启用掌面，`off` 屏蔽全部掌面历史及未来预测。
 - 带掌面样本和不带掌面样本可以混合训练；不会给缺失掌面补黑图监督。
@@ -32,8 +32,7 @@ deform 是传感器输出的形变灰度强度，不是校准压力、法向位�
 | `tactile_valid` | `[H,N]` bool，该时间的该区域是否实际观测到 |
 | `future_tactile_maps` | `[F,N,1,S,S]`，训练标签，不进入干净历史条件 |
 | `future_tactile_valid` | `[F,N]` bool，未来标签是否真实有效 |
-| `tactile_region_names` | N 个名称，存在于固定注册表；可对应同一区域的不同表面 |
-| `tactile_surface_ids` | 可选 `[N]` int64，默认 0；与区域 ID 组成唯一表面身份 |
+| `tactile_region_names` | N 个唯一名称，存在于固定注册表；每个区域只对应一份图 |
 | `tactile_layout_present` | `[N]` bool，采集设备实际包含哪些区域 |
 | `tactile_query_mask` | 可选 `[F,N]` bool；默认预测布局中所有启用区域 |
 | `tactile_spatial_valid` | 可选 `[N,1,S,S]` bool，传感器图中的有效像素；默认全图 |
@@ -48,7 +47,7 @@ padding 的全部 mask 为 false。在线模型接口使用 ID，客户端应从
 
 默认区域表的前 12 项保持原顺序：右手五指 `.tip`、左手五指 `.tip`、左右掌。
 其余 ID 固定覆盖指节、掌面细分、夹爪和通用接触面，详见公共定义。
-后续传感器通过 layout 映射和 surface_id 接入，不向公共表追加名字。
+后续传感器通过 layout 映射，同一区域的多个传感器先合成一份图；不使用 surface_id。单臂夹爪映射右侧 A/B，双臂明确区分左右。
 
 | 情况 | layout | observed | query／loss |
 | --- | --- | --- | --- |
@@ -216,7 +215,7 @@ python scripts/deploy.py --ckpt-dir /path/to/regional/run \
 同步 policy 请求设置 `include_tactile: true`，返回额外 `tactile` 字段：
 
 - `future_tactile_maps [F,N_requested,1,S,S]`，float `[0,1]`。
-- `tactile_region_names`／`tactile_region_ids`／`tactile_surface_ids`，按区域和实例分别显示。
+- `tactile_region_names`／`tactile_region_ids`，按唯一公共区域分别显示。
 - `future_tactile_valid` 表示本次请求生成的区域和时间，不是实测接触状态。
 - `tactile_history_available` 和 `tactile_spatial_valid`，用于说明条件缺失及 ROI。
 - `future_tactile_offsets`、`future_tactile_times_s` 和 `tactile_fps`。

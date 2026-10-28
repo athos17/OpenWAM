@@ -67,12 +67,15 @@ architecture:
       - left.hand.other
       - left.wrist
       - left.forearm
-      - gripper.jaw_a.surface
-      - gripper.jaw_b.surface
-      - gripper.base
+      - right.gripper.jaw_a.surface
+      - right.gripper.jaw_b.surface
+      - right.gripper.base
       - generic.surface
       - generic.tool
       - generic.body
+      - left.gripper.jaw_a.surface
+      - left.gripper.jaw_b.surface
+      - left.gripper.base
     sensor_names: [sharpa_real, bench2dex_sim]
     history: 4
     map_size: 32

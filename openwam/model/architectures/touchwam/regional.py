@@ -9,6 +9,9 @@ from openwam.model.architectures.registry import register_architecture
 from openwam.tactile.regions import CODEC, REGION_NAMES, SCHEMA, collate_regions
 from openwam.tactile.registry import (
     LEGACY_REGION_NAMES,
+    PREVIOUS_REGION_NAMES,
+    PREVIOUS_REGISTRY_SHA256,
+    PREVIOUS_REGISTRY_VERSION,
     REGISTRY_SHA256,
     REGISTRY_VERSION,
     region_spec,
@@ -129,8 +132,8 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             region_names=s["region_names"],
             region_registry=REGISTRY_VERSION if tuple(s["region_names"]) == REGION_NAMES else "legacy_12",
             region_registry_sha256=REGISTRY_SHA256 if tuple(s["region_names"]) == REGION_NAMES else None,
-            surface_identity="(region_id, surface_id); surface_id defaults to 0, fixed sinusoidal encoding",
-            surface_id_range=[0, 65535],
+            region_identity="unique region_id; compose native sensors before model input",
+            single_arm_gripper_side="right",
             sensor_names=s["sensor_names"],
             representation="deform_gray",
             channels=["deform_intensity"],
@@ -140,7 +143,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             fps=s["fps"],
             future_frames=s["future_frames"],
             future_stride=s["future_stride"],
-            layout="tactile_region_ids + tactile_surface_ids + tactile_layout_present",
+            layout="tactile_region_ids + tactile_layout_present",
             observation_mask="tactile_valid",
             query_mask="tactile_query_mask",
             spatial_mask="tactile_spatial_valid",
@@ -159,7 +162,6 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         layout_present=None,
         spatial_valid=None,
         sensor_ids=None,
-        surface_ids=None,
         palm_mode=None,
         augment=False,
     ):
@@ -186,13 +188,10 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             raise ValueError("Invalid region layout")
         if (present & (ids < 0)).any():
             raise ValueError("Padding IDs cannot be present")
-        surfaces = torch.zeros_like(ids) if surface_ids is None else tensor(surface_ids, 2, torch.long, "surface IDs")
-        if surfaces.shape != ids.shape or ((surfaces < 0) | (surfaces > 65535)).any():
-            raise ValueError("Invalid surface IDs: expected [B,N] integers in [0,65535]")
-        for row, instances in zip(ids, surfaces):
-            pairs = torch.stack((row, instances), dim=-1)[row >= 0]
-            if pairs.unique(dim=0).shape[0] != pairs.shape[0]:
-                raise ValueError("Duplicate region/surface identities in one sample")
+        for row in ids:
+            regions = row[row >= 0]
+            if regions.unique().numel() != regions.numel():
+                raise ValueError("Duplicate region in one sample; compose native sensors first")
         palm_ids = [i for i, name in enumerate(s["region_names"]) if "palm" in region_spec(name).groups]
         palms = torch.zeros_like(present)
         for i in palm_ids:
@@ -247,8 +246,8 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         if augment and s["history_dropout"]:
             # Drop entire region histories, so completely stale sensors occur in training.
             valid &= ~(torch.rand(batch_size, 1, n, device=device) < s["history_dropout"])
-        history, mask, available = self.touch_v2.encode_history(maps, valid, ids, sensors, spatial, surfaces)
-        return history, mask, ids, active, spatial, sensors, available, surfaces
+        history, mask, available = self.touch_v2.encode_history(maps, valid, ids, sensors, spatial)
+        return history, mask, ids, active, spatial, sensors, available
 
     def _query(self, condition, requested=None):
         active, spatial = condition[3], condition[4]
@@ -275,12 +274,13 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         tactile_layout_present=None,
         tactile_spatial_valid=None,
         tactile_sensor_ids=None,
-        tactile_surface_ids=None,
         tactile_palm_mode=None,
         tactile_query_mask=None,
         touch_condition=None,
         **kwargs,
     ):
+        if "tactile_surface_ids" in kwargs:
+            raise ValueError("surface_id was removed; use unique regional maps")
         if "future_tactile_maps" in kwargs or "future_tactile_valid" in kwargs:
             raise ValueError("Clean future tactile targets must not enter forward; use compute_loss")
         if touch_condition is None:
@@ -292,7 +292,6 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                 layout_present=tactile_layout_present,
                 spatial_valid=tactile_spatial_valid,
                 sensor_ids=tactile_sensor_ids,
-                surface_ids=tactile_surface_ids,
                 palm_mode=tactile_palm_mode,
             )
         elif any(
@@ -304,7 +303,6 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                 tactile_layout_present,
                 tactile_spatial_valid,
                 tactile_sensor_ids,
-                tactile_surface_ids,
                 tactile_palm_mode,
             )
         ):
@@ -325,7 +323,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         tactile_valid,
         touch_condition,
     ):
-        history, history_valid, ids, _, spatial, sensors, _, surfaces = touch_condition
+        history, history_valid, ids, _, spatial, sensors, _ = touch_condition
         _, possible = self._query(touch_condition)
         shape = possible.shape
         if noisy_tactile is None:
@@ -345,7 +343,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         noisy_tactile = torch.where(possible, noisy_tactile, 0)
         if not torch.isfinite(noisy_tactile).all():
             raise ValueError("Nonfinite noise in requested tactile regions")
-        future, time = self.touch_v2.prepare_future(noisy_tactile, tactile_timestep, ids, sensors, spatial, surfaces)
+        future, time = self.touch_v2.prepare_future(noisy_tactile, tactile_timestep, ids, sensors, spatial)
         future = future.masked_fill(~tactile_future_valid[..., None], 0)
         return history, history_valid, future, time, tactile_future_valid
 
@@ -372,6 +370,8 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         return result
 
     def compute_loss(self, *, actions=None, lambda_video=1.0, lambda_action=1.0, **inputs):
+        if "tactile_surface_ids" in inputs:
+            raise ValueError("surface_id was removed; use unique regional maps")
         if actions is None or torch.as_tensor(inputs.pop("video_only_mask", False)).any():
             raise ValueError("Regional TouchWAM currently requires video-action targets")
         future_maps = torch.as_tensor(inputs.pop("future_tactile_maps"), device=self.device)
@@ -385,7 +385,6 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             layout_present=inputs.pop("tactile_layout_present", None),
             spatial_valid=inputs.pop("tactile_spatial_valid", None),
             sensor_ids=inputs.pop("tactile_sensor_ids", None),
-            surface_ids=inputs.pop("tactile_surface_ids", None),
             palm_mode=inputs.pop("tactile_palm_mode", None),
             augment=self.training,
         )
@@ -481,10 +480,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         for b, row in enumerate(ids.tolist()):
             for slot, region in enumerate(row):
                 if region >= 0:
-                    instance = int(condition[7][b, slot])
-                    generator = torch.Generator(device=self.device).manual_seed(
-                        (seed + 1 + region * 1000003 + instance * 1000000007) % (2**63)
-                    )
+                    generator = torch.Generator(device=self.device).manual_seed((seed + 1 + region * 1000003) % (2**63))
                     noise[b, :, slot] = torch.randn(
                         shape[1], shape[3], shape[4], device=self.device, dtype=self.dtype, generator=generator
                     )
@@ -501,7 +497,6 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             future_tactile_valid=future_valid[0, :, keep].cpu().numpy(),
             tactile_region_names=[self.tactile_spec["region_names"][i] for i in selected_ids],
             tactile_region_ids=ids[0, keep].cpu().numpy(),
-            tactile_surface_ids=condition[7][0, keep].cpu().numpy(),
             tactile_history_available=condition[6][0, keep].cpu().numpy(),
             tactile_spatial_valid=spatial[0, keep].cpu().numpy(),
             tactile_representation="deform_gray",
@@ -514,7 +509,11 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         )
 
     def load_regional_registry_checkpoint(self, path):
-        """Warm-start 12 -> 64 regions, preserving all old predictions/weights."""
+        """Explicit 12/64 -> 67 warm-start; old unsided gripper rows become right.
+
+        v1 nonzero instance codes are removed, so this is not exact resume for
+        models trained with repeated regions. Recompose data and start a new run.
+        """
         from safetensors import safe_open
         from safetensors.torch import load_file
 
@@ -523,31 +522,46 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         if meta.get("model_version") != self.model_version or meta.get("tactile_schema") != SCHEMA:
             raise RuntimeError("Expected a regional deform checkpoint")
         old_spec = json.loads(meta.get("tactile_spec", "{}"))
-        expected_spec = dict(self.tactile_spec, region_names=list(LEGACY_REGION_NAMES))
+        names = tuple(old_spec.get("region_names", ()))
+        if names not in (LEGACY_REGION_NAMES, PREVIOUS_REGION_NAMES):
+            raise RuntimeError("Registry migration requires a known 12/64-region source")
+        if names == PREVIOUS_REGION_NAMES and (
+            meta.get("tactile_region_registry") != PREVIOUS_REGISTRY_VERSION
+            or meta.get("tactile_region_registry_sha256") != PREVIOUS_REGISTRY_SHA256
+        ):
+            raise RuntimeError("Source registry metadata/hash mismatch")
+        expected_spec = dict(self.tactile_spec, region_names=list(names))
         if (
             tuple(self.tactile_spec["region_names"]) != REGION_NAMES
             or old_spec != expected_spec
             or meta.get("tactile_codec") != self.tactile_spec["codec"]
         ):
-            raise RuntimeError("Registry migration requires identical settings except the 12 -> 64 region_names")
+            raise RuntimeError("Registry migration requires identical settings except 12/64 -> 67 region_names")
         old, current = load_file(path), self.state_dict()
         key = "touch_v2.region_embedding.weight"
         if old.keys() != current.keys() or any(old[k].shape != current[k].shape for k in current if k != key):
             raise RuntimeError("Registry migration tensor keys/shapes differ")
-        if old[key].shape != (12, self.tactile_spec["width"]) or current[key].is_meta:
+        if old[key].shape != (len(names), self.tactile_spec["width"]) or current[key].is_meta:
             raise RuntimeError("Registry migration requires materialized new region embeddings")
         expanded = current[key].detach().clone().to(old[key])
-        expanded[:12] = old[key]
+        expanded[: len(names)] = old[key]
         old[key] = expanded
         self.load_state_dict(old, strict=True, assign=any(p.is_meta for p in self.parameters()))
         if any(t.is_meta for t in (*self.parameters(), *self.buffers())):
             raise RuntimeError("Registry migration left meta tensors")
         self._apply_training_policy()
         return dict(
-            source=path, registry=REGISTRY_VERSION, registry_sha256=REGISTRY_SHA256,
+            source=path,
+            registry=REGISTRY_VERSION,
+            registry_sha256=REGISTRY_SHA256,
             reused=sorted(k for k in current if k != key),
-            copied_region_rows=list(range(12)), initialized_region_rows=list(range(12, 64)),
-            reset_gates=False, optimizer_resumed=False,
+            copied_region_rows=list(range(len(names))),
+            initialized_region_rows=list(range(len(names), len(REGION_NAMES))),
+            source_registry=meta.get("tactile_region_registry", "legacy_12"),
+            gripper_policy="single arm maps to right; v1 rows 58:61 become right gripper" if len(names) == 64 else None,
+            requires_region_composition=True,
+            reset_gates=False,
+            optimizer_resumed=False,
         )
 
     def load_legacy_touch_checkpoint(self, path):

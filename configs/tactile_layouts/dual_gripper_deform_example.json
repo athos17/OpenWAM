@@ -1,0 +1,51 @@
+{
+  "schema": "touchwam_region_layout_v2",
+  "registry": "touchwam_regions_67_v2",
+  "name": "dual_gripper_deform_example",
+  "surfaces": [
+    {
+      "native_key": "right/jaw_a",
+      "region": "right.gripper.jaw_a.surface",
+      "sensor": "example_deform_sensor",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ]
+    },
+    {
+      "native_key": "right/jaw_b",
+      "region": "right.gripper.jaw_b.surface",
+      "sensor": "example_deform_sensor",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ]
+    },
+    {
+      "native_key": "left/jaw_a",
+      "region": "left.gripper.jaw_a.surface",
+      "sensor": "example_deform_sensor",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ]
+    },
+    {
+      "native_key": "left/jaw_b",
+      "region": "left.gripper.jaw_b.surface",
+      "sensor": "example_deform_sensor",
+      "representation": "sharpa_deform_gray_v1",
+      "units": "uint8_intensity",
+      "native_shape": [
+        240,
+        240
+      ]
+    }
+  ]
+}
