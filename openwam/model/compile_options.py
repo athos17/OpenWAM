@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -226,12 +227,32 @@ def raise_recompile_limit(limit: int) -> None:
             setattr(dynamo_config, name, limit)
 
 
-def compile_outside_dispatch_modes(fn, **compile_kwargs):
-    """``torch.compile(fn)`` that runs ``fn`` eagerly while a TorchDispatchMode is active.
+_eager_regions = 0
 
-    The trainer counts FLOPs on its first step under ``FlopCounterMode``; a compiled
-    function first called under such a mode is never compiled afterwards (Dynamo keeps
-    running it eagerly), so those calls take the eager function instead. Same FLOPs.
+
+@contextlib.contextmanager
+def eager_compiled_regions():
+    """Run every :func:`compile_outside_dispatch_modes` function eagerly inside the block.
+
+    The trainer wraps its FLOP-counted first step (forward *and* backward) in this: the
+    forward runs under ``FlopCounterMode`` and must stay eager, and activation-checkpoint
+    recompute in the backward has to take the same path or it saves different tensors.
+    """
+    global _eager_regions
+    _eager_regions += 1
+    try:
+        yield
+    finally:
+        _eager_regions -= 1
+
+
+def compile_outside_dispatch_modes(fn, **compile_kwargs):
+    """``torch.compile(fn)`` that runs ``fn`` eagerly inside :func:`eager_compiled_regions`
+    or while a TorchDispatchMode is active.
+
+    A compiled function first called under a dispatch mode (the trainer's step-1
+    ``FlopCounterMode``) is never compiled afterwards (Dynamo keeps running it eagerly),
+    so those calls take the eager function instead. Same math and FLOPs.
     """
     import torch
     from torch.utils._python_dispatch import is_in_torch_dispatch_mode
@@ -239,7 +260,7 @@ def compile_outside_dispatch_modes(fn, **compile_kwargs):
     compiled = torch.compile(fn, **compile_kwargs)
 
     def call(*args, **kwargs):
-        if is_in_torch_dispatch_mode():
+        if _eager_regions or is_in_torch_dispatch_mode():
             return fn(*args, **kwargs)
         return compiled(*args, **kwargs)
 
@@ -254,6 +275,7 @@ __all__ = [
     "cfg_get",
     "cfg_namespace",
     "compile_outside_dispatch_modes",
+    "eager_compiled_regions",
     "idm_compile_cfg",
     "normalize_compile_enabled",
     "raise_recompile_limit",

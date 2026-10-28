@@ -21,6 +21,7 @@ Usage:
     trainer.train()
 """
 
+import contextlib
 import itertools
 import logging
 import math
@@ -29,6 +30,7 @@ import os
 import torch
 from omegaconf import DictConfig
 
+from openwam.model.compile_options import eager_compiled_regions
 from openwam.train.utils.checkpointing import (
     compute_resume_position,
     finalize_keep_weights_only,
@@ -370,7 +372,10 @@ class OpenWAMTrainer:
                     torch.manual_seed(step_seed)
                     if torch.cuda.is_available():
                         torch.cuda.manual_seed_all(step_seed)
-                with self.accelerator.accumulate(self.architecture):
+                # The FLOP-counted step runs train-time compiled regions eagerly, forward and
+                # backward alike (checkpoint recompute must match the forward's path).
+                eager = eager_compiled_regions() if timer.counting_flops else contextlib.nullcontext()
+                with self.accelerator.accumulate(self.architecture), eager:
                     with timer.stage("compute_loss"):
                         losses = self.compute_loss(batch)
                     loss = losses["total"]

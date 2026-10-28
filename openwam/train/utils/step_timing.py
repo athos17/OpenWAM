@@ -110,6 +110,11 @@ class StepTimer:
 
     # ------------------------------------------------------------------ FLOPs
 
+    @property
+    def counting_flops(self) -> bool:
+        """True during the step whose forward :meth:`count_flops` measures."""
+        return self.mfu and not self._counting_done
+
     @contextlib.contextmanager
     def count_flops(self, scope: str):
         """Count the FLOPs of the wrapped code once (first step only) under ``scope``."""

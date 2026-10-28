@@ -112,21 +112,27 @@ def test_block_fusion_matches_eager(path, per_frame, gc):
         torch.testing.assert_close(grads[name], ref_grads[name], msg=name, **tol)
 
 
-def test_block_fusion_compiles_after_a_flop_counted_first_step():
-    """The trainer counts FLOPs on step 1 under FlopCounterMode; that call must not keep
-    the fused regions eager for the rest of training."""
+@pytest.mark.parametrize("gc", [False, True])
+def test_block_fusion_compiles_after_a_flop_counted_first_step(gc):
+    """The trainer's step 1 (forward under FlopCounterMode, inside eager_compiled_regions
+    with its backward) must run, checkpoint recompute included, and must not keep the
+    fused regions eager for the rest of training."""
     import torch._dynamo.utils as dynamo_utils
     from torch.utils.flop_counter import FlopCounterMode
+
+    from openwam.model.compile_options import eager_compiled_regions
 
     torch._dynamo.reset()
     fused_block._compiled.clear()
     dynamo_utils.counters.clear()
     backbone, _ = _backbone()
     backbone.set_block_fusion(True)
-    with FlopCounterMode(display=False):
-        _video_forward(backbone, gc=False)
+    with eager_compiled_regions():
+        with FlopCounterMode(display=False):
+            out = _video_forward(backbone, gc=gc)
+        out.sum().backward()
     assert dynamo_utils.counters["stats"]["unique_graphs"] == 0
-    _video_forward(backbone, gc=False).sum().backward()
+    _video_forward(backbone, gc=gc).sum().backward()
     assert dynamo_utils.counters["stats"]["unique_graphs"] == 3
 
 
