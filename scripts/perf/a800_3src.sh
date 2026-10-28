@@ -4,7 +4,7 @@
 # probe, with A800 settings (no allocator cap: real 80 GB; 312 TFLOPS bf16 peak for MFU).
 #
 #   TAG=<run name> [CONFIG=train_h20_3src_s8b_gc20] [PROFILE=1] \
-#   [NNODES=2 NODE_RANK=<0|1> MASTER_ADDR=<node-0 ip>] bash scripts/perf/a800_3src.sh [extra hydra overrides]
+#   [NNODES=2 NODE_RANK=<0|1> MASTER_ADDR=192.168.0.235] bash scripts/perf/a800_3src.sh [extra hydra overrides]
 #
 # Two nodes shard ZeRO-2 state 16-way instead of 64-way: ~3.3 GiB/GPU more than the 64-GPU job
 # (8-way costs ~7.7 GiB more), so a 2-node peak near 80 GiB still fits the 64-GPU run.
@@ -25,6 +25,9 @@ mkdir -p "$PERF_ROOT"
 export PATH="$OPENWAM_ENV/bin:$PATH" CONDA_PREFIX="$OPENWAM_ENV"
 export PYTHONPATH="$PWD" WANDB_MODE=disabled PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export NNODES=${NNODES:-1} NODE_RANK MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} MASTER_PORT=${MASTER_PORT:-29500}
+# a800_1/a800_2 reach each other only over eth1 (a800_1: 192.168.0.235); eth0 is not routed between
+# them. This only picks the bootstrap socket; NCCL still finds the RoCE NICs and its own algorithms.
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth1} GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth1}
 LOG="$PERF_ROOT/$TAG.node$NODE_RANK.log"
 [ "$NODE_RANK" = 0 ] && { git rev-parse HEAD; git status --porcelain --untracked-files=no; } > "$PERF_ROOT/$TAG.sha" 2>/dev/null
 PROFILE_ARGS=()
