@@ -60,6 +60,12 @@ class MixtureDataset(BaseDataset):
         if not datasets:
             raise ValueError("MixtureDataset requires at least one sub-dataset")
 
+        # Compute weights at the caller's source boundary. Splitting one source
+        # by label availability must not increase its manual/uniform weight.
+        if any(getattr(d, "modality_groups", None) for d in datasets):
+            datasets, weights, names, source_configs = _expand_modality_groups(
+                datasets, weights, names, source_configs)
+
         self._datasets = list(datasets)
         self._base_seed = seed
         self._seed = seed
@@ -80,7 +86,8 @@ class MixtureDataset(BaseDataset):
         self.weight_strategy = weight_strategy or ("proportional" if weights is None else "manual")
         self.training_layout = None
         self.source_modalities = [getattr(d, "training_modality", "video_action") for d in self._datasets]
-        if any(m not in ("video_only", "video_action") for m in self.source_modalities):
+        if any(m not in ("video_only", "video_action", "video_tactile", "video_action_tactile")
+               for m in self.source_modalities):
             raise ValueError(f"Unsupported mixture modalities: {self.source_modalities}")
 
         dims = [d.action_dim for d in self._datasets]
@@ -266,6 +273,7 @@ class MixtureDataset(BaseDataset):
                 (p / "dataset_manifest.json" for p in (root, root.parent) if (p / "dataset_manifest.json").is_file()), None)
             stats = getattr(dataset, "normalization_stats_path", None)
             sources[name] = {"config": copy.deepcopy(config), "windows": len(dataset), "training_modality": modality,
+                             "publication": copy.deepcopy(getattr(dataset, "publication_contract", None)),
                              "contract": copy.deepcopy(getattr(dataset, "training_data_contract", None)),
                              "dataset_manifest_sha256": file_sha256(manifest) if manifest else None,
                              "normalization_sha256": file_sha256(stats) if stats else None}
@@ -471,6 +479,38 @@ class MixtureDataset(BaseDataset):
             source_configs=[_plain_config(c) for c in enabled_cfgs],
             weight_strategy=weight_strategy,
         )
+
+
+def _expand_modality_groups(datasets, weights, names, configs):
+    parent_weights = list(weights) if weights is not None else [float(len(d)) for d in datasets]
+    parent_names = list(names) if names is not None else [f"source_{i}" for i in range(len(datasets))]
+    parent_configs = list(configs) if configs is not None else [None] * len(datasets)
+    if any(len(x) != len(datasets) for x in (parent_weights, parent_names, parent_configs)):
+        raise ValueError("Modality group expansion requires aligned source names/weights/configs")
+    expanded, out_weights, out_names, out_configs = [], [], [], []
+    for dataset, weight, name, config in zip(datasets, parent_weights, parent_names, parent_configs):
+        groups = getattr(dataset, "modality_groups", None)
+        if not groups:
+            expanded.append(dataset)
+            out_weights.append(weight)
+            out_names.append(name)
+            out_configs.append(config)
+            continue
+        if not len(dataset) or sum(len(group) for group in groups.values()) != len(dataset):
+            raise ValueError("Modality groups must partition their complete source population")
+        for mode, group in groups.items():
+            if getattr(group, "training_modality", None) != mode:
+                raise ValueError("Modality group identity differs from its reader")
+            if hasattr(dataset, "publication_contract"):
+                group.publication_contract = copy.deepcopy(dataset.publication_contract)
+            expanded.append(group)
+            out_weights.append(weight * len(group) / len(dataset))
+            out_names.append(f"{name}@{mode}")
+            cfg = copy.deepcopy(config)
+            if cfg is not None:
+                cfg["selected_training_modality"] = mode
+            out_configs.append(cfg)
+    return expanded, out_weights, out_names, out_configs if configs is not None else None
 
 
 def _plain_config(config):

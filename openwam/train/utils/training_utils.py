@@ -121,7 +121,8 @@ def reduce_step_metrics(accelerator, losses: dict, grad_norm) -> dict:
     def _f(v):
         return v.item() if isinstance(v, torch.Tensor) else float(v)
 
-    extra_keys = [key for key in ("tactile", "tactile_contact", "tactile_distance") if key in losses]
+    extra_keys = [key for key in ("tactile", "tactile_contact", "tactile_distance", "tactile_deform", "tactile_intensity") if key in losses]
+    count_keys = sorted(k for k in losses if k.startswith("samples_") or k.startswith("tactile_labeled_"))
     if accelerator is not None and accelerator.num_processes > 1:
         local = torch.tensor(
             [
@@ -130,6 +131,7 @@ def reduce_step_metrics(accelerator, losses: dict, grad_norm) -> dict:
                 _f(losses["action"]),
                 grad_norm.item(),
                 *[_f(losses[key]) for key in extra_keys],
+                *[_f(losses[key]) for key in count_keys],
             ],
             device=loss.device,
             dtype=torch.float32,
@@ -141,6 +143,7 @@ def reduce_step_metrics(accelerator, losses: dict, grad_norm) -> dict:
             "loss_action": g[2].item(),
             "grad_norm": g[3].item(),
             **{f"loss_{key}": g[i + 4].item() for i, key in enumerate(extra_keys)},
+            **{key: g[i + 4 + len(extra_keys)].item() * accelerator.num_processes for i, key in enumerate(count_keys)},
         }
     return {
         "loss_total": loss.detach().item(),
@@ -148,6 +151,7 @@ def reduce_step_metrics(accelerator, losses: dict, grad_norm) -> dict:
         "loss_action": _f(losses["action"]),
         "grad_norm": grad_norm.item(),
         **{f"loss_{key}": _f(losses[key]) for key in extra_keys},
+        **{key: _f(losses[key]) for key in count_keys},
     }
 
 

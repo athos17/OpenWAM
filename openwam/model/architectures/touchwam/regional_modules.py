@@ -6,7 +6,7 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from openwam.tactile.regions import CODEC
+from openwam.tactile.regions import CODEC, INTENSITY_CODEC
 
 from .modules import TactileFlowBlock
 
@@ -63,7 +63,15 @@ class DeformPatchCodec(nn.Module):
         return ((self.unpatchify(tokens, num_regions) + 1) / 2).clamp(0, 1)
 
 
-CODECS = {CODEC: DeformPatchCodec}
+class IntensityPatchCodec(DeformPatchCodec):
+    """Source-normalized contact/deformation strength, not calibrated force.
+
+    Normalization belongs to the versioned offline source adapter. This codec
+    only maps its fixed [0,1] scale to flow space [-1,1] and patchifies it.
+    """
+
+
+CODECS = {CODEC: DeformPatchCodec, INTENSITY_CODEC: IntensityPatchCodec}
 
 
 class RegionalTactileFlowStream(nn.Module):
@@ -108,6 +116,8 @@ class RegionalTactileFlowStream(nn.Module):
 
     def encode_history(self, maps, valid, ids, sensors, spatial):
         tokens, observed = self.codec.encode(maps, valid, spatial)
+        if ids.shape[1] == 0:
+            return tokens.new_zeros(maps.shape[0], 0, self.spec["width"]), valid.new_zeros(maps.shape[0], 0), observed.any(1)
         pixels = self.codec.pixel_mask(observed, spatial)
         mask = pixels.any(-1)
         times = torch.arange(1 - self.spec["history"], 1, device=maps.device, dtype=tokens.dtype) / self.spec["fps"]
@@ -137,6 +147,9 @@ class RegionalTactileFlowStream(nn.Module):
 
 def regional_flow_loss(codec, prediction, target, clean, pixel_valid, num_regions, foreground_weight=1.0):
     """Pixel mean -> region mean -> labeled sample mean, including distributed ranks."""
+    if num_regions == 0:
+        # All ranks still enter the same collective, including empty layouts.
+        return globally_normalized_sum(prediction.sum() * 0, prediction.new_zeros(()))
     delta = torch.where(pixel_valid, prediction.float() - target.float(), 0)
     intensity = ((clean.float() + 1) / 2).clamp(0, 1)
     weight = pixel_valid * (1 + (foreground_weight - 1) * intensity)
@@ -147,6 +160,12 @@ def regional_flow_loss(codec, prediction, target, clean, pixel_valid, num_region
     samples = (region_loss * region_valid).sum(1) / region_valid.sum(1).clamp_min(1)
     count = region_valid.any(1).sum().to(samples.dtype)
     numerator = samples.sum()
+    return globally_normalized_sum(numerator, count)
+
+
+def globally_normalized_sum(numerator, count):
+    """DDP gradient mean of the globally labeled sample population."""
+    count = count.detach().clone().to(device=numerator.device, dtype=torch.float32)
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         # DDP averages gradients; normalize by the global labeled-sample count.
         torch.distributed.all_reduce(count)

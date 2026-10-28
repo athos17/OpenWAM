@@ -1,0 +1,58 @@
+{
+  "schema": "touchwam.ftp1.intensity_definition.v1",
+  "source": "exUMI",
+  "semantics": "normal_contact_intensity",
+  "verification": {
+    "status": "unverified",
+    "evidence": [],
+    "note": "Template only. Supply matched sensor calibration, a verified baseline and fixed indentation range before setting validated."
+  },
+  "regions": [
+    {
+      "region": "right.gripper.jaw_a.surface",
+      "sensor_name": "ftp1_exumi_dtact_depth",
+      "feature": "observation.tactile_rgb.right_tactile_data_gripper.0",
+      "mode": "depth_reconstruction",
+      "roi_xywh": [
+        0,
+        0,
+        340,
+        460
+      ],
+      "reconstruction_output": "indentation_depth",
+      "reconstruction_unit": "mm",
+      "monotonic_response_evidence": "",
+      "reconstruction_plugin": {
+        "path": "PATH_TO_VERIFIED_DTACT_PLUGIN.py",
+        "sha256": "REQUIRED_SHA256",
+        "entrypoint": "reconstruct"
+      },
+      "calibration_assets": {
+        "response_lut": {
+          "path": "MATCHED_SENSOR_RESPONSE.npy",
+          "sha256": "REQUIRED_SHA256"
+        }
+      },
+      "reconstruction_options": {
+        "gray_channel": 2,
+        "noise_floor": 0,
+        "blur_kernel": 7,
+        "reference_index": 2
+      },
+      "baseline": {
+        "kind": "npy",
+        "path": "VERIFIED_ZERO_CONTACT_BASELINE.npy",
+        "sha256": "REQUIRED_SHA256",
+        "verified_no_contact": false,
+        "evidence": ""
+      },
+      "normalization": {
+        "bounds": [
+          0,
+          1
+        ],
+        "note": "Placeholder range in mm. Replace using sensor calibration, never per-frame normalization."
+      }
+    }
+  ]
+}

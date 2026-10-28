@@ -1,0 +1,11 @@
+defaults:
+  - touchwam_regions
+  - _self_
+
+architecture:
+  training_mode: joint_finetune
+  tactile:
+    codec: tactile_intensity_v1
+    sensor_names: [sharpa_real, bench2dex_sim, freetacman, motiontrans, rdp, rdp_bimanual, rh20t_franka, rh20t_ati, rh20t_uskin, unit, unit_bimanual, vla_touch, vitamin, visuotactile_dwheel, visuotactile_qingloong, exumi]
+    history_dropout: 0.1
+    allow_missing_history: true

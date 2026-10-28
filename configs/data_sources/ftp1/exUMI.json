@@ -1,0 +1,102 @@
+{
+  "schema_version": "touchwam.ftp1.source.v1",
+  "source": "exUMI",
+  "nominal_fps": 60,
+  "time_status": "original_collection_config_and_replay_clock",
+  "time_basis": "nominal_rate",
+  "embodiment": "single_gripper",
+  "canonical_arm_mapping": {
+    "left": "right",
+    "right": "right"
+  },
+  "tactile_representation": "9dtact_xy_rgb_encoded",
+  "intensity_status": "requires_validated_decoding_and_baseline",
+  "intensity_enabled": false,
+  "action_status": "measured_state_only_not_control_command",
+  "action_enabled": false,
+  "raw_fields": {
+    "data/right_wrist_camera_rgb": [
+      224,
+      224,
+      3
+    ],
+    "data/right_tactile_type_gripper": [],
+    "data/timestamps": [],
+    "data/right_hand_joints": [
+      1
+    ],
+    "data/right_tactile_sensor_gripper": [],
+    "data/sub_task_instruction": [],
+    "data/right_tactile_area_gripper": [
+      1
+    ],
+    "data/right_hand_joints_idx": [
+      1
+    ],
+    "data/right_wrist_pose": [
+      6
+    ],
+    "data/right_tactile_data_gripper": [
+      1,
+      460,
+      680,
+      3
+    ]
+  },
+  "provenance": {
+    "release_commit": "d287c9c532514a08b2eb29bf1259997bb32f4f3b",
+    "frequency_policy": "https://github.com/michaelyuancb/ftp1-policy/issues/9#issuecomment-5437253164",
+    "frequency_evidence": [
+      {
+        "url": "https://github.com/silicx/exUMI/blob/3fba41ca40c22559b4aec91cf2092c380c479a4b/DATA_COLLECTION.md",
+        "evidence": "Required GoPro configuration QR decodes p60 (60 fps)"
+      },
+      {
+        "url": "https://github.com/silicx/exUMI/blob/3fba41ca40c22559b4aec91cf2092c380c479a4b/scripts_slam_pipeline/AR_03_align_trajectory.py",
+        "evidence": "timestamps=start_timestamp+i_frame/fps; fps=video.average_rate; tactile is aligned to this grid"
+      },
+      {
+        "url": "https://github.com/silicx/exUMI/blob/3fba41ca40c22559b4aec91cf2092c380c479a4b/scripts_slam_pipeline/AR_07_generate_replay_buffer.py",
+        "evidence": "No frame downsampling; left/right tactile rotated and hconcat"
+      }
+    ]
+  },
+  "notes": [
+    "RGB intensity is not normal force. No grayscale conversion is used as a pressure label.",
+    "Missing chunks are invalid data, not observed zero contact.",
+    "All original numeric and identity fields are preserved; only calibrated fields may be mapped to model supervision.",
+    "The single stored tactile image horizontally concatenates two physical sensors; do not call it one contact surface.",
+    "Published processing uses BGR channels: current grayscale, 7*positive brightening, 7*positive darkening. Stored RGB reverses the channels. uint8 multiplication in original code can wrap.",
+    "Available repository calibration must be matched to sensor and recording; no unverified depth lookup is applied."
+  ],
+  "tactile_surfaces": [
+    {
+      "raw_field": "right_tactile_data_gripper",
+      "raw_sensor_index": 0,
+      "roi_xywh": [
+        0,
+        0,
+        340,
+        460
+      ],
+      "canonical_region": "right.gripper.jaw_a.surface",
+      "sensor": "exUMI",
+      "source_surface": "left_tactile",
+      "preprocessing": "RGB encodes xy-representation; verify channel decoding and original uint8 wrap before intensity supervision"
+    },
+    {
+      "raw_field": "right_tactile_data_gripper",
+      "raw_sensor_index": 0,
+      "roi_xywh": [
+        340,
+        0,
+        340,
+        460
+      ],
+      "canonical_region": "right.gripper.jaw_b.surface",
+      "sensor": "exUMI",
+      "source_surface": "right_tactile",
+      "preprocessing": "RGB encodes xy-representation; verify channel decoding and original uint8 wrap before intensity supervision"
+    }
+  ]
+}

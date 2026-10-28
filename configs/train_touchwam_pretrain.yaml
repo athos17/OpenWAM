@@ -1,0 +1,31 @@
+# Complete OpenWAM Alpha initialization; only newly added tactile weights are new.
+# Sampling hours/weights and the final training budget are selected separately.
+defaults:
+  - train
+  - override model: touchwam_pretrain
+  - override dataloader: touchwam_pretrain
+  - _self_
+
+training:
+  finetune_ckpt_path: ${oc.env:TOUCHWAM_OPENWAM_CKPT,/mnt/pfs/v89atp/workspace/models/OpenWAM-Alpha-Pretrain-Foundation-Model/checkpoint_step_154000.safetensors}
+  initialize_touch_from_openwam: true
+  initialize_touch_from_legacy: false
+  initialize_touch_registry: false
+  action_backbone_init: pretrained
+  initialize_model_on_cpu: true
+  resume_ckpt_path: null
+  num_epochs: 1
+  max_steps: null
+  batch_size: 1
+  gradient_accumulation_steps: 1
+  dataset_num_workers: 4
+  zero_stage: 2
+  offload_optimizer_device: none
+  save_full_states_for_resume: true
+  keep_last_k_ckpts: -1
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_pretrain_v1}
+
+project:
+  name: touchwam-multisource-pretrain
+  seed: 42
+  wandb: null

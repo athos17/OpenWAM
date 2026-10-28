@@ -10,6 +10,8 @@ from .registry import FINGERTIP_NAMES, REGION_NAMES, validate_registry
 
 SCHEMA = "tactile_regions_v1"
 CODEC = "sharpa_deform_gray_v1"
+INTENSITY_CODEC = "tactile_intensity_v1"
+SUPPORTED_CODECS = (CODEC, INTENSITY_CODEC)
 
 
 def resize_deform(image, size):
@@ -30,29 +32,41 @@ def collate_regions(
     future_frames,
     region_names=REGION_NAMES,
     sensor_names=("sharpa_real", "bench2dex_sim"),
+    codec=CODEC,
 ):
-    """Pad variable region lists, preserving identity and separate availability.
+    """Collate measured regional intensity without inventing missing modalities.
 
-    Returns only tactile fields; VA preprocessing remains architecture-owned.
-    All samples in this version use the same, explicit deform codec/grid.
+    Empty layouts have N=0 when the entire batch is non-tactile. Mixed layouts
+    use masked padding only. Query availability is independent of target labels.
+    ``tactile_intensity_v1`` also accepts already normalized legacy deform maps;
+    this is a representation compatibility rule, not sensor calibration.
     """
     if not samples:
         raise ValueError("Cannot collate an empty tactile batch")
     validate_registry(region_names)
+    if codec not in SUPPORTED_CODECS:
+        raise ValueError(f"Unsupported tactile_codec: {codec}")
+    accepted = SUPPORTED_CODECS if codec == INTENSITY_CODEC else (CODEC,)
     ns = []
     for sample in samples:
-        if sample.get("tactile_codec") != CODEC:
-            raise ValueError("Expected explicit tactile_codec=sharpa_deform_gray_v1")
-        names = list(sample["tactile_region_names"])
-        if not names or set(names) - set(region_names):
-            raise ValueError("Region names must be nonempty and registered")
+        names = list(sample.get("tactile_region_names", ()))
         if "tactile_surface_ids" in sample:
             raise ValueError("surface_id was removed; compose one map per region before collation")
+        if set(names) - set(region_names):
+            raise ValueError("Region names must be registered")
         if len(set(names)) != len(names):
             raise ValueError("Duplicate region; compose native sensors first")
+        if names:
+            if sample.get("tactile_codec") not in accepted:
+                raise ValueError(f"Expected explicit tactile_codec in {accepted}")
+            if codec == INTENSITY_CODEC and not any(k in sample for k in ("tactile_sensor_ids", "tactile_sensor_names")):
+                raise ValueError("Intensity maps require explicit tactile sensor/source identity")
+        elif any(torch.as_tensor(sample[k]).numel() for k in (
+            "tactile_maps", "tactile_valid", "future_tactile_maps", "future_tactile_valid"
+        ) if k in sample):
+            raise ValueError("Nonempty tactile tensors require named regional layout")
         ns.append(len(names))
     n = max(ns)
-    out = {}
     specs = {
         "tactile_maps": ((history, n, 1, map_size, map_size), torch.float32, 0),
         "tactile_valid": ((history, n), torch.bool, False),
@@ -64,46 +78,47 @@ def collate_regions(
         "tactile_sensor_ids": ((n,), torch.long, 0),
         "tactile_region_ids": ((n,), torch.long, -1),
     }
-    device = torch.as_tensor(samples[0]["tactile_maps"]).device
-    for key, (shape, dtype, fill) in specs.items():
-        out[key] = torch.full((len(samples), *shape), fill, dtype=dtype, device=device)
+    device = next((torch.as_tensor(s["tactile_maps"]).device for s in samples if "tactile_maps" in s), "cpu")
+    out = {key: torch.full((len(samples), *shape), fill, dtype=dtype, device=device)
+           for key, (shape, dtype, fill) in specs.items()}
     for b, (sample, count) in enumerate(zip(samples, ns)):
+        if not count:
+            continue
         ids = [region_names.index(name) for name in sample["tactile_region_names"]]
         out["tactile_region_ids"][b, :count] = torch.tensor(ids, device=device)
         layout = torch.as_tensor(sample["tactile_layout_present"], device=device)
+        if ("future_tactile_maps" in sample) != ("future_tactile_valid" in sample):
+            raise ValueError("Future maps and their independent validity must be provided together")
+        defaults = {
+            "tactile_query_mask": layout[None].expand(future_frames, -1),
+            "tactile_spatial_valid": torch.ones(count, 1, map_size, map_size, dtype=torch.bool, device=device),
+            "tactile_sensor_ids": torch.zeros(count, dtype=torch.long, device=device),
+            "future_tactile_maps": torch.zeros(future_frames, count, 1, map_size, map_size, device=device),
+            "future_tactile_valid": torch.zeros(future_frames, count, dtype=torch.bool, device=device),
+        }
         for key, (shape, dtype, _) in specs.items():
             if key == "tactile_region_ids":
                 continue
-            axis = (
-                1
-                if key
-                in (
-                    "tactile_maps",
-                    "tactile_valid",
-                    "future_tactile_maps",
-                    "future_tactile_valid",
-                    "tactile_query_mask",
-                )
-                else 0
-            )
+            axis = 1 if key in (
+                "tactile_maps", "tactile_valid", "future_tactile_maps", "future_tactile_valid", "tactile_query_mask"
+            ) else 0
             expected = list(shape)
             expected[axis] = count
-            defaults = {
-                "tactile_query_mask": layout[None].expand(future_frames, -1),
-                "tactile_spatial_valid": torch.ones(count, 1, map_size, map_size, dtype=torch.bool, device=device),
-                "tactile_sensor_ids": torch.zeros(count, dtype=torch.long, device=device),
-            }
             if key == "tactile_sensor_ids" and "tactile_sensor_names" in sample:
                 names = list(sample["tactile_sensor_names"])
                 if "tactile_sensor_ids" in sample or len(names) != count or set(names) - set(sensor_names):
                     raise ValueError("Ambiguous or unregistered tactile sensor names")
                 value = torch.tensor([sensor_names.index(name) for name in names], device=device, dtype=torch.long)
             else:
+                if key not in sample and key not in defaults:
+                    raise ValueError(f"Regional tactile sample requires {key}")
                 value = torch.as_tensor(sample[key] if key in sample else defaults[key], device=device)
             if tuple(value.shape) != tuple(expected):
                 raise ValueError(f"{key}: expected {tuple(expected)}, got {tuple(value.shape)}")
             if dtype in (torch.bool, torch.long) and value.dtype != dtype:
                 raise ValueError(f"{key} requires {dtype}")
+            if key == "tactile_sensor_ids" and ((value < 0) | (value >= len(sensor_names))).any():
+                raise ValueError("Unregistered tactile sensor IDs")
             if key.endswith("maps"):
                 if value.dtype == torch.uint8:
                     value = value.float() / 255

@@ -1,0 +1,49 @@
+{
+  "schema": "touchwam_source_definition_v1",
+  "source_id": "egodex",
+  "embodiment": "human_egocentric_video",
+  "source_revision": "41d60b449629b2181ff5b735d31c2a2cf8b3cad8",
+  "format": "openwam_egodex_video_v1",
+  "fps": 30,
+  "supervision": [
+    "video"
+  ],
+  "camera_mapping": {
+    "head": "observation.images.camera",
+    "left_wrist": null,
+    "right_wrist": null
+  },
+  "action": {
+    "enabled": false,
+    "reason": "No validated mapping from human transforms to robot action commands"
+  },
+  "proprio": {
+    "enabled": false
+  },
+  "tactile": {
+    "enabled": false,
+    "regions": [],
+    "missing_is_zero_contact": false
+  },
+  "time_alignment": "Read episode-relative timestamps and source video from_timestamp; never derive offsets from cropped episode length",
+  "publication": {
+    "reuse_existing_dataset": "egodex_300h_video_v1",
+    "reader": "egodex_reuse_video",
+    "reprocessing": false,
+    "full_pool_staging_status": "stopped; duplicate output removed on 2026-10-28; original 300h preserved",
+    "source_inventory_note": "Official raw train pool is 724.836h; current task reuses the previously prepared 300h input. Future hour allocation remains user-defined.",
+    "removed_by_user_request": [
+      "touchwam_pretrain_v1_20261028/egodex/accepted_cache_300h",
+      "touchwam_pretrain_v1_20261028/egodex/full_pool"
+    ]
+  },
+  "selection": {
+    "hours": null,
+    "seed": null,
+    "status": "deferred_to_training_recipe"
+  },
+  "splits": {
+    "train": "official train",
+    "validation": "official test reserved; never included in training staging"
+  }
+}

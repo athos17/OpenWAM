@@ -126,12 +126,12 @@ def test_region_permutation_preserves_identity_and_prediction(models):
     )
 
 
-def test_complete_future_labels_required_but_absent_palms_are_not_labels(models):
+def test_partial_future_labels_are_supported_and_absent_palms_are_not_labels(models):
     _, _, model = models
     args = regional_loss_inputs()
     args["future_tactile_valid"][:, :, 10:] = False
-    with pytest.raises(ValueError, match="complete real labels"):
-        model.compute_loss(**args)
+    assert torch.isfinite(model.compute_loss(**args)["loss"])
+    assert model.compute_loss(**args)["tactile_labeled_regions"] == 20
     args["tactile_layout_present"][:, 10:] = False
     args["future_tactile_maps"][:, :, 10:] = float("nan")
     assert torch.isfinite(model.compute_loss(**args)["loss"])

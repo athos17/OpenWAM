@@ -232,12 +232,18 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
     ):
         if "future_tactile_maps" in pipeline_inputs or "future_tactile_valid" in pipeline_inputs:
             raise ValueError("Clean future tactile targets must not enter forward; use compute_loss")
-        if noisy_actions is None:
+        if noisy_actions is None and not self.supports_video_only_training:
             raise ValueError("TouchWAM V2 requires the action stream")
+        strict_video_only = pipeline_inputs.pop("_strict_video_only", False)
+        if strict_video_only and (noisy_actions is not None or proprio is not None):
+            raise ValueError("Strict video-only forward cannot consume actions or proprio")
         if touch_condition is not None and (tactile_maps is not None or tactile_valid is not None):
             raise ValueError("Pass raw history OR touch_condition")
         vb, ab = self.video_backbone, self.action_backbone
-        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
+        if strict_video_only:
+            pipeline_inputs.pop("_proprio_sample_mask", None)
+        else:
+            pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
         context, context_mask = pipeline_inputs.get("context"), pipeline_inputs.get("context_mask")
         if context is not None and context_mask is None and pipeline_inputs.get("seq_lens") is not None:
             lengths = pipeline_inputs["seq_lens"].to(device=context.device)
@@ -251,7 +257,7 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
         )
         if vstate.hidden_states.ndim != 3 or vstate.prefix_kv_len:
             raise ValueError("TouchWAM V2 requires a Wan-style [B,S,D] video stream without prefix KV")
-        astate = ab.prepare_state(
+        astate = None if noisy_actions is None else ab.prepare_state(
             noisy_actions,
             action_timestep,
             context=context,
@@ -260,7 +266,8 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
         history, history_valid, future, time, tactile_future_valid = self._prepare_tactile(
-            noisy_actions, noisy_tactile, tactile_timestep, tactile_future_valid,
+            noisy_actions if noisy_actions is not None else vstate.hidden_states,
+            noisy_tactile, tactile_timestep, tactile_future_valid,
             tactile_maps, tactile_valid, touch_condition,
         )
         s = self.tactile_spec
@@ -268,21 +275,29 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
         per_frame = driver._video_tokens_per_frame(vstate)
         mask = driver._build_attention_mask(
             vstate.hidden_states.shape[1],
-            astate.payload.x_action.shape[1],
+            0 if astate is None else astate.payload.x_action.shape[1],
             per_frame,
             device=vstate.hidden_states.device,
         )
         bridges = {layer: i for i, layer in enumerate(s["bridge_layers"])}
         clean_tokens = per_frame * max(1, int(pipeline_inputs.get("num_clean_prefix_frames", 0) or 0))
+        if astate is None:
+            # Native Wan run_block consumes this mask. Keep the clean visual
+            # prefix isolated from noisy future tactile writes at later layers.
+            mask[:clean_tokens, clean_tokens:] = False
+            vstate.extras["shared_attention_mask"] = mask
         for layer in range(vb.num_layers):
-            vstate, astate = driver.step(
-                layer,
-                vstate,
-                astate,
-                mask,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            )
+            if astate is None:
+                vstate = vb.run_block(layer, vstate)
+            else:
+                vstate, astate = driver.step(
+                    layer,
+                    vstate,
+                    astate,
+                    mask,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                )
             if layer in bridges:
                 block = partial(self.touch_v2.blocks[bridges[layer]], clean_video_tokens=clean_tokens)
                 args = (
@@ -292,7 +307,7 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
                     history_valid,
                     time,
                     vstate.hidden_states,
-                    astate.payload.x_action,
+                    None if astate is None else astate.payload.x_action,
                 )
                 if use_gradient_checkpointing and self.training:
                     if use_gradient_checkpointing_offload:
@@ -302,9 +317,11 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
                         future, vx, ax = checkpoint(block, *args, use_reentrant=False)
                 else:
                     future, vx, ax = block(*args)
-                vstate.hidden_states, astate.payload.x_action = vx, ax
+                vstate.hidden_states = vx
+                if astate is not None:
+                    astate.payload.x_action = ax
         prediction = self.touch_v2.output(future).masked_fill(~tactile_future_valid[..., None], 0)
-        return vb.finalize(vstate), ab.extract_prediction(astate), prediction
+        return vb.finalize(vstate), None if astate is None else ab.extract_prediction(astate), prediction
 
     def _prepare_tactile(self, noisy_actions, noisy_tactile, tactile_timestep, tactile_future_valid,
                          tactile_maps, tactile_valid, touch_condition):

@@ -1,0 +1,66 @@
+{
+  "schema_version": "touchwam.ftp1.source.v1",
+  "source": "ViTaMIn",
+  "nominal_fps": 60,
+  "time_status": "inferred_source_visual_clock_validated_by_tactile_duplicates",
+  "time_basis": "nominal_rate",
+  "embodiment": "single_gripper",
+  "canonical_arm_mapping": {
+    "left": "right",
+    "right": "right"
+  },
+  "tactile_representation": "optical_rgb",
+  "intensity_status": "unavailable_requires_sensor_calibration",
+  "intensity_enabled": false,
+  "action_status": "measured_state_only_not_control_command",
+  "action_enabled": false,
+  "raw_fields": {
+    "data/right_wrist_camera_rgb": [
+      224,
+      224,
+      3
+    ],
+    "data/right_tactile_type_gripper": [],
+    "data/timestamps": [],
+    "data/right_hand_joints": [
+      1
+    ],
+    "data/right_tactile_sensor_gripper": [],
+    "data/sub_task_instruction": [],
+    "data/right_tactile_area_gripper": [
+      2
+    ],
+    "data/right_hand_joints_idx": [
+      1
+    ],
+    "data/right_wrist_pose": [
+      6
+    ],
+    "data/right_tactile_data_gripper": [
+      2,
+      224,
+      224,
+      3
+    ]
+  },
+  "provenance": {
+    "release_commit": "d287c9c532514a08b2eb29bf1259997bb32f4f3b",
+    "frequency_policy": "https://github.com/michaelyuancb/ftp1-policy/issues/9#issuecomment-5437253164",
+    "frequency_evidence": [
+      {
+        "url": "https://arxiv.org/html/2504.06156v1",
+        "evidence": "GoPro 60 FPS; AllTact tactile 30 FPS; synchronized observations."
+      },
+      {
+        "artifact": "docs/data/ftp1_evidence/vitamin_duplicate_audit.json",
+        "evidence": "16 sampled 7-frame tactile chunks: exactly 3/6 within-chunk adjacent pairs equal pixel-for-pixel. Camera chunks contain no duplicate frames. This supports the visual 60 Hz export grid."
+      }
+    ]
+  },
+  "notes": [
+    "RGB intensity is not normal force. No grayscale conversion is used as a pressure label.",
+    "Missing chunks are invalid data, not observed zero contact.",
+    "All original numeric and identity fields are preserved; only calibrated fields may be mapped to model supervision.",
+    "60 Hz is the inferred nominal export grid, supported by 30 Hz tactile images duplicated pairwise and the documented 60 Hz visual stream. Original per-frame physical timestamps were discarded by FTP export."
+  ]
+}

@@ -1,0 +1,128 @@
+{
+  "schema": "touchwam_source_definition_v1",
+  "source_id": "sharpadex",
+  "embodiment": "bimanual_7dof_arm_22dof_sharpa_hand",
+  "format": "lerobot_v3_with_tactile_sidecar",
+  "fps": 30,
+  "supervision": [
+    "video",
+    "action",
+    "proprio",
+    "tactile_intensity"
+  ],
+  "camera_mapping": {
+    "head": "observation.images.left_head",
+    "left_wrist": "observation.images.left_wrist",
+    "right_wrist": "observation.images.right_wrist"
+  },
+  "action": {
+    "enabled": true,
+    "representation": "absolute_tcp_and_absolute_hand_joints",
+    "reference": "sharpadex_arm_mount/source_tcp",
+    "alignment": "recorded command at same row; not future measured state",
+    "stored_dimension": 62,
+    "unified_dimension": 80,
+    "groups": {
+      "left_tcp": {
+        "source": [
+          0,
+          9
+        ],
+        "target": [
+          0,
+          9
+        ]
+      },
+      "left_hand": {
+        "source": [
+          9,
+          31
+        ],
+        "target": [
+          10,
+          32
+        ]
+      },
+      "right_tcp": {
+        "source": [
+          31,
+          40
+        ],
+        "target": [
+          34,
+          43
+        ]
+      },
+      "right_hand": {
+        "source": [
+          40,
+          62
+        ],
+        "target": [
+          44,
+          66
+        ]
+      }
+    },
+    "range_convention": "half-open",
+    "rotation": "first two rotation matrix columns [R00,R10,R20,R01,R11,R21]",
+    "validity": "action_validity plus temporal padding; unobserved slots masked"
+  },
+  "tactile": {
+    "enabled": true,
+    "source_key": "observation.images.tactile_deform",
+    "codec": "tactile_intensity_v1",
+    "sensor_name": "sharpa_real",
+    "manifest": "tactile/manifest.json",
+    "mosaic_shape": [
+      480,
+      1200
+    ],
+    "tile_shape": [
+      240,
+      240
+    ],
+    "regions_in_mosaic_order": [
+      "left.thumb.tip",
+      "left.index.tip",
+      "left.middle.tip",
+      "left.ring.tip",
+      "left.pinky.tip",
+      "right.thumb.tip",
+      "right.index.tip",
+      "right.middle.tip",
+      "right.ring.tip",
+      "right.pinky.tip"
+    ],
+    "mosaic_layout": "2 rows x 5 columns; left hand top, right hand bottom; thumb to pinky left to right",
+    "orientation": "preserve source sensor image axes, no mirroring or rotation",
+    "map_shape": [
+      32,
+      32
+    ],
+    "normalization": "Fixed video-range grayscale conversion and divide by 255; black=0, increasing intensity=stronger SDK deformation response",
+    "physical_interpretation": "Relative contact-deformation intensity; not calibrated pressure, force or indentation depth",
+    "per_frame_rescaling": false,
+    "availability": "All ten fingertips installed by source definition; decoded zero remains valid zero contact; undecoded frame invalid",
+    "temporal_alignment": "Source video PTS and original per-episode from_timestamp; exact 30 Hz grid; no forward interpolation",
+    "composition": "exactly one map per canonical region"
+  },
+  "deduplication": {
+    "ftp1_sharpa": "excluded from FTP-1 release and mixture"
+  },
+  "selection": {
+    "hours": null,
+    "status": "deferred_to_training_recipe"
+  },
+  "splits": {
+    "policy": "preserve published native train/val episode identity"
+  },
+  "publication": {
+    "reuse_existing_dataset": "sharpadex_native_tcp_v1_20261026/buckets",
+    "reprocess_video_or_actions": false,
+    "new_work": "External ten-fingertip deformation cache; no such cache exists in the prepared native dataset",
+    "external_tactile_root": "touchwam_pretrain_v1_20261028/sharpadex",
+    "catalog": "tactile_catalog.json",
+    "identity_key": "original bucket.name"
+  }
+}

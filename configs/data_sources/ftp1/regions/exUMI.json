@@ -1,0 +1,40 @@
+{
+  "schema_version": "touchwam.ftp1.regions.v1",
+  "source": "exUMI",
+  "registry_version": "touchwam_regions_67_v2",
+  "surfaces": [
+    {
+      "raw_field": "right_tactile_data_gripper",
+      "raw_sensor_index": 0,
+      "roi_xywh": [
+        0,
+        0,
+        340,
+        460
+      ],
+      "canonical_region": "right.gripper.jaw_a.surface",
+      "sensor": "exUMI",
+      "source_surface": "left_tactile",
+      "preprocessing": "RGB encodes xy-representation; verify channel decoding and original uint8 wrap before intensity supervision"
+    },
+    {
+      "raw_field": "right_tactile_data_gripper",
+      "raw_sensor_index": 0,
+      "roi_xywh": [
+        340,
+        0,
+        340,
+        460
+      ],
+      "canonical_region": "right.gripper.jaw_b.surface",
+      "sensor": "exUMI",
+      "source_surface": "right_tactile",
+      "preprocessing": "RGB encodes xy-representation; verify channel decoding and original uint8 wrap before intensity supervision"
+    }
+  ],
+  "auxiliary_signals": [],
+  "missing_data_policy": "Use archived chunk presence and per-frame validity; absent chunks never mean no contact.",
+  "composition_policy": "At most one map per region. Compose independent sensors upstream with calibrated geometry; do not create surface_id.",
+  "calibration_status": "requires_validated_decoding_and_baseline",
+  "intensity_enabled": false
+}

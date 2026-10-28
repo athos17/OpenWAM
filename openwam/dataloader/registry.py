@@ -60,7 +60,14 @@ def build_dataset(config, split: str = "train") -> BaseDataset:
             f"Registered dataset class {cls.__name__} (type={dtype!r}) lacks a "
             f"from_config classmethod. All registered datasets must implement it."
         )
-    return cls.from_config(config, split=split)
+    publication = None
+    if get_cfg(config, "require_publication", False):
+        from openwam.dataloader.publication import source_publication_contract
+        publication = source_publication_contract(config)
+    dataset = cls.from_config(config, split=split)
+    if publication is not None:
+        dataset.publication_contract = publication
+    return dataset
 
 
 def list_registered_datasets():
@@ -91,6 +98,12 @@ def _register_builtins():
     register_dataset("sharpadex_tianji")(SharpaDexTianjiDataset)
     from openwam.dataloader.sharpadex_tianji_global import SharpaDexTianjiGlobalDataset
     register_dataset("sharpadex_tianji_global")(SharpaDexTianjiGlobalDataset)
+    from openwam.dataloader.sharpadex_native_tcp import SharpaDexNativeTCPDataset
+    from openwam.dataloader.touchwam_pretrain import LeRobotVideoIntensityDataset, SharpaNativeIntensityDataset, EgoDexReuseVideoDataset
+    register_dataset("sharpadex_native_tcp")(SharpaDexNativeTCPDataset)
+    register_dataset("sharpadex_native_intensity")(SharpaNativeIntensityDataset)
+    register_dataset("lerobot_video_intensity")(LeRobotVideoIntensityDataset)
+    register_dataset("egodex_reuse_video")(EgoDexReuseVideoDataset)
 
     from openwam.dataloader.egodex_video import EgoDexVideoDataset
     register_dataset("egodex_video")(EgoDexVideoDataset)

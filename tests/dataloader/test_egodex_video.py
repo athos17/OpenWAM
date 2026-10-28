@@ -84,3 +84,26 @@ def test_resume_binds_selection_and_sampling(published,tmp_path):
         verify_resume_training_data_contract(str(checkpoint),changed)
     with pytest.raises(ValueError,match='no longer'):
         verify_resume_training_data_contract(str(checkpoint),object())
+
+
+def test_touchwam_reuses_cache_without_fake_actions_or_rewriting(published, monkeypatch):
+    from openwam.dataloader.touchwam_pretrain import EgoDexReuseVideoDataset
+    path = published / 'dataset_info.json'
+    info = json.loads(path.read_text())
+    info['fps'] = 30
+    path.write_text(json.dumps(info))
+    before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in published.iterdir()}
+    calls = []
+    def decode(path, indices, height, width):
+        calls.append(indices)
+        return [Image.new('RGB', (width, height), (i, i, i)) for i in indices]
+    monkeypatch.setattr('openwam.dataloader.egodex_video.decode_video_frames', decode)
+    ds = EgoDexReuseVideoDataset(published)
+    assert len(ds) == 39  # Drop 4 pure-prefix-only starts per episode.
+    assert 'action' not in ds[0] and 'proprio' not in ds[0]
+    assert ds[2]['episode_start_frame'] == 2 and calls[-1] == [12, 16]
+    assert ds[3]['episode_start_frame'] == 0 and calls[-1][0] == 30
+    assert ds[-1 + len(ds)]['video_mask'][1:].any()
+    subset = EgoDexReuseVideoDataset(published, include_episode_ids=['train/task/episode_000001'])
+    assert len(subset) == 36 and subset[0]['episode_id'].endswith('000001')
+    assert {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in published.iterdir()} == before

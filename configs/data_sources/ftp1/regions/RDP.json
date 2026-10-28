@@ -1,0 +1,51 @@
+{
+  "schema_version": "touchwam.ftp1.regions.v1",
+  "source": "RDP",
+  "registry_version": "touchwam_regions_67_v2",
+  "surfaces": [
+    {
+      "raw_field": "left_tactile_data_gripper_mctac",
+      "raw_sensor_index": 0,
+      "expected_ftp_area_id": 1,
+      "canonical_region": "right.gripper.jaw_b.surface",
+      "sensor": "MCTac",
+      "mapping_basis": "FTP gripper area convention 0=A,1=B; single-arm uses canonical right",
+      "raw_shape": [
+        224,
+        224,
+        3
+      ],
+      "intensity_enabled": false
+    },
+    {
+      "raw_field": "left_tactile_data_gripper_gelsightmini",
+      "raw_sensor_index": 0,
+      "expected_ftp_area_id": 0,
+      "canonical_region": "right.gripper.jaw_a.surface",
+      "sensor": "GelSightMini",
+      "mapping_basis": "FTP gripper area convention 0=A,1=B; single-arm uses canonical right",
+      "raw_shape": [
+        224,
+        224,
+        3
+      ],
+      "intensity_enabled": false
+    }
+  ],
+  "auxiliary_signals": [
+    {
+      "raw_field": "left_tactile_data_gripperforce_flexivgripper",
+      "sensor": "FlexivGripperForce",
+      "shape": [
+        1,
+        1
+      ],
+      "canonical_region": null,
+      "reason": "Wrench/joint-force has no spatial contact surface and cannot be broadcast into an intensity map."
+    }
+  ],
+  "missing_data_policy": "Use archived chunk presence and per-frame validity; absent chunks never mean no contact.",
+  "composition_policy": "At most one map per region. Compose independent sensors upstream with calibrated geometry; do not create surface_id.",
+  "calibration_status": "unavailable_requires_sensor_calibration",
+  "intensity_enabled": false
+}

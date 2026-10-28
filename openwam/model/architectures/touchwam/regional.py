@@ -6,7 +6,7 @@ import torch
 
 from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
 from openwam.model.architectures.registry import register_architecture
-from openwam.tactile.regions import CODEC, REGION_NAMES, SCHEMA, collate_regions
+from openwam.tactile.regions import CODEC, INTENSITY_CODEC, REGION_NAMES, SCHEMA, collate_regions
 from openwam.tactile.registry import (
     LEGACY_REGION_NAMES,
     PREVIOUS_REGION_NAMES,
@@ -19,7 +19,7 @@ from openwam.tactile.registry import (
 )
 
 from .architecture import TouchWAMArchitecture
-from .regional_modules import CODECS, RegionalTactileFlowStream, regional_flow_loss
+from .regional_modules import CODECS, RegionalTactileFlowStream, globally_normalized_sum, regional_flow_loss
 
 
 @register_architecture(
@@ -30,6 +30,7 @@ from .regional_modules import CODECS, RegionalTactileFlowStream, regional_flow_l
 )
 class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
     model_version = "touchwam_regions_v1"
+    supports_video_only_training = True
 
     def _init_tactile(self, cfg):
         defaults = dict(
@@ -135,8 +136,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             region_identity="unique region_id; compose native sensors before model input",
             single_arm_gripper_side="right",
             sensor_names=s["sensor_names"],
-            representation="deform_gray",
-            channels=["deform_intensity"],
+            representation="contact_intensity" if s["codec"] == INTENSITY_CODEC else "deform_gray",
+            channels=["contact_intensity" if s["codec"] == INTENSITY_CODEC else "deform_intensity"],
+            intensity_units="source-normalized, not calibrated force",
             float_range=[0, 1],
             history=s["history"],
             map_size=s["map_size"],
@@ -178,13 +180,13 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         if region_ids is None:
             if maps is not None or valid is not None or layout_present is not None:
                 raise ValueError("Explicit tactile_region_ids and tactile_layout_present are required")
-            region_ids = torch.full((batch_size, 1), -1, dtype=torch.long, device=device)
+            region_ids = torch.empty((batch_size, 0), dtype=torch.long, device=device)
             layout_present = torch.zeros_like(region_ids, dtype=torch.bool)
         if layout_present is None:
             raise ValueError("Explicit tactile_layout_present is required")
         ids = tensor(region_ids, 2, torch.long, "region IDs")
         present = tensor(layout_present, 2, torch.bool, "layout presence")
-        if ids.shape != present.shape or ids.shape[1] < 1 or ((ids < -1) | (ids >= len(s["region_names"]))).any():
+        if ids.shape != present.shape or ((ids < -1) | (ids >= len(s["region_names"]))).any():
             raise ValueError("Invalid region layout")
         if (present & (ids < 0)).any():
             raise ValueError("Padding IDs cannot be present")
@@ -287,7 +289,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             touch_condition = self._condition(
                 tactile_maps,
                 tactile_valid,
-                noisy_actions.shape[0],
+                (noisy_actions if noisy_actions is not None else kwargs["latents"]).shape[0],
                 region_ids=tactile_region_ids,
                 layout_present=tactile_layout_present,
                 spatial_valid=tactile_spatial_valid,
@@ -311,6 +313,14 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             if kwargs.get("tactile_future_valid") is not None:
                 raise ValueError("Pass query mask OR token validity")
             kwargs["tactile_future_valid"] = self._query(touch_condition, tactile_query_mask)[1].any(-1)
+        if touch_condition[2].shape[1] == 0:
+            # Exact OpenWAM V/VA path: no tactile attention, embeddings or writeback.
+            for key in ("noisy_tactile", "tactile_timestep", "tactile_future_valid"):
+                value = kwargs.pop(key, None)
+                if key != "tactile_timestep" and value is not None and value.numel():
+                    raise ValueError("Nonempty future tactile tokens require a regional layout")
+            video, action = DualSystemSelfAttnArchitecture.forward(self, noisy_actions, action_timestep, **kwargs)
+            return video, action, video.new_empty(video.shape[0], 0, self.touch_v2.codec.patch_dim)
         return super().forward(noisy_actions, action_timestep, touch_condition=touch_condition, **kwargs)
 
     def _prepare_tactile(
@@ -348,118 +358,207 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         return history, history_valid, future, time, tactile_future_valid
 
     def prepare_inputs(self, batch):
-        samples = [batch] if isinstance(batch, dict) else batch
-        if any(sample.get("training_modality") == "video_only" for sample in samples):
-            raise ValueError("Regional TouchWAM currently requires video-action samples")
+        samples = [batch] if isinstance(batch, dict) else list(batch)
+        if not samples:
+            raise ValueError("Cannot prepare an empty batch")
         s = self.tactile_spec
-        expected = torch.arange(1, s["future_frames"] + 1) * s["future_stride"]
-        for sample in samples:
-            offsets = torch.as_tensor(sample.get("future_tactile_offsets", []))
-            if not torch.equal(offsets.cpu(), expected) or sample.get("tactile_fps") != s["fps"]:
-                raise ValueError("Dataset/model tactile offsets or fps differ")
+        modalities = [sample.get("training_modality", "video_action") for sample in samples]
+        allowed = {"video_only", "video_action", "video_tactile", "video_action_tactile"}
+        if set(modalities) - allowed:
+            raise ValueError(f"Unknown training modalities: {set(modalities) - allowed}")
+        with_action = [m in ("video_action", "video_action_tactile") for m in modalities]
+        if any(with_action) and not all(with_action):
+            raise ValueError("Use globally aligned microbatches; mixed action/no-action batches are not supported")
+        expected_future = torch.arange(1, s["future_frames"] + 1, dtype=torch.float64) * s["future_stride"] / s["fps"]
+        expected_history = torch.arange(1 - s["history"], 1, dtype=torch.float64) / s["fps"]
+        base_samples = []
+        for sample, modality, has_action in zip(samples, modalities, with_action):
+            has_regions = bool(sample.get("tactile_region_names"))
+            if modality in ("video_tactile", "video_action_tactile") and not has_regions:
+                raise ValueError("A tactile training modality requires an explicit regional layout")
+            if has_regions:
+                if "future_tactile_times_s" in sample:
+                    times = torch.as_tensor(sample["future_tactile_times_s"], dtype=torch.float64).cpu()
+                    if times.shape != expected_future.shape or not torch.allclose(times, expected_future, atol=1e-6, rtol=0):
+                        raise ValueError("Dataset/model future tactile times differ")
+                else:
+                    offsets = torch.as_tensor(sample.get("future_tactile_offsets", []), dtype=torch.float64).cpu()
+                    fps = sample.get("tactile_fps")
+                    if fps is None or fps <= 0 or offsets.shape != expected_future.shape or not torch.allclose(
+                        offsets / fps, expected_future, atol=1e-6, rtol=0
+                    ):
+                        raise ValueError("Dataset/model tactile offsets or fps differ")
+                if "tactile_history_times_s" in sample:
+                    times = torch.as_tensor(sample["tactile_history_times_s"], dtype=torch.float64).cpu()
+                    if times.shape != expected_history.shape or not torch.allclose(times, expected_history, atol=1e-6, rtol=0):
+                        raise ValueError("Dataset/model tactile history times differ; resample causally in the reader")
+            base = dict(sample)
+            base["training_modality"] = "video_action" if has_action else "video_only"
+            if not has_action:
+                # Older V readers contain all-masked placeholders. Remove them
+                # before preprocessing; no dummy action/proprio enters forward.
+                for key in ("action_mask", "proprio_mask"):
+                    if key in base and torch.as_tensor(base[key]).any():
+                        raise ValueError(f"{modality} cannot contain a valid {key}")
+                    base[key] = torch.zeros(1, dtype=torch.bool)
+                base.pop("action", None)
+                base.pop("proprio", None)
+            base_samples.append(base)
         tactile = collate_regions(
-            samples,
-            map_size=s["map_size"],
-            history=s["history"],
-            future_frames=s["future_frames"],
-            region_names=s["region_names"],
-            sensor_names=s["sensor_names"],
+            samples, map_size=s["map_size"], history=s["history"], future_frames=s["future_frames"],
+            region_names=s["region_names"], sensor_names=s["sensor_names"], codec=s["codec"],
         )
-        result = DualSystemSelfAttnArchitecture.prepare_inputs(self, samples)
+        result = DualSystemSelfAttnArchitecture.prepare_inputs(self, base_samples)
         result.update(tactile)
         return result
 
     def compute_loss(self, *, actions=None, lambda_video=1.0, lambda_action=1.0, **inputs):
+        """Real V/VA/VT/VAT paths with independently masked future supervision."""
         if "tactile_surface_ids" in inputs:
             raise ValueError("surface_id was removed; use unique regional maps")
-        if actions is None or torch.as_tensor(inputs.pop("video_only_mask", False)).any():
-            raise ValueError("Regional TouchWAM currently requires video-action targets")
-        future_maps = torch.as_tensor(inputs.pop("future_tactile_maps"), device=self.device)
-        future_valid = torch.as_tensor(inputs.pop("future_tactile_valid"), device=self.device)
+        b = inputs["input_latents"].shape[0]
+        no_action = inputs.pop("video_only_mask", None)
+        if no_action is not None:
+            no_action = torch.as_tensor(no_action, device=self.device)
+            if no_action.dtype != torch.bool or no_action.shape != (b,):
+                raise ValueError("video_only_mask must be bool [B]")
+            if no_action.any() and not no_action.all():
+                raise ValueError("Use globally aligned microbatches; mixed action/no-action batches are not supported")
+            if no_action.all():
+                for key, enabled in (("action_is_pad", True), ("proprio_mask", False)):
+                    value = inputs.get(key)
+                    if value is not None and not (torch.as_tensor(value) == enabled).all():
+                        raise ValueError(f"No-action samples contain valid {key}")
+                actions = None
+        if actions is None:
+            inputs.pop("proprio", None)
+            inputs.pop("proprio_mask", None)
+            inputs["_strict_video_only"] = True
+        future_maps = inputs.pop("future_tactile_maps", None)
+        future_valid = inputs.pop("future_tactile_valid", None)
         requested = inputs.pop("tactile_query_mask", None)
         condition = self._condition(
-            inputs.pop("tactile_maps", None),
-            inputs.pop("tactile_valid", None),
-            actions.shape[0],
+            inputs.pop("tactile_maps", None), inputs.pop("tactile_valid", None), b,
             region_ids=inputs.pop("tactile_region_ids", None),
             layout_present=inputs.pop("tactile_layout_present", None),
             spatial_valid=inputs.pop("tactile_spatial_valid", None),
             sensor_ids=inputs.pop("tactile_sensor_ids", None),
-            palm_mode=inputs.pop("tactile_palm_mode", None),
-            augment=self.training,
+            palm_mode=inputs.pop("tactile_palm_mode", None), augment=self.training,
         )
-        query, pixels = self._query(condition, requested)
-        if (
-            future_maps.shape[:3] != query.shape
-            or future_valid.shape != query.shape
-            or future_valid.dtype != torch.bool
-        ):
+        query, query_pixels = self._query(condition, requested)
+        codec, s = self.touch_v2.codec, self.tactile_spec
+        if (future_maps is None) != (future_valid is None):
+            raise ValueError("Future maps and validity must be provided together")
+        if future_maps is None:
+            future_maps = torch.zeros(*query.shape, 1, s["map_size"], s["map_size"], device=self.device, dtype=self.dtype)
+            future_valid = torch.zeros_like(query)
+        else:
+            future_maps = torch.as_tensor(future_maps, device=self.device)
+            future_valid = torch.as_tensor(future_valid, device=self.device)
+        if future_maps.shape[:3] != query.shape or future_valid.shape != query.shape or future_valid.dtype != torch.bool:
             raise ValueError("Future target shape or validity differs from query layout")
         if future_maps.dtype == torch.uint8:
             future_maps = future_maps.to(self.dtype) / 255
         elif future_maps.is_floating_point():
             future_maps = future_maps.to(self.dtype)
         else:
-            raise ValueError("Deform targets must be uint8 or float [0,1]")
-        codec, s = self.touch_v2.codec, self.tactile_spec
+            raise ValueError("Intensity targets must be uint8 or float [0,1]")
         clean, labels = codec.encode(future_maps, future_valid & query, condition[4])
-        if (query & ~labels).any():
-            raise ValueError(
-                "Requested future regions require complete real labels; filter incomplete windows, never use fake zeros"
-            )
+        label_pixels = codec.pixel_mask(labels, condition[4])
         if self.tactile_scheduler.timesteps is None:
             raise RuntimeError("Call init_training_schedulers before compute_loss")
-        b = actions.shape[0]
         vs, acs, ts = self.video_scheduler, self.action_scheduler, self.tactile_scheduler
         lower = int(inputs.pop("min_timestep_boundary", 0) * len(vs.timesteps))
         upper = int(inputs.pop("max_timestep_boundary", 1) * len(vs.timesteps))
-        vi, ai, ti = (
-            torch.randint(lower, upper, (b,)),
-            torch.randint(len(acs.timesteps), (b,)),
-            torch.randint(len(ts.timesteps), (b,)),
-        )
+        if not 0 <= lower < upper <= len(vs.timesteps):
+            raise ValueError("Invalid video timestep boundaries")
+        vi = torch.randint(lower, upper, (b,))
 
         def noise_sample(value, scheduler, index):
             value = value.to(device=self.device, dtype=self.dtype)
             sigma = scheduler.sigmas[index].to(value).reshape(b, *([1] * (value.ndim - 1)))
             noise = torch.randn_like(value)
-            return (1 - sigma) * value + sigma * noise, noise - value, scheduler.timesteps[index].to(value)
+            return (1 - sigma) * value + sigma * noise, noise - value, scheduler.timesteps[index].to(value), noise
 
-        noisy_v, target_v, time_v = noise_sample(inputs["input_latents"], vs, vi)
-        noisy_a, target_a, time_a = noise_sample(actions, acs, ai)
-        noisy_t, target_t, time_t = noise_sample(clean, ts, ti)
+        noisy_v, target_v, time_v, _ = noise_sample(inputs["input_latents"], vs, vi)
+        noisy_a = target_a = time_a = ai = None
+        if actions is not None:
+            actions = torch.as_tensor(actions, device=self.device, dtype=self.dtype)
+            action_valid = self._action_valid_mask(actions, inputs.get("action_is_pad"))
+            if not torch.isfinite(actions.masked_select(action_valid)).all():
+                raise ValueError("Nonfinite valid action labels")
+            actions = torch.where(action_valid, actions, 0)
+            ai = torch.randint(len(acs.timesteps), (b,))
+            noisy_a, target_a, time_a, _ = noise_sample(actions, acs, ai)
+            # Inactive slots follow sigma * independent noise, matching the
+            # inference analytic-noise path. They receive no action supervision.
+            # Sanitization above prevents placeholder values from entering it.
+        ti = torch.randint(len(ts.timesteps), (b,))
+        noisy_t, target_t, time_t, noise_t = noise_sample(clean, ts, ti)
+        # Queries are known from layout, not target validity. Unknown futures
+        # receive pure noise and no loss; clean placeholder zeros never leak.
+        noisy_t = torch.where(label_pixels, noisy_t, noise_t)
+        noisy_t = torch.where(query_pixels, noisy_t, 0)
         if inputs.get("first_frame_latents") is not None:
             ref = inputs["first_frame_latents"]
             noisy_v[:, :, : ref.shape[2]] = ref
         forward_inputs = dict(inputs)
-        for key in ("action_is_pad", "video_is_pad", "input_latents"):
+        for key in ("action_is_pad", "video_is_pad", "input_latents", "latents"):
             forward_inputs.pop(key, None)
         proprio_mask = forward_inputs.pop("proprio_mask", None)
         if proprio_mask is not None:
             forward_inputs["_proprio_sample_mask"] = proprio_mask
         predictions = self(
-            noisy_a,
-            time_a,
-            noisy_tactile=torch.where(pixels, noisy_t, 0),
-            tactile_timestep=time_t,
-            tactile_future_valid=pixels.any(-1),
-            touch_condition=condition,
-            latents=noisy_v,
-            timestep=time_v,
-            **forward_inputs,
+            noisy_a, time_a, noisy_tactile=noisy_t, tactile_timestep=time_t,
+            tactile_future_valid=query_pixels.any(-1), touch_condition=condition,
+            latents=noisy_v, timestep=time_v, **forward_inputs,
         )
         loss_v = self._compute_video_loss(predictions[0], target_v, vi, inputs, self.device)
-        loss_a = self._compute_action_loss(predictions[1], target_a, ai, acs, inputs, self.device)
-        loss_t = regional_flow_loss(
-            codec, predictions[2], target_t, clean, pixels, query.shape[2], s["foreground_weight"]
-        )
+        loss_a = self._regional_action_loss(predictions[1], target_a, ai, acs, inputs)
+        loss_t = regional_flow_loss(codec, predictions[2], target_t, clean, label_pixels, query.shape[2], s["foreground_weight"])
         return dict(
             loss=lambda_video * loss_v + lambda_action * loss_a + s["loss_weight"] * loss_t,
-            loss_video=(lambda_video * loss_v).detach(),
-            loss_action=(lambda_action * loss_a).detach(),
-            loss_tactile=(s["loss_weight"] * loss_t).detach(),
-            loss_tactile_deform=loss_t.detach(),
+            loss_video=(lambda_video * loss_v).detach(), loss_action=(lambda_action * loss_a).detach(),
+            loss_tactile=(s["loss_weight"] * loss_t).detach(), loss_tactile_deform=loss_t.detach(),
+            loss_tactile_intensity=loss_t.detach(),
+            tactile_labeled_regions=labels.any(1).sum().detach(), tactile_labeled_frames=labels.sum().detach(),
         )
+
+    def _compute_video_loss(self, prediction, target, indices, inputs, device):
+        # Base video loss is a batch mean of correctly masked sample means.
+        # Remove dilution by samples with no supervised future visual frame,
+        # using the same global labeled-sample denominator as A and T.
+        loss = super()._compute_video_loss(prediction, target, indices, inputs, device)
+        pad = inputs.get("video_is_pad")
+        count = prediction.new_tensor(prediction.shape[0], dtype=torch.float32) if pad is None else (
+            ~torch.as_tensor(pad, device=device, dtype=torch.bool)
+        ).flatten(1).any(1).sum()
+        return globally_normalized_sum(loss * prediction.shape[0], count)
+
+    @staticmethod
+    def _action_valid_mask(actions, pad):
+        if pad is None:
+            return torch.ones_like(actions, dtype=torch.bool)
+        pad = torch.as_tensor(pad, device=actions.device)
+        if pad.dtype != torch.bool:
+            raise ValueError("Action padding must be boolean")
+        if pad.shape == actions.shape[:2]:
+            pad = pad[..., None].expand_as(actions)
+        if pad.shape != actions.shape:
+            raise ValueError("Action padding must be [B,T] or [B,T,D]")
+        return ~pad
+
+    def _regional_action_loss(self, prediction, target, indices, scheduler, inputs):
+        # Always participate, even on ranks with zero action labels.
+        if prediction is None:
+            zero = inputs["input_latents"].new_zeros((), dtype=torch.float32)
+            return globally_normalized_sum(zero, zero)
+        valid = self._action_valid_mask(target, inputs.get("action_is_pad"))
+        error = torch.where(valid, prediction.float() - target.float(), 0).square()
+        count = valid.flatten(1).sum(1)
+        per_sample = error.flatten(1).sum(1) / count.clamp_min(1)
+        weights = scheduler.training_weight(indices).to(per_sample)
+        return globally_normalized_sum((per_sample * weights).sum(), (count > 0).sum())
 
     def prepare_tactile_generation(self, maps, valid, **options):
         requested = options.pop("query_mask", None)
@@ -488,7 +587,10 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
 
     def decode_tactile_generation(self, tokens, future_valid, condition):
         ids, spatial = condition[2], condition[4]
-        maps = self.touch_v2.codec.decode(tokens, ids.shape[1])
+        maps = self.touch_v2.codec.decode(tokens, ids.shape[1]) if ids.shape[1] else tokens.new_empty(
+            ids.shape[0], self.tactile_spec["future_frames"], 0, 1,
+            self.tactile_spec["map_size"], self.tactile_spec["map_size"],
+        )
         maps = maps.masked_fill(~(future_valid[..., None, None, None] & spatial[:, None]), 0)
         keep = future_valid[0].any(0)
         selected_ids = ids[0, keep].tolist()
@@ -499,7 +601,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             tactile_region_ids=ids[0, keep].cpu().numpy(),
             tactile_history_available=condition[6][0, keep].cpu().numpy(),
             tactile_spatial_valid=spatial[0, keep].cpu().numpy(),
-            tactile_representation="deform_gray",
+            tactile_representation="contact_intensity" if self.tactile_spec["codec"] == INTENSITY_CODEC else "deform_gray",
             tactile_codec=self.tactile_spec["codec"],
             future_tactile_times_s=(
                 torch.arange(1, self.tactile_spec["future_frames"] + 1)

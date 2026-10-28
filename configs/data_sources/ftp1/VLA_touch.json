@@ -1,0 +1,63 @@
+{
+  "schema_version": "touchwam.ftp1.source.v1",
+  "source": "VLA_touch",
+  "nominal_fps": 10,
+  "time_status": "verified_source_nominal",
+  "time_basis": "nominal_rate",
+  "embodiment": "single_gripper",
+  "canonical_arm_mapping": {
+    "left": "right",
+    "right": "right"
+  },
+  "tactile_representation": "optical_rgb",
+  "intensity_status": "unavailable_requires_sensor_calibration",
+  "intensity_enabled": false,
+  "action_status": "measured_state_only_not_control_command",
+  "action_enabled": false,
+  "raw_fields": {
+    "data/right_wrist_camera_rgb": [
+      224,
+      224,
+      3
+    ],
+    "data/right_tactile_type_gripper": [],
+    "data/camera_main_rgb": [
+      224,
+      224,
+      3
+    ],
+    "data/timestamps": [],
+    "data/right_hand_joints": [
+      1
+    ],
+    "data/right_tactile_sensor_gripper": [],
+    "data/right_arm_joints": [
+      7
+    ],
+    "data/sub_task_instruction": [],
+    "data/right_tactile_area_gripper": [
+      1
+    ],
+    "data/right_hand_joints_idx": [
+      1
+    ],
+    "data/right_wrist_pose": [
+      6
+    ],
+    "data/right_tactile_data_gripper": [
+      1,
+      240,
+      320,
+      3
+    ]
+  },
+  "provenance": {
+    "release_commit": "d287c9c532514a08b2eb29bf1259997bb32f4f3b",
+    "frequency_policy": "https://github.com/michaelyuancb/ftp1-policy/issues/9#issuecomment-5437253164"
+  },
+  "notes": [
+    "RGB intensity is not normal force. No grayscale conversion is used as a pressure label.",
+    "Missing chunks are invalid data, not observed zero contact.",
+    "All original numeric and identity fields are preserved; only calibrated fields may be mapped to model supervision."
+  ]
+}

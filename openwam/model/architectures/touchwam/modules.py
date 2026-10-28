@@ -127,7 +127,9 @@ class TactileFlowBlock(nn.Module):
         query = self.norm_self(future) * (1 + scale_a) + shift_a
         valid = torch.cat((history_valid, future_valid), dim=1)
         future = future + self.self_attn(query, torch.cat((history, query), dim=1), valid)
-        va = torch.cat((self.video_read(video), self.action_read(action)), dim=1)
+        va = self.video_read(video)
+        if action is not None:
+            va = torch.cat((va, self.action_read(action)), dim=1)
         va_valid = torch.ones(va.shape[:2], dtype=torch.bool, device=va.device)
         future = future + self.read_va(self.read_norm(future), va, va_valid)
         future = future + self.ffn(self.norm_ffn(future) * (1 + scale_f) + shift_f)
@@ -138,7 +140,8 @@ class TactileFlowBlock(nn.Module):
         writable = torch.arange(video.shape[1], device=video.device) >= clean_video_tokens
         dv = dv * writable[None, :, None]
         video = video + self.video_gate.tanh() * dv
-        action = action + self.action_gate.tanh() * self.write_action(self.action_norm(action), memory, valid)
+        if action is not None:
+            action = action + self.action_gate.tanh() * self.write_action(self.action_norm(action), memory, valid)
         return future, video, action
 
 

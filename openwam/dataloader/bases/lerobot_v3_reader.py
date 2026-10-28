@@ -1205,6 +1205,12 @@ class LeRobotV3Reader(BaseDataset):
         if not root.is_dir():
             raise FileNotFoundError(f"{cls.__name__}: {root} does not exist")
         sub_dirs = sorted(d for d in root.iterdir() if d.is_dir() and (d / "meta" / "info.json").is_file())
+        includes = _get(config, "include_buckets")
+        if includes is not None:
+            wanted = set(includes)
+            sub_dirs = [p for p in sub_dirs if p.name in wanted]
+            if {p.name for p in sub_dirs} != wanted:
+                raise ValueError("Requested bucket selection contains absent data")
         if not sub_dirs:
             raise FileNotFoundError(f"{cls.__name__}: no sub-buckets with meta/info.json under {root}")
         logger.info("%s.from_config: root mode, %d buckets under %s", cls.__name__, len(sub_dirs), root)
@@ -1218,6 +1224,7 @@ class LeRobotV3Reader(BaseDataset):
             total_hours=total_hours,
             wrapper_cls=wrapper,
             source_name=cls.__name__,
+            strict=bool(_get(config, "strict_buckets", False)),
         )
 
 

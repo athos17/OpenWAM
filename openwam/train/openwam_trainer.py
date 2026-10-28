@@ -340,6 +340,9 @@ class OpenWAMTrainer:
                             grad_norm_val = self.accelerator.clip_grad_norm_(all_params, max_grad_norm)
                             grad_norm = torch.tensor(float(grad_norm_val), device=loss.device)
                         optimizer.step()
+                        if getattr(self, "_modality_optimizer", None) is not None:
+                            # Also clear activation after a ZeRO overflow-skipped step.
+                            self._modality_optimizer.reset_activation()
                         if scheduler is not None:
                             scheduler.step()
                         optimizer.zero_grad()
@@ -389,6 +392,21 @@ class OpenWAMTrainer:
     def build_optimizer(self) -> torch.optim.Optimizer:
         """AdamW over the per-module (action/video) LR parameter groups."""
         t = self.cfg.training
+        if getattr(self.architecture, "model_version", None) == "touchwam_regions_v1":
+            from openwam.train.utils.modality_optimizer import ModalityAwareAdamW, build_modality_groups
+
+            if str(getattr(t, "offload_optimizer_device", "none")) != "none":
+                raise ValueError("TouchWAM requires offload_optimizer_device=none to preserve its modality-aware optimizer")
+            params = build_modality_groups(
+                self.architecture,
+                action_lr=float(t.action_lr) if getattr(t, "action_lr", None) else None,
+                video_lr=float(t.video_lr) if getattr(t, "video_lr", None) else None,
+            )
+            self._modality_optimizer = ModalityAwareAdamW(
+                params, lr=float(t.learning_rate), weight_decay=float(t.weight_decay),
+                betas=tuple(getattr(t, "adam_betas", [0.9, 0.95])),
+            )
+            return self._modality_optimizer
         params = build_trainable_parameters(
             self,
             action_lr=float(t.action_lr) if getattr(t, "action_lr", None) else None,
@@ -433,7 +451,8 @@ class OpenWAMTrainer:
             self.dataset.training_layout = {
                 "world_size": world_size, "microbatch": batch_size,
                 "gradient_accumulation": int(getattr(t, "gradient_accumulation_steps", 1)),
-                "batching": "global_modality_v1" if mixed_modalities else "shuffled_windows",
+                "batching": ("global_modality_v2" if any("tactile" in m for m in self.dataset.source_modalities)
+                             else "global_modality_v1") if mixed_modalities else "shuffled_windows",
             }
             if mixed_modalities:
                 from openwam.dataloader.modality_sampler import GlobalModalitySampler
@@ -588,23 +607,32 @@ class OpenWAMTrainer:
         if not isinstance(batch, list):
             batch = [batch]
 
+        active_modality = None
+        if getattr(self, "_modality_optimizer", None) is not None:
+            from openwam.train.utils.modality_optimizer import validate_global_modality_layout
+
+            active_modality = validate_global_modality_layout(batch, self.accelerator.device)
+
         # Reject an external sampler that could deadlock ZeRO-2 before any
         # model backward starts. The normal mixture loader aligns these flags.
-        if (getattr(self, "accelerator", None) is not None and self.accelerator.num_processes > 1
-                and len(set(getattr(self.dataset, "source_modalities", []))) > 1):
+        if (active_modality is None and getattr(self, "accelerator", None) is not None and self.accelerator.num_processes > 1
+                and len(set(getattr(getattr(self, "dataset", None), "source_modalities", []))) > 1):
             import torch.distributed as dist
 
-            video = [sample.get("training_modality") == "video_only" for sample in batch]
-            code = 1 if all(video) else (0 if not any(video) else 2)
+            from openwam.dataloader.modality_sampler import batch_modality_code
+
+            code = batch_modality_code(batch)
             state = torch.tensor([code], dtype=torch.int64, device=self.accelerator.device)
             states = [torch.empty_like(state) for _ in range(self.accelerator.num_processes)]
             dist.all_gather(states, state)
             codes = [int(s.item()) for s in states]
-            if 2 in codes or len(set(codes)) != 1:
+            if -1 in codes or len(set(codes)) != 1:
                 raise ValueError(f"Distributed mixture requires aligned global modalities; got {codes}. Use GlobalModalitySampler.")
 
         inputs = self.architecture.prepare_inputs(batch)
-        if self.lambda_action > 0 and inputs.get("actions") is None:
+        has_action = any(sample.get("training_modality", "video_action")
+                         in ("video_action", "video_action_tactile") for sample in batch)
+        if self.lambda_action > 0 and has_action and inputs.get("actions") is None:
             raise ValueError("lambda_action > 0 but no action in data.")
 
         result = self.architecture.compute_loss(
@@ -612,15 +640,24 @@ class OpenWAMTrainer:
             lambda_video=self.lambda_video,
             lambda_action=self.lambda_action,
         )
+        if active_modality is not None:
+            self._modality_optimizer.activate(active_modality)
 
         losses = {
             "total": result["loss"],
             "video": result.get("loss_video", torch.tensor(0.0)),
             "action": result.get("loss_action", torch.tensor(0.0)),
         }
-        for key in ("tactile", "tactile_contact", "tactile_distance"):
+        for key in ("tactile", "tactile_contact", "tactile_distance", "tactile_deform", "tactile_intensity"):
             if f"loss_{key}" in result:
                 losses[key] = result[f"loss_{key}"]
+        for key in ("tactile_labeled_regions", "tactile_labeled_frames"):
+            losses[key] = result.get(key, 0.0)
+        modes = ("video_only", "video_action", "video_tactile", "video_action_tactile")
+        for mode in modes:
+            losses["samples_" + mode] = sum(s.get("training_modality", "video_action") == mode for s in batch)
+        for name in getattr(getattr(self, "dataset", None), "names", []):
+            losses["samples_source/" + name] = sum(s.get("_dataset_name") == name for s in batch)
         return losses
 
     # (10) Called each step in train()'s loop — progress bar, wandb log, debug loss-history CSV.
@@ -641,7 +678,7 @@ class OpenWAMTrainer:
     ) -> None:
         """Update progress bar, log to wandb, and (debug) write the loss-history CSV row."""
         labels = [("action", "loss_action")]
-        labels.extend((key, f"loss_{key}") for key in ("tactile", "tactile_contact", "tactile_distance")
+        labels.extend((key, f"loss_{key}") for key in ("tactile", "tactile_contact", "tactile_distance", "tactile_deform", "tactile_intensity")
                       if f"loss_{key}" in metrics)
         loss_total = metrics["loss_total"]
         loss_video = metrics["loss_video"]
@@ -668,6 +705,9 @@ class OpenWAMTrainer:
             }
             for name, key in labels:
                 log_dict[f"train/loss_{name}"] = metrics[key]
+            for key, value in metrics.items():
+                if key.startswith("samples_") or key.startswith("tactile_labeled_"):
+                    log_dict["data/" + key] = value
             wandb_run.log(log_dict, step=global_step)
 
         if not debug:

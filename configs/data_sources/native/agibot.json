@@ -1,0 +1,60 @@
+{
+  "schema": "touchwam_source_definition_v1",
+  "source_id": "agibot",
+  "embodiment": "a2d_dual_gripper",
+  "format": "lerobot_v3",
+  "fps": 30,
+  "supervision": [
+    "video",
+    "action",
+    "proprio"
+  ],
+  "camera_mapping": {
+    "head": "observation.images.head",
+    "left_wrist": "observation.images.hand_left",
+    "right_wrist": "observation.images.hand_right"
+  },
+  "action": {
+    "enabled": true,
+    "unified_dimension": 80,
+    "pose_target": "achieved native flange pose at t+1; terminal frame masked",
+    "pose_reference": "native_robot_base",
+    "pose_endpoint": "native_arm_flange",
+    "pose_unit": "meter",
+    "rotation": "first two rotation matrix columns",
+    "gripper_command": "recorded at t; reader converts native 0=open/1=closed",
+    "base_command": "recorded native forward and yaw command; lateral unavailable",
+    "must_not_claim": "Original controller TCP command reconstructed from next-state poses"
+  },
+  "proprio": {
+    "enabled": true,
+    "base_velocity": "unavailable and masked"
+  },
+  "tactile": {
+    "enabled": false,
+    "regions": [],
+    "missing_is_zero_contact": false
+  },
+  "normalization": {
+    "mode": "quantile",
+    "separate_action_state": true,
+    "rotation_identity": true,
+    "reuse_verified_stats": true
+  },
+  "selection": {
+    "hours": null,
+    "status": "deferred_to_training_recipe"
+  },
+  "splits": {
+    "policy": "preserve source train; no fabricated validation split"
+  },
+  "publication": {
+    "storage": "reuse original accepted dataset in place",
+    "quality_curation": "deferred; preserved accepted source selection",
+    "reuse_existing_dataset": "agibot_pretrain_v1",
+    "reprocessing": false,
+    "removed_by_user_request": [
+      "touchwam_pretrain_v1_20261028/agibot"
+    ]
+  }
+}

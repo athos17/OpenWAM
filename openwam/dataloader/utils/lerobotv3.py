@@ -684,6 +684,7 @@ def build_multibucket(
     wrapper_cls: type,
     source_name: str = "dataset",
     per_bucket_kwargs: Optional[Callable[[Path], Dict[str, Any]]] = None,
+    strict: bool = False,
 ) -> Any:
     """Construct N per-bucket readers from ``sub_dirs`` and wrap them.
 
@@ -729,6 +730,8 @@ def build_multibucket(
             # the reader's own diagnostic abort the launch.
             raise
         except Exception as e:
+            if strict:
+                raise RuntimeError(f"{source_name}: published bucket failed: {sub}") from e
             logger.warning("%s: skipping %s: %s", source_name, sub.name, e)
             return None
 
