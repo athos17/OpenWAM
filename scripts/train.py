@@ -91,6 +91,11 @@ def _build_accelerator(cfg: DictConfig):
         plugin.deepspeed_config["zero_optimization"].update(zero_overrides)
         if os.environ.get("LOCAL_RANK", "0") == "0":
             logger.info("DeepSpeed zero_optimization = %s", plugin.deepspeed_config["zero_optimization"])
+    # training.overlap_param_allgather: DeepSpeed's throughput timer runs a device-wide
+    # synchronize at the end of every engine.step, which would hold the host until the
+    # async parameter all-gather finishes; keep the timer, drop its synchronize.
+    if t.get("overlap_param_allgather", False):
+        plugin.deepspeed_config["timers"] = {"throughput": {"enabled": True, "synchronized": False}}
 
     return accelerate.Accelerator(
         gradient_accumulation_steps=grad_accum,

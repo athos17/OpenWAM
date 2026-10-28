@@ -112,6 +112,24 @@ def test_block_fusion_matches_eager(path, per_frame, gc):
         torch.testing.assert_close(grads[name], ref_grads[name], msg=name, **tol)
 
 
+def test_block_fusion_compiles_after_a_flop_counted_first_step():
+    """The trainer counts FLOPs on step 1 under FlopCounterMode; that call must not keep
+    the fused regions eager for the rest of training."""
+    import torch._dynamo.utils as dynamo_utils
+    from torch.utils.flop_counter import FlopCounterMode
+
+    torch._dynamo.reset()
+    fused_block._compiled.clear()
+    dynamo_utils.counters.clear()
+    backbone, _ = _backbone()
+    backbone.set_block_fusion(True)
+    with FlopCounterMode(display=False):
+        _video_forward(backbone, gc=False)
+    assert dynamo_utils.counters["stats"]["unique_graphs"] == 0
+    _video_forward(backbone, gc=False).sum().backward()
+    assert dynamo_utils.counters["stats"]["unique_graphs"] == 3
+
+
 def _small_vae():
     torch.manual_seed(4)
     model = wan_vae.VideoVAE38_(dim=16, z_dim=4, dec_dim=16).eval()

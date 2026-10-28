@@ -86,16 +86,16 @@ def _avg_down_add(x, shortcut_in, factor_t: int, factor_s: int, out_channels: in
 def _vae_fused(name):
     fn = _vae_fused_fns.get(name)
     if fn is None:
-        from openwam.model.compile_options import raise_recompile_limit
+        from openwam.model.compile_options import compile_outside_dispatch_modes, raise_recompile_limit
 
         raise_recompile_limit(64)
         if name == "norm_silu":
             # Shapes change with every encoder stage and temporal chunk: one dynamic graph.
-            fn = torch.compile(_norm_silu, dynamic=True)
+            fn = compile_outside_dispatch_modes(_norm_silu, dynamic=True)
         else:
             # Static: the dynamic-shape kernel for these views over channels_last input
             # faults (torch 2.7); only a handful of (stage, chunk) shapes occur.
-            fn = torch.compile(_avg_down_add, dynamic=False)
+            fn = compile_outside_dispatch_modes(_avg_down_add, dynamic=False)
         _vae_fused_fns[name] = fn
     return fn
 

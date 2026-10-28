@@ -25,7 +25,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-from openwam.model.compile_options import raise_recompile_limit
+from openwam.model.compile_options import compile_outside_dispatch_modes, raise_recompile_limit
 from openwam.model.video_backbone.wan.models.dit import flash_attention, modulate, split_time_modulation
 
 
@@ -78,7 +78,7 @@ def compiled(name: str):
     if fn is None:
         # One specialization per (robot / video-only, data source) token layout.
         raise_recompile_limit(64)
-        fn = torch.compile(_FNS[name], dynamic=False)
+        fn = compile_outside_dispatch_modes(_FNS[name], dynamic=False)
         _compiled[name] = fn
     return fn
 

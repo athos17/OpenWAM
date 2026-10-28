@@ -163,7 +163,9 @@ def _rope_apply_fp32(x, freqs, num_heads):
     cos = freqs.real.to(torch.float32)
     sin = freqs.imag.to(torch.float32)
     if _rope_fp32_compiled is None:
-        _rope_fp32_compiled = torch.compile(_rope_fp32, dynamic=False)
+        from openwam.model.compile_options import compile_outside_dispatch_modes
+
+        _rope_fp32_compiled = compile_outside_dispatch_modes(_rope_fp32, dynamic=False)
     if _rope_fp32_compiled is not False:
         try:
             return _rope_fp32_compiled(x, cos, sin, num_heads)

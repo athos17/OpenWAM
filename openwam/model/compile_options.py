@@ -226,6 +226,26 @@ def raise_recompile_limit(limit: int) -> None:
             setattr(dynamo_config, name, limit)
 
 
+def compile_outside_dispatch_modes(fn, **compile_kwargs):
+    """``torch.compile(fn)`` that runs ``fn`` eagerly while a TorchDispatchMode is active.
+
+    The trainer counts FLOPs on its first step under ``FlopCounterMode``; a compiled
+    function first called under such a mode is never compiled afterwards (Dynamo keeps
+    running it eagerly), so those calls take the eager function instead. Same FLOPs.
+    """
+    import torch
+    from torch.utils._python_dispatch import is_in_torch_dispatch_mode
+
+    compiled = torch.compile(fn, **compile_kwargs)
+
+    def call(*args, **kwargs):
+        if is_in_torch_dispatch_mode():
+            return fn(*args, **kwargs)
+        return compiled(*args, **kwargs)
+
+    return call
+
+
 __all__ = [
     "as_bool",
     "compile_enabled",
@@ -233,6 +253,7 @@ __all__ = [
     "cross_attn_compile_cfg",
     "cfg_get",
     "cfg_namespace",
+    "compile_outside_dispatch_modes",
     "idm_compile_cfg",
     "normalize_compile_enabled",
     "raise_recompile_limit",
