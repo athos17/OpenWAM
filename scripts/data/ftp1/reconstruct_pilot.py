@@ -228,6 +228,9 @@ def low_resolution_maps(current, reference, scale, height_size=(60, 80)):
     # Clip before area resize, matching the declared fixed-scale display codec.
     positive = np.clip(signed / scale, 0, 1)
     small = cv2.resize(positive, (32, 32), interpolation=cv2.INTER_AREA)
+    # INTER_AREA can overshoot by one float32 ULP for saturated patches.
+    # Preserve every in-range value and enforce the declared output boundary.
+    np.clip(small, 0, 1, out=small)
     return low, small, signed
 
 
@@ -369,7 +372,7 @@ def process_surface(bucket, info, episode, surface, output, weights, options, sc
               'reconstruction_valid_frames': int(reconstructed.sum()), 'reference_policy': 'episode-first-candidate',
               'reference_frame_index': 0, 'reference_confirmed_unloaded': False,
               'height_units': 'relative_reconstruction_units_not_mm_or_force_or_pressure',
-              'fixed_preview_scale': scale, 'normalization': 'clip(signed_height / fixed_scale, 0, 1), then area resize',
+              'fixed_preview_scale': scale, 'normalization': 'clip(area_resize(clip(signed_height / fixed_scale, 0, 1)), 0, 1)',
               'signed_height_shape': [count, 60, 80], 'positive_preview_shape': [count, 32, 32],
               'missing_values': 'NaN with false source/reconstruction mask; never measured zero',
               'signed_height_anchor': 'difference of two independently mean-zero Neumann reconstructions',
@@ -423,6 +426,7 @@ def run(args):
             'source_definition_sha256': sha256(definition_path), 'backend_sha256': sha256(mini.__file__),
             'runner_sha256': sha256(__file__), 'checkpoint_sha256': CHECKPOINT_SHA256,
             'options': options, 'fixed_preview_scale': args.preview_scale,
+            'preview_post_resize_boundary_clamp': '[0,1]; float32 interpolation roundoff only',
             'reference_policy': args.reference_policy, 'max_episodes': args.episodes}
     if identity_policy == 'declared_constant_area':
         plan['identity_evidence'] = [declared_area_evidence(bucket, info, surface, full_archive_index) for surface in surfaces]

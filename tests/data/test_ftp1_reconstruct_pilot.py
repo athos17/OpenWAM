@@ -205,3 +205,16 @@ def test_declared_area_does_not_repair_missing_sensor_or_type(tmp_path, module):
     module.pq.write_table(module.pa.Table.from_pydict(data), data_path)
     _, _, valid, derived, _ = module.episode_metadata(bucket, info, episode, feature, surface, 'declared_constant_area', full)
     assert valid.tolist() == [False, False, True] and derived.tolist() == [False, False, True]
+
+
+def test_saturated_area_resize_enforces_exact_float32_bounds(module):
+    zero = np.zeros((240, 320), np.float32)
+    _, saturated, _ = module.low_resolution_maps(zero + 40, zero, 20)
+    # OpenCV INTER_AREA produces 1.000000119 for this ratio without the
+    # post-resize boundary clamp. The representation promises exact [0,1].
+    np.testing.assert_array_equal(saturated, np.ones((32, 32), np.float32))
+    half = zero.copy()
+    half[:, 160:] = 10
+    expected = module.cv2.resize(np.clip(half / 20, 0, 1), (32, 32), interpolation=module.cv2.INTER_AREA)
+    _, actual, _ = module.low_resolution_maps(half, zero, 20)
+    np.testing.assert_array_equal(actual, expected)  # All already in-range values stay bitwise unchanged.

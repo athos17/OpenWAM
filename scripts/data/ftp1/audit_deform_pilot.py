@@ -110,7 +110,8 @@ def audit_surface(root, expected, plan, info, verify_hashes=True, full_archive=N
     require(region == expected['region_name'] and complete['region_id'] == REGION_NAMES.index(region), 'Region identity mismatch')
     require(complete['episode_index'] == expected['episode_index'], 'Episode identity mismatch')
     require(complete['fixed_preview_scale'] == plan['fixed_preview_scale'], 'Scale varies within an experiment')
-    require(complete['normalization'] == 'clip(signed_height / fixed_scale, 0, 1), then area resize', 'Unrecognized preview normalization')
+    require(complete['normalization'] in ('clip(signed_height / fixed_scale, 0, 1), then area resize',
+                                             'clip(area_resize(clip(signed_height / fixed_scale, 0, 1)), 0, 1)'), 'Unrecognized preview normalization')
     require(complete['options'] == plan['options'], 'Reconstruction options vary within experiment')
     require(complete['source_id'] == info['source_id'], 'Source identity mismatch')
     require(complete['height_units'] == 'relative_reconstruction_units_not_mm_or_force_or_pressure', 'Experimental height units changed')

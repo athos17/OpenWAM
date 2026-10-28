@@ -101,3 +101,5 @@ python scripts/data/ftp1/audit_deform_pilot.py \
 ```
 
 审计按 16 帧小块检查所有低分辨率图，不解码原视频或读取原归档，核对哈希、原帧区间、来源身份、NaN/mask、固定尺度、参考自差为零及 `train_valid`。输出 JSON 和小型 QA montage；该审计通过仅表示格式、来源与数值合同通过，不表示传感器标定通过。
+
+第二次真实数值验收发现 OpenCV `INTER_AREA` 在饱和区域会产生 `1.0000001192092896`（float32 一个 ULP）的边界舍入。实现增加 **post-resize boundary clamp**：归一化→area resize→再 `clip(0,1)`，保持所有已在范围内的值逐位不变。QA 继续要求严格 `[0,1]`；没有放宽边界或隐藏异常。回归测试包括全饱和原图与未饱和像素不变性。首次受影响输出未发布，修订代码从原 v3 触觉重新生成独立实验旁路。
