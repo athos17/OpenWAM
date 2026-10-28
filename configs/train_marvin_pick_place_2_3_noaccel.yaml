@@ -1,0 +1,38 @@
+# Speed control for train_marvin_pick_place_2_3_accel: same data, model, batch, LR schedule and RTC,
+# with every training-acceleration option back at its train.yaml default (DeepSpeed bucket defaults,
+# UMT5 padded to 512 without dedup, float frames from workers, default VAE convs, per-token time
+# modulation, masked joint attention, full-layer recompute on all 30 blocks). No checkpoints; stop it
+# by hand after a few hundred steps and compare step_timing.jsonl against the accel run.
+#   NNODES=2 NODE_RANK=<0|1> MASTER_ADDR=<node-0 ip> \
+#     bash scripts/train.sh --config-name train_marvin_pick_place_2_3_noaccel
+defaults:
+  - train_marvin_pick_place_2_3_accel
+  - _self_
+
+model:
+  architecture:
+    mot_split_attention: false
+
+training:
+  deepspeed_zero:
+    overlap_comm: null
+    contiguous_gradients: null
+    reduce_bucket_size: null
+    allgather_bucket_size: null
+  text_padding: max_length
+  text_dedup: false
+  video_uint8_in_workers: false
+  vae_cudnn_benchmark: false
+  vae_channels_last: false
+  frame_time_modulation: false
+  use_gradient_checkpointing: true
+  gradient_checkpointing_layers: null
+
+  output_path: /data/lyh/OpenWAM/outputs/noaccel_pick_place_2_3_v3
+  save_steps: 0
+  save_full_states_for_resume: false
+
+project:
+  output_dir: outputs/noaccel_pick_place_2_3_v3_2node_bs48ga1_rtc16
+  wandb:
+    run_name: noaccel_pick_place_2_3_v3_2node_bs48ga1_rtc16
