@@ -97,3 +97,41 @@ python scripts/data/ftp1/run_pilot_worker.py \
 
 运行完成以 `control/catalog.json`、各来源 BOS 发布回执与实际读取验收为准，
 不能仅凭提交作业或存在输出目录判断完成。
+
+## 真实执行与验收记录
+
+主转换作业 `job-5kr9ub4an5bn` 已 Succeeded。14 来源、60 episode、18,628 帧
+均已发布并完成原始暂存／生成视频的清理。主来源 payload 共 5,570,639,536 字节
+（约 5.19 GiB，包含首版实验记录），专用 PFS work 仅剩 18,645,752 字节的索引、
+manifest 与清理回执。
+
+独立读取验收共检查 539 个文件大小、285 项小元数据 SHA256，全部 episode
+边界与 180 行首／中／末帧映射；57 路视频实际解码 171 帧。
+生产 `LeRobotVideoIntensityDataset` 实际读取 42 个窗口，全部通过，保持
+`video_only` 且不伪造动作／触觉监督。此检查不等于模型 forward 或训练。
+
+Mini 修订作业 `job-wr53xgpsftkr` 已 Succeeded，三个来源均通过独立的
+来源、哈希、数值、缺失 mask 与固定尺度审计：
+
+| 来源 | episode | 时间帧 | 触觉面展开帧 | 数值有效重建 |
+|---|---:|---:|---:|---:|
+| Unit | 5 | 1,070 | 1,070 | 1,070 |
+| Unit_Bimanual | 5 | 699 | 1,398 | 1,398 |
+| VLA_touch | 5 | 296 | 296 | 296 |
+| 合计 | 15 | 2,065 | 2,764 | 2,764 |
+
+三个 Mini 来源现已全部发布到 `_deform/mini_v2/{source}`，payload 合计
+92,284,679 字节（约 88 MiB）；发布文件重开 SHA256 校验通过。
+该目录下 `_catalog/` 保存发布回执、代码快照与历史尝试证据。两次 Mini 尝试的
+临时输入和输出均已清理，work 目录各只保留一个 OWNER 记录。
+
+首个 Mini 作业 `job-19enx5czuxik` 在验收中检测到 float32 一个 ULP 的越界而
+停止，未发布其输出。修订作业使用独立快照和工作目录，复用验证后的 PFS
+硬链接输入，没有再次转换 v3 或重新复制视频。两个 attempt 的来源、错误、代码
+哈希、预检与运行记录保留。监控到的主转换与 Mini 暂存合计峰值约 3.35 GiB；
+它是采样到的最大值，硬链接按逻辑字节重复计数，不是物理分配的精确峰值。
+
+服务器最终相关代码回归 **90 passed**。证据位于控制目录的
+`validation/code_pytest_final.txt`、`validation/bos_all14_readonly.json` 与
+`deform_v2/attempt2/control/`。当前实验输出全部 `train_valid=false`，未经传感器
+标定或接触基线确认，不把数值审计通过解释成压力监督可用。
