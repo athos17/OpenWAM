@@ -1,0 +1,16 @@
+# train_h20_3src_s8b_gc20 + the A800 phase-3 options: compiled Wan block regions, fused VAE
+# RMS_norm+SiLU, and the ZeRO-2 parameter all-gather overlapped with the next batch's encode.
+# Measured (2 x 8 A800, scripts/perf/a800_3src.sh, steps 11-40 of 40): 5.23 s/step vs 6.06 for
+# s8b_gc20 (1.16x; block fusion 1.12x, VAE fusion 1.04x, all-gather overlap 1.03x on their own),
+# peak reserved 74.1 vs 76.7 GiB; mean loss over the 40 steps within 0.1% of two s8b_gc20 runs.
+# training.rope_impl=fp32 stays off (slower on A800; the block fusion applies RoPE in fp64 inside
+# its compiled region).
+defaults:
+  - train_h20_3src_s8b_gc20
+  - _self_
+
+training:
+  output_path: /data/lyh/perf_runs/h20_3src/s9
+  dit_block_fusion: true
+  vae_fused_norm: true
+  overlap_param_allgather: true
