@@ -67,3 +67,15 @@ def test_ownership_token_change_blocks_work_access(module, tmp_path):
     module.atomic_json(work / 'OWNER.json', dict(token, plan_sha256='wrong'))
     with pytest.raises(ValueError, match='ownership is missing or changed'):
         module.owner(setup)
+
+
+def test_retry_reuses_verified_inputs_without_copying_or_changing_old_files(module, tmp_path):
+    source = tmp_path / 'old/input.bin'
+    source.parent.mkdir()
+    source.write_bytes(b'unchanged original converted bytes')
+    target = tmp_path / 'retry/input.bin'
+    size, checksum = module.sha256_file(source)
+    module.copy_checked(source, target, size, checksum, hardlink=True)
+    assert source.stat().st_ino == target.stat().st_ino
+    source.unlink()
+    assert module.sha256_file(target) == (size, checksum)

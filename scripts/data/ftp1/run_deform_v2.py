@@ -49,12 +49,19 @@ def selected_inputs(manifest, bucket):
     return result
 
 
-def copy_checked(source, target, size, checksum):
+def copy_checked(source, target, size, checksum, *, hardlink=False):
     if target.exists():
         if sha256_file(target) != (size, checksum):
             raise ValueError(f'Existing minimal input conflicts: {target}')
         return
     target.parent.mkdir(parents=True, exist_ok=True)
+    if hardlink:
+        if sha256_file(source) != (size, checksum):
+            raise ValueError('Reusable minimal input changed')
+        os.link(source, target)
+        if sha256_file(target) != (size, checksum):
+            raise ValueError('Reused minimal input failed readback')
+        return
     partial = target.with_name(target.name + '.partial')
     with source.open('rb') as src, partial.open('wb') as dst:
         shutil.copyfileobj(src, dst, 8 * 1024**2)
@@ -79,6 +86,11 @@ def owner(setup):
 def check_budget(setup):
     plan, work = owner(setup)
     size = bytes_under(work)
+    if plan.get('prior_work'):
+        prior = Path(plan['prior_work'])
+        if prior.is_symlink() or read(prior / 'OWNER.json') != plan['prior_work_owner']:
+            raise ValueError('Prior attempt work ownership changed')
+        size += bytes_under(prior)
     main_bytes = 0
     def scan_error(error):
         if not isinstance(error, FileNotFoundError):
@@ -143,6 +155,15 @@ def prepare(args):
             'main_work': str(logical_path(main_plan['output']).parent), 'max_combined_work_bytes': 10 * 1024**3,
             'input_bytes': total, 'code_manifest_sha256': sha256_file(setup / 'code_manifest.json')[1],
             'source_plan_sha256': digest(main_plan), 'training_enabled': False}
+    if args.reuse_input_root:
+        reusable = logical_path(args.reuse_input_root)
+        prior = reusable.parent
+        if reusable.name != 'input' or prior.resolve().is_relative_to(work.resolve()) or work.resolve().is_relative_to(prior.resolve()):
+            raise ValueError('Reusable input must belong to a separate prior attempt work')
+        prior_owner = read(prior / 'OWNER.json')
+        if prior_owner.get('schema') != VERSION or prior_owner.get('work') != str(prior):
+            raise ValueError('Reusable input has no matching prior work ownership')
+        plan.update(prior_work=str(prior), prior_work_owner=prior_owner, reuse_input_root=str(reusable))
     token = {'schema': VERSION, 'plan_sha256': digest(plan), 'work': str(work)}
     if work.exists() and any(work.iterdir()) and not (work / 'OWNER.json').exists():
         raise ValueError('Refusing nonempty v2 work without ownership')
@@ -154,8 +175,10 @@ def prepare(args):
         input_root = checked_path(work, 'input/' + source['source'])
         for entry in source['inputs']:
             src = Path(entry['path']) if entry.get('full_archive_evidence') else checked_path(bos / source['source'], entry['path'])
+            if plan.get('reuse_input_root'):
+                src = checked_path(Path(plan['reuse_input_root']), source['source'] + '/' + entry['input_relative'])
             target = checked_path(input_root, entry['input_relative'])
-            copy_checked(src, target, entry['bytes'], entry['sha256'])
+            copy_checked(src, target, entry['bytes'], entry['sha256'], hardlink=bool(plan.get('reuse_input_root')))
             check_budget(setup)
         atomic_json(setup / 'control/inputs' / (source['source'] + '.json'), source)
     atomic_json(setup / 'control/prepared.json', {'plan_sha256': digest(plan), 'input_bytes': total, 'complete': True})
@@ -274,7 +297,30 @@ def publish_results(args):
     atomic_json(folder / 'catalog.json', catalog)
     shutil.copyfile(setup / 'code_manifest.json', folder / 'code_manifest.json')
     shutil.copyfile(setup / 'code_v2.tar.gz', folder / 'code_v2.tar.gz')
+    if plan.get('prior_work'):
+        prior = Path(plan['prior_work'])
+        for path in (prior / 'output').rglob('*.json'):
+            if path.name in {'experiment.json', 'complete.json', 'plan.json', 'representation_audit.json', 'execution_provenance.json'}:
+                target = folder / 'prior_attempt_evidence' / path.relative_to(prior)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, target)
+        prior_setup = setup.parent
+        for name in ('control/error.json', 'control/plan.json', 'cpu_job.json', 'job_status_latest.json', 'code_manifest.json'):
+            source_path = prior_setup / name
+            if source_path.exists():
+                target = folder / 'prior_attempt_evidence' / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source_path, target)
     receipt = publish(folder, Path(plan['bos_root']) / '_deform/mini_v2/_catalog', max_bytes=16 * 1024**2)
+    if plan.get('prior_work'):
+        prior = Path(plan['prior_work'])
+        if read(prior / 'OWNER.json') != plan['prior_work_owner']:
+            raise ValueError('Refusing prior attempt cleanup after ownership change')
+        for relative in ('input', 'output'):
+            path = checked_path(prior, relative)
+            if path.exists():
+                bytes_under(path)
+                shutil.rmtree(path)
     atomic_json(setup / 'control/complete.json', {'plan_sha256': digest(plan), 'catalog_publication': receipt,
                                                'remaining_work_bytes': bytes_under(work), 'complete': True})
     print(json.dumps({'event': 'mini_v2_published', 'sources': records}), flush=True)
@@ -287,6 +333,7 @@ def main():
     parser.add_argument('--main-setup')
     parser.add_argument('--bos-root')
     parser.add_argument('--work')
+    parser.add_argument('--reuse-input-root', help='Verified PFS inputs from a retained failed attempt; hardlink without copying')
     args = parser.parse_args()
     try:
         {'prepare': prepare, 'worker': worker, 'publish': publish_results}[args.operation](args)
