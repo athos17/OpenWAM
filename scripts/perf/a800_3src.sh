@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # A800 probe of the three-source recipe (configs/train_h20_3src_*.yaml) on the vePFS copies under
-# /gaozt-test1/lyh: same EgoDex/AgiBot subsets + SharpaDex and the same pretrain checkpoint as the H20
-# probe, with A800 settings (no allocator cap: real 80 GB; 312 TFLOPS bf16 peak for MFU).
+# /gaozt-test1/lyh: same EgoDex/AgiBot subsets and pretrain checkpoint as the H20 probe, SharpaDex cut
+# to buckets_sub (smallest partition of each of the 59 tasks, 3 training cameras; the full set is
+# 369 GB of video), with A800 settings (no allocator cap: real 80 GB; 312 TFLOPS bf16 peak for MFU).
 #
 #   TAG=<run name> [CONFIG=train_h20_3src_s8b_gc20] [PROFILE=1] \
 #   [NNODES=2 NODE_RANK=<0|1> MASTER_ADDR=192.168.0.235] bash scripts/perf/a800_3src.sh [extra hydra overrides]
@@ -35,7 +36,7 @@ PROFILE_ARGS=()
 bash scripts/train.sh --config-name "$CONFIG" \
   dataloader.datasets.egodex.dataset_dir="$DATA/h20_profile_subset/egodex_300h_video_v1_sub" \
   dataloader.datasets.agibot.dataset_dir="$DATA/h20_profile_subset/agibot_pretrain_v1_sub" \
-  dataloader.datasets.sharpa.dataset_dir="$DATA/sharpadex_eef_global_v1/buckets" \
+  dataloader.datasets.sharpa.dataset_dir="$DATA/sharpadex_eef_global_v1/buckets_sub" \
   training.finetune_ckpt_path="$ROOT/models/OpenWAM-Alpha-Pretrain-Foundation-Model/checkpoint_step_154000.safetensors" \
   training.max_gpu_memory_gib=null training.step_timing.peak_tflops=312 \
   training.output_path="$PERF_ROOT/$TAG" project.output_dir="$PERF_ROOT/$TAG" \
