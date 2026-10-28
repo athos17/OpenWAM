@@ -17,6 +17,10 @@ training:
   dit_block_fusion: true
   vae_fused_norm: true
   overlap_param_allgather: true
+  # One worker decodes a whole 48-clip batch (33 frames, 3 cameras) in ~70 s on these nodes;
+  # 8 workers only feed ~8.7 s/step vs ~4.8 s of GPU work (every 8th step waited ~30 s).
+  # 14 x 8 ranks = 112 decoders on 2 x 32 cores / 128 threads per node.
+  dataset_num_workers: 14
   step_timing:
     peak_tflops: 312              # A800 dense bf16
   output_path: /gaozt-test1/lyh/outputs/accel_pick_place_2_3_v3_a800
