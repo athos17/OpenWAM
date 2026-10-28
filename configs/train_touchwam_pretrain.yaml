@@ -22,7 +22,7 @@ training:
   zero_stage: 2
   offload_optimizer_device: none
   save_full_states_for_resume: true
-  keep_last_k_ckpts: -1
+  keep_last_k_ckpts: 3  # Keep resumable pairs on PFS; -1 explicitly opts into retaining all.
   output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_pretrain_v1}
 
 project:

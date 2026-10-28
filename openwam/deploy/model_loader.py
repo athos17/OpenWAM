@@ -521,7 +521,7 @@ def _resolve_normalization_source(cfg: DictConfig, ckpt_dir: str, source: Option
     if source is None or source not in package["sources"]:
         raise ValueError(f"Mixture deployment requires normalization_source from {names}; got {source!r}")
     entry = package["sources"][source]
-    if entry["training_modality"] != "video_action":
+    if entry["training_modality"] not in ("video_action", "video_action_tactile"):
         raise ValueError(f"Source {source!r} has no action supervision and cannot define a robot policy")
     # Training-only fields may contain Hydra resolvers (e.g. ${now:...})
     # unavailable in a standalone deploy process. Source config is already

@@ -65,6 +65,21 @@ def build_dataset(config, split: str = "train") -> BaseDataset:
         from openwam.dataloader.publication import source_publication_contract
         publication = source_publication_contract(config)
     dataset = cls.from_config(config, split=split)
+    source_kind = get_cfg(config, "source_kind")
+    if get_cfg(config, "source_family") == "ftp1":
+        if source_kind not in (None, "robot"):
+            raise ValueError("FTP sources must have robot actions; ego routing is forbidden")
+        source_kind = "robot"
+    allowed = {"ego": {"video_only", "video_tactile"},
+               "robot": {"video_action", "video_action_tactile"}}
+    if source_kind is not None:
+        if source_kind not in allowed:
+            raise ValueError(f"Unknown source_kind {source_kind!r}")
+        groups = getattr(dataset, "modality_groups", None)
+        modes = set(groups) if groups else {getattr(dataset, "training_modality", "video_action")}
+        expected = set(get_cfg(config, "expected_modalities", list(allowed[source_kind])))
+        if not expected or not expected <= allowed[source_kind] or not modes <= expected:
+            raise ValueError(f"{source_kind} source declares {expected} but emits {modes}; modality fallback is forbidden")
     if publication is not None:
         dataset.publication_contract = publication
     return dataset
@@ -103,6 +118,8 @@ def _register_builtins():
     register_dataset("sharpadex_native_tcp")(SharpaDexNativeTCPDataset)
     register_dataset("sharpadex_native_intensity")(SharpaNativeIntensityDataset)
     register_dataset("lerobot_video_intensity")(LeRobotVideoIntensityDataset)
+    from openwam.dataloader.robot_intensity import LeRobotRobotIntensityDataset
+    register_dataset("lerobot_robot_intensity")(LeRobotRobotIntensityDataset)
     register_dataset("egodex_reuse_video")(EgoDexReuseVideoDataset)
 
     from openwam.dataloader.egodex_video import EgoDexVideoDataset

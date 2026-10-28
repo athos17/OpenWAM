@@ -258,13 +258,20 @@ def save_weights(accelerator, architecture, output_path: str, global_step: int, 
     logger.info(msg)
     tqdm.write(msg)
     state_dict = accelerator.get_state_dict(architecture)
-    accelerator.unwrap_model(architecture).save_checkpoint(ckpt_path, state_dict=state_dict)
+    temporary_path = os.path.join(output_path, f".checkpoint_step_{global_step}.safetensors.tmp")
+    try:
+        accelerator.unwrap_model(architecture).save_checkpoint(temporary_path, state_dict=state_dict)
+        os.replace(temporary_path, ckpt_path)
+    finally:
+        if os.path.isfile(temporary_path):
+            os.remove(temporary_path)
     msg = f"[checkpoint] Saved{' final' if final else ''}: {ckpt_path}"
     logger.info(msg)
     tqdm.write(msg)
 
 
-def save_full_state(accelerator, output_path: str, global_step: int, opt_step: int, epoch: int) -> None:
+def save_full_state(accelerator, output_path: str, global_step: int, opt_step: int, epoch: int,
+                    *, batches_per_epoch: int | None = None, grad_accum: int | None = None) -> None:
     """Write full Accelerate state to ``accel_state_step_N/`` for resume.
 
     ALL ranks enter (DeepSpeed shards optimizer state per-rank). rank-0 writes the
@@ -273,19 +280,33 @@ def save_full_state(accelerator, output_path: str, global_step: int, opt_step: i
     """
     import json
 
+    if any(type(value) is not int or value < 0 for value in (global_step, opt_step, epoch)):
+        raise ValueError("Saved global_step, opt_step and epoch must be nonnegative integers")
     state_dir = os.path.join(output_path, f"accel_state_step_{global_step}")
+    if (batches_per_epoch is None) != (grad_accum is None):
+        raise ValueError("Checkpoint layout requires both batches_per_epoch and grad_accum")
+    if batches_per_epoch is not None:
+        compute_resume_position(global_step, batches_per_epoch, grad_accum, require_boundary=True)
     if accelerator.is_main_process:
         os.makedirs(state_dir, exist_ok=True)
+        # A retried write must not retain an earlier completion marker.
+        marker = os.path.join(state_dir, "trainer_state.json")
+        if os.path.isfile(marker):
+            os.remove(marker)
     accelerator.wait_for_everyone()
     accelerator.save_state(state_dir)
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         meta = {"global_step": int(global_step), "opt_step": int(opt_step), "epoch": int(epoch)}
+        if batches_per_epoch is not None:
+            meta.update(checkpoint_format_version=2, optimizer_boundary=True,
+                        batches_per_epoch=int(batches_per_epoch), gradient_accumulation_steps=int(grad_accum))
         meta_path = os.path.join(state_dir, "trainer_state.json")
         tmp_path = meta_path + ".tmp"
         with open(tmp_path, "w") as f:
             json.dump(meta, f)
         os.replace(tmp_path, meta_path)
+    accelerator.wait_for_everyone()
 
 
 def load_full_state(accelerator, state_dir: str) -> dict:
@@ -364,18 +385,30 @@ def find_latest_accel_state(run_dir: str) -> str | None:
 # --- Resume position (pure math) ---
 
 
-def compute_resume_position(global_step: int, batches_per_epoch: int, grad_accum: int) -> tuple[int, int, int]:
+def compute_resume_position(global_step: int, batches_per_epoch: int, grad_accum: int,
+                            *, require_boundary: bool = False) -> tuple[int, int, int]:
     """Map a resumed ``global_step`` to ``(start_epoch, skip_first_batches, aligned_global_step)``.
 
     ``skip`` is floored to a grad_accum boundary so the first optimizer step after
     resume sees a full accumulation cycle; ``aligned_global_step`` pulls ``global_step``
     back to that same boundary so the floored-off batches are not re-trained and the
     per-step seed (keyed on global_step) stays matched. No-op at grad_accum=1.
+    Production resume passes require_boundary=True and rejects partial windows
+    instead; the flooring behavior is retained only for legacy helper callers.
     """
-    batches_per_epoch = max(batches_per_epoch, 1)
+    if any(type(value) is not int for value in (global_step, batches_per_epoch, grad_accum)):
+        raise ValueError("Resume steps, epoch length and accumulation must be integers")
+    if global_step < 0 or batches_per_epoch < 1 or grad_accum < 1:
+        raise ValueError("Resume step must be nonnegative; epoch length and accumulation must be positive")
     start_epoch = global_step // batches_per_epoch
     skip = global_step % batches_per_epoch
     if grad_accum > 1 and skip % grad_accum != 0:
+        if require_boundary:
+            raise ValueError(
+                f"Step {global_step} is inside a gradient accumulation window "
+                f"(batches_per_epoch={batches_per_epoch}, gradient_accumulation_steps={grad_accum}); "
+                "use an optimizer boundary or an epoch boundary."
+            )
         skip = (skip // grad_accum) * grad_accum
     aligned_global_step = start_epoch * batches_per_epoch + skip
     return start_epoch, skip, aligned_global_step
@@ -384,15 +417,25 @@ def compute_resume_position(global_step: int, batches_per_epoch: int, grad_accum
 # --- Retention / finalize (prune) ---
 
 
+def validate_checkpoint_retention(keep_last_k: int) -> None:
+    """-1 keeps all checkpoints; positive integers keep that many recent ones."""
+    if type(keep_last_k) is not int or keep_last_k == 0 or keep_last_k < -1:
+        raise ValueError("keep_last_k_ckpts must be -1 (keep all) or a positive integer")
+
+
 def manage_checkpoints(output_dir: str, keep_last_k: int):
     """Keep only the most recent *keep_last_k* checkpoints.
 
     Prunes ``checkpoint_step_*`` (weights, files) and ``accel_state_step_*``
     (resume state, dirs) in lockstep so a kept weights file always retains its
-    sibling state dir.
+    sibling state dir. ``-1`` retains all pairs; zero/other negative values fail
+    before any filesystem mutation.
     """
     import shutil
 
+    validate_checkpoint_retention(keep_last_k)
+    if keep_last_k == -1:
+        return
     files = _glob.glob(os.path.join(output_dir, "checkpoint_step_*"))
     files.sort(key=lambda p: step_num(p, "checkpoint_step_"))
     while len(files) > keep_last_k:
@@ -420,6 +463,7 @@ def finalize_keep_weights_only(output_dir: str, keep_last_k: int = 1):
     """
     import shutil
 
+    validate_checkpoint_retention(keep_last_k)
     for d in _glob.glob(os.path.join(output_dir, "accel_state_step_*")):
         if os.path.isdir(d):
             try:
@@ -430,7 +474,7 @@ def finalize_keep_weights_only(output_dir: str, keep_last_k: int = 1):
 
     files = _glob.glob(os.path.join(output_dir, "checkpoint_step_*.safetensors"))
     files.sort(key=lambda p: step_num(p, "checkpoint_step_"))
-    num_to_remove = max(0, len(files) - keep_last_k)
+    num_to_remove = 0 if keep_last_k == -1 else max(0, len(files) - keep_last_k)
     for old in files[:num_to_remove]:
         if os.path.isfile(old):
             os.remove(old)

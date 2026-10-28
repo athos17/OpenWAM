@@ -73,6 +73,11 @@ class HomogeneousPublishedBuckets(MultiLeRobotV3Reader):
             raise ValueError("Split differing supervision modes into separate mixture sources")
         self.training_modality = modes.pop()
         self.normalization_stats_path = None
+        paths = [getattr(b, "normalization_stats_path", None) for b in buckets]
+        if any(paths):
+            if not all(paths) or len({Path(p).resolve(strict=True) for p in paths}) != 1:
+                raise ValueError("A normalized source must use one shared action/state statistics artifact across buckets")
+            self.normalization_stats_path = str(Path(paths[0]).resolve(strict=True))
 
     def set_epoch(self, epoch):
         for b in self.buckets:
@@ -162,6 +167,8 @@ class LeRobotVideoIntensityDataset(BaseDataset):
     action_dim = 80
     normalization_stats = None
     normalization_stats_path = None
+    SOURCE_KIND = "ego"
+    EXTRA_CONFIG_FIELDS = ()
 
     def __init__(self, dataset_dir, *, split="train", sampling_fps=30, num_frames=33,
                  video_stride=4, window_stride=1, height=384, width=320,
@@ -174,6 +181,9 @@ class LeRobotVideoIntensityDataset(BaseDataset):
             raise ValueError("Expected an actual LeRobot v3 dataset")
         definition = self.root / "meta/source_definition.json"
         self.definition = json.loads(definition.read_text()) if definition.exists() else {}
+        robot = self.definition.get("source_kind") == "robot" or str(self.definition.get("source_id", "")).startswith("ftp1/")
+        if robot and self.SOURCE_KIND != "robot":
+            raise ValueError("Robot/FTP data requires an action reader; V/VT fallback is forbidden")
         if self.definition.get("training_ready") is False or self.definition.get("physical_time_verified") is False:
             raise ValueError(f"Source has unresolved training/time contract: {self.root}")
         self.fps, self.sampling_fps = float(self.info["fps"]), float(sampling_fps)
@@ -325,7 +335,7 @@ class LeRobotVideoIntensityDataset(BaseDataset):
             table["episode_index"].to_numpy(zero_copy_only=False) == episode_id
         ):
             raise ValueError("Episode metadata includes rows belonging to a different episode")
-        return float(times[0]), float(times[-1])
+        return float(times[0]), float(times[0]) + (length - 1) / self.fps
 
     def __getitem__(self, index):
         if not 0 <= index < len(self):
@@ -344,7 +354,9 @@ class LeRobotVideoIntensityDataset(BaseDataset):
         first = table.slice(int(row["_data_offset"]) + offset, 1).to_pylist()[0]
         if "episode_index" in first and int(first["episode_index"]) != int(row.episode_index):
             raise ValueError("Episode metadata addresses a different physical episode")
-        ref = float(first.get("timestamp", offset / self.fps))
+        # _episode_clock has validated recorded timestamps against this grid.
+        # A float32 timestamp just below t must not discard the current tactile frame.
+        ref = clock_start + offset / self.fps
         relative = np.rint(self.video_offsets_s * self.fps).astype(np.int64)
         valid = offset + relative < length
         requested = (offset + relative).clip(max=length - 1)
@@ -389,6 +401,7 @@ class LeRobotVideoIntensityDataset(BaseDataset):
         sample = {"video": video, "video_mask": torch.from_numpy(valid), "prompt": prompt,
                   "first_frame_image": [video[0]], "vace_video": None,
                   "training_modality": self.training_modality, "source_id": self.source_id,
+                  "source_kind": self.SOURCE_KIND,
                   "episode_id": int(row.episode_index), "episode_start_frame": offset}
         if self.touch:
             sample.update(self.touch.window(int(row.episode_index), ref,
@@ -400,7 +413,7 @@ class LeRobotVideoIntensityDataset(BaseDataset):
         root = Path(get_cfg(config, "dataset_dir"))
         fields = ("sampling_fps", "num_frames", "video_stride", "window_stride", "height", "width",
                   "camera_layout", "tactile_mode", "tactile_map_size", "history_times", "future_times",
-                  "color_jitter", "seed")
+                  "color_jitter", "seed") + cls.EXTRA_CONFIG_FIELDS
         kwargs = {k: get_cfg(config, k) for k in fields if get_cfg(config, k) is not None}
         total_hours = get_cfg(config, "total_hours")
         if (root / "meta/info.json").exists():

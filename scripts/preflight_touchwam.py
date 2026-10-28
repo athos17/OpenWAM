@@ -23,6 +23,130 @@ from openwam.dataloader.publication import source_publication_contract
 from openwam.dataloader.registry import build_dataset
 
 
+MODALITIES = {
+    "ego": {"video_only", "video_tactile"},
+    "robot": {"video_action", "video_action_tactile"},
+}
+
+
+def validate_source_contract(name, source):
+    """A robot source must never silently become an ego V/VT source."""
+    kind = source.get("source_kind")
+    expected = source.get("expected_modalities")
+    if kind not in MODALITIES:
+        raise ValueError("Each source requires source_kind: ego or robot")
+    if isinstance(expected, str) or not expected:
+        raise ValueError("Each source requires an explicit expected_modalities list")
+    expected = list(expected)
+    if len(set(expected)) != len(expected) or set(expected) - MODALITIES[kind]:
+        raise ValueError(f"{kind} sources allow only {sorted(MODALITIES[kind])}")
+    family = str(source.get("source_family", "")).lower()
+    path_parts = Path(str(source.get("dataset_dir", ""))).parts
+    ftp = family == "ftp1" or name.lower().startswith(("ftp_", "ftp1_")) or "ftp1" in path_parts
+    if ftp and kind != "robot":
+        raise ValueError("FTP-1 is a robot source and requires measured action supervision")
+    if kind == "robot" and source.get("type") in ("lerobot_video_intensity", "egodex_reuse_video"):
+        raise ValueError("Robot sources require an action reader; V/VT readers are forbidden")
+    return {"source_kind": kind, "expected_modalities": expected}
+
+
+def validate_training_schedule(training):
+    """Match the trainer's checkpoint and optimizer-boundary semantics."""
+    for key in ("gradient_accumulation_steps", "batch_size"):
+        value = training.get(key, 1)
+        if type(value) is not int or value < 1:
+            raise ValueError(f"{key} must be a positive integer")
+    keep = training.get("keep_last_k_ckpts", 1)
+    if type(keep) is not int or (keep != -1 and keep < 1):
+        raise ValueError("keep_last_k_ckpts must be -1 (all) or a positive integer")
+    for key in ("max_steps", "num_epochs"):
+        value = training.get(key)
+        if value is not None and (type(value) is not int or value < 1):
+            raise ValueError(f"{key} must be null or a positive integer")
+    if training.get("max_steps") is None and training.get("num_epochs") is None:
+        raise ValueError("Training needs num_epochs or max_steps")
+    save = training.get("save_steps")
+    if save is not None and (type(save) is not int or save < 0):
+        raise ValueError("save_steps must be null or a nonnegative integer")
+    if type(training.get("save_full_states_for_resume", False)) is not bool:
+        raise ValueError("save_full_states_for_resume must be boolean")
+    accum = training.get("gradient_accumulation_steps", 1)
+    deferred = [key for key in ("save_steps", "max_steps")
+                if training.get(key) and training[key] % accum]
+    return {"gradient_accumulation_steps": accum, "keep_last_k_ckpts": keep,
+            "checkpoint_and_stop_boundary": "optimizer_update_or_epoch_end",
+            "deferred_boundary_settings": deferred}
+
+
+def validate_tactile_sample(sample, spec):
+    """Exercise the real collator with the live model contract, without loading weights."""
+    from openwam.tactile.regions import collate_regions
+
+    if spec is None:
+        raise ValueError("Tactile preflight requires the resolved model tactile specification")
+    for key in ("map_size", "history", "future_frames", "future_stride", "fps"):
+        if type(spec[key]) is not int or spec[key] < 1:
+            raise ValueError(f"Model tactile {key} must be a positive integer")
+    sensors = list(spec["sensor_names"])
+    if not sensors or len(set(sensors)) != len(sensors) or any(not isinstance(s, str) or not s for s in sensors):
+        raise ValueError("Model sensor_names must be nonempty and unique")
+    expected = {
+        "tactile_history_times_s": torch.arange(1 - spec["history"], 1, dtype=torch.float64) / spec["fps"],
+        "future_tactile_times_s": torch.arange(1, spec["future_frames"] + 1, dtype=torch.float64)
+            * spec["future_stride"] / spec["fps"],
+    }
+    for key, grid in expected.items():
+        if key not in sample:
+            raise ValueError(f"Intensity samples require explicit {key}")
+        times = torch.as_tensor(sample[key], dtype=torch.float64).cpu()
+        if times.shape != grid.shape or not torch.allclose(times, grid, atol=1e-6, rtol=0):
+            raise ValueError(f"Dataset/model {key} differ; resample to the configured model grid")
+    batch = collate_regions(
+        [sample], map_size=spec["map_size"], history=spec["history"], future_frames=spec["future_frames"],
+        region_names=list(spec["region_names"]), sensor_names=sensors, codec=spec["codec"],
+    )
+    present = batch["tactile_layout_present"]
+    spatial = batch["tactile_spatial_valid"]
+    query = batch["tactile_query_mask"]
+    measured_region = present & spatial.flatten(2).any(-1)
+    if (query & ~measured_region[:, None]).any():
+        raise ValueError("Tactile queries require a present region with a nonempty spatial ROI")
+    counts = {}
+    for key, validity in (("tactile_maps", "tactile_valid"), ("future_tactile_maps", "future_tactile_valid")):
+        valid = batch[validity]
+        if (valid & ~measured_region[:, None]).any():
+            raise ValueError(f"{validity} labels a region absent from the layout or spatial ROI")
+        pixels = valid[..., None, None, None] & spatial[:, None]
+        observed = batch[key][pixels]
+        if not torch.isfinite(observed).all() or (observed < 0).any() or (observed > 1).any():
+            raise ValueError("Observed tactile intensity outside [0,1]")
+        counts[validity] = int(valid.sum())
+    for key, validity, grid_key in (
+        ("tactile_history_source_times_s", "tactile_valid", "tactile_history_times_s"),
+        ("future_tactile_source_times_s", "future_tactile_valid", "future_tactile_times_s"),
+    ):
+        if key not in sample:
+            continue
+        times = torch.as_tensor(sample[key], dtype=torch.float64).cpu()
+        measured = batch[validity][0].any(-1).cpu()
+        if times.shape != expected[grid_key].shape or not torch.isfinite(times[measured]).all():
+            raise ValueError(f"Invalid measured {key}")
+        if grid_key == "tactile_history_times_s":
+            if (times[measured] > expected[grid_key][measured] + 1e-6).any():
+                raise ValueError("Tactile history must not borrow future measurements")
+        elif (times[measured] <= 0).any():
+            raise ValueError("Future tactile supervision requires strictly future measurements")
+    # Availability of a future label never determines the prediction query.
+    effective = batch["future_tactile_valid"] & query
+    return {"regions": list(sample["tactile_region_names"]),
+            "history_observations": counts["tactile_valid"],
+            "future_labels": counts["future_tactile_valid"],
+            "supervised_future_regions": int(effective.sum()),
+            "history_shape": list(batch["tactile_maps"].shape),
+            "future_shape": list(batch["future_tactile_maps"].shape),
+            "collator_validated": True}, bool(effective.any())
+
+
 def atomic_json(path, obj):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -31,14 +155,21 @@ def atomic_json(path, obj):
     tmp.replace(path)
 
 
-def validate_sample(sample, mode):
-    from openwam.tactile.registry import REGION_NAMES
+def validate_sample(sample, mode, *, tactile_spec=None, source_kind=None, expected_modalities=None):
+    if mode not in MODALITIES["ego"] | MODALITIES["robot"]:
+        raise ValueError(f"Unknown training modality: {mode}")
+    if source_kind is not None and mode not in MODALITIES[source_kind]:
+        raise ValueError(f"{source_kind} source unexpectedly emits {mode}")
+    if expected_modalities is not None and mode not in expected_modalities:
+        raise ValueError(f"Source unexpectedly emits {mode}; expected {list(expected_modalities)}")
     if sample.get("training_modality", "video_action") != mode:
         raise ValueError("Sample and dataset supervision modes differ")
     video = sample["video"]
     if not video or any(im.size != video[0].size for im in video):
         raise ValueError("Inconsistent scene video")
-    valid = torch.as_tensor(sample["video_mask"], dtype=torch.bool)
+    valid = torch.as_tensor(sample["video_mask"])
+    if valid.dtype != torch.bool or valid.shape != (len(video),):
+        raise ValueError("video_mask must be bool [video_frames]")
     if not valid[0]:
         raise ValueError("Missing observed image prefix")
     supervised = bool(valid[1:].any())
@@ -47,33 +178,34 @@ def validate_sample(sample, mode):
     action = mode in ("video_action", "video_action_tactile")
     if not action and any(k in sample for k in ("action", "proprio")):
         raise ValueError("A V/VT sample must not fabricate action or proprio")
+    if not action and any(torch.as_tensor(sample[k]).any() for k in ("action_mask", "proprio_mask") if k in sample):
+        raise ValueError("A V/VT sample cannot contain valid action or proprio labels")
     if action:
         for key in ("action", "proprio"):
-            value, mask = torch.as_tensor(sample[key]), torch.as_tensor(sample[key + "_mask"]).bool()
-            if value.shape[-1] != 80 or not torch.isfinite(value[mask.expand_as(value)]).all():
+            if key not in sample or key + "_mask" not in sample:
+                raise ValueError(f"Robot samples require measured {key} and {key}_mask")
+            value, mask = torch.as_tensor(sample[key]), torch.as_tensor(sample[key + "_mask"])
+            if (value.ndim != 2 or value.shape[-1] != 80 or not value.is_floating_point()
+                    or mask.dtype != torch.bool or mask.shape != value.shape
+                    or not torch.isfinite(value[mask]).all()):
                 raise ValueError(f"Invalid unified {key} labels")
+            if key == "proprio" and value.shape[0] != 1:
+                raise ValueError("Robot proprio must contain exactly one observed state")
+            if not mask.any():
+                raise ValueError(f"Robot sample has no future action supervision or observed {key}; zero placeholders are forbidden")
         supervised |= bool(torch.as_tensor(sample["action_mask"]).any())
     summary = {"modality": mode, "video_frames": len(video), "image_size": list(video[0].size),
                "video_observed_frames": int(valid.sum()), "prompt": sample["prompt"].strip()[:120]}
     tactile = mode in ("video_tactile", "video_action_tactile")
     if tactile:
-        names = sample["tactile_region_names"]
-        if len(names) != len(set(names)) or set(names) - set(REGION_NAMES):
-            raise ValueError("Invalid or duplicated canonical tactile regions")
+        if not sample.get("tactile_region_names"):
+            raise ValueError("Tactile modalities require an explicit nonempty regional layout")
         if sample.get("tactile_codec") != "tactile_intensity_v1":
             raise ValueError("Expected the intensity-v1 data contract")
-        for key, validity in (("tactile_maps", "tactile_valid"), ("future_tactile_maps", "future_tactile_valid")):
-            values = torch.as_tensor(sample[key])
-            mask = torch.as_tensor(sample[validity]).bool()[..., None, None, None].expand_as(values)
-            if values.shape[-3:] != (1, 32, 32) or values.shape[1] != len(names):
-                raise ValueError("Expected [time, regions, 1, 32, 32] intensity maps")
-            observed = values[mask]
-            if not torch.isfinite(observed).all() or (observed < 0).any() or (observed > 1).any():
-                raise ValueError("Observed tactile intensity outside [0,1]")
-        summary.update(regions=names, history_observations=int(sample["tactile_valid"].sum()),
-                       future_labels=int(sample["future_tactile_valid"].sum()))
-        supervised |= bool(torch.as_tensor(sample["future_tactile_valid"]).any())
-    elif "tactile_maps" in sample:
+        touch, touch_supervised = validate_tactile_sample(sample, tactile_spec)
+        summary.update(touch)
+        supervised |= touch_supervised
+    elif sample.get("tactile_region_names") or any(k in sample for k in ("tactile_maps", "future_tactile_maps")):
         raise ValueError("V/VA publication unexpectedly emits tactile labels")
     if not supervised:
         raise ValueError("Sample has no future video/action/tactile supervision")
@@ -87,9 +219,12 @@ def run(config, overrides, output, *, metadata_only=False, alpha_audit=None):
     resolved = OmegaConf.to_container(cfg, resolve=True)
     digest = hashlib.sha256(json.dumps(resolved, sort_keys=True).encode()).hexdigest()
     report = {"schema": "touchwam_pretrain_readiness_v1", "status": "checking", "config_sha256": digest,
-              "config": resolved, "sources": {}, "errors": [], "training_launch_allowed": False}
+              "config": resolved, "sources": {}, "errors": [], "training_launch_allowed": False,
+              "validation_scope": "source_sample_collation_and_initialization_contracts",
+              "full_training_loop_verified": False}
     try:
         t = cfg.training
+        report["training_schedule"] = validate_training_schedule(t)
         if int(t.get("zero_stage", 2)) != 2:
             raise ValueError("This regional pretraining recipe is validated with ZeRO stage 2")
         if str(t.get("offload_optimizer_device", "none")) != "none":
@@ -113,32 +248,49 @@ def run(config, overrides, output, *, metadata_only=False, alpha_audit=None):
             # user-selected tasks or hours. An incomplete source cannot shrink.
             entry = {"samples": []}
             report["sources"][name] = entry
+            dataset, leaves = None, None
             try:
+                contract = validate_source_contract(name, source)
+                entry.update(contract)
                 entry["publication"] = source_publication_contract(source)
+                if metadata_only:
+                    continue
+                source = OmegaConf.create(OmegaConf.to_container(source, resolve=True))
+                source.seed = int(cfg.project.seed if cfg.project.seed is not None else 42)
+                dataset = build_dataset(source, split="train")
+                mode = getattr(dataset, "training_modality", "video_action")
+                leaves = getattr(dataset, "buckets", [dataset])
+                if not len(dataset) or not leaves:
+                    raise ValueError("Selected source has no training windows")
+                # Inspect every bucket's declared modality, even when only a
+                # subset of buckets is decoded. A hidden V/VT robot bucket
+                # must not enter the mixture through publication sampling.
+                for leaf in leaves:
+                    leaf_mode = getattr(leaf, "training_modality", mode)
+                    if leaf_mode not in contract["expected_modalities"]:
+                        raise ValueError(f"Bucket emits {leaf_mode}; expected {contract['expected_modalities']}")
+                    if len(leaf) == 0:
+                        raise ValueError("Selected source contains an empty bucket")
+                # Every source plus first/middle/last selected task is decoded;
+                # conversion publishers independently validate all files.
+                for i in sorted({0, len(leaves) // 2, len(leaves) - 1}):
+                    leaf = leaves[i]
+                    for index in sorted({0, len(leaf) // 2, len(leaf) - 1}):
+                        # Inspect the requested index, not a reader retry of a
+                        # different, healthy window.
+                        read = getattr(leaf, "_getitem_impl", leaf.__getitem__)
+                        entry["samples"].append(validate_sample(
+                            read(index), getattr(leaf, "training_modality", mode),
+                            tactile_spec=cfg.model.architecture.tactile, **contract,
+                        ))
+                entry.update(training_modality=mode, windows=len(dataset), buckets=len(leaves),
+                             data_contract=getattr(dataset, "training_data_contract", None))
             except Exception as exc:
                 entry["error"] = f"{type(exc).__name__}: {exc}"
                 report["errors"].append(f"{name}: {entry['error']}")
-                continue
-            if metadata_only:
-                continue
-            source = OmegaConf.create(OmegaConf.to_container(source, resolve=True))
-            source.seed = int(cfg.project.seed or 42)
-            dataset = build_dataset(source, split="train")
-            mode = getattr(dataset, "training_modality", "video_action")
-            leaves = getattr(dataset, "buckets", [dataset])
-            # Every source plus first/middle/last selected task is decoded;
-            # conversion publishers independently validate all files.
-            for i in sorted({0, len(leaves) // 2, len(leaves) - 1}):
-                leaf = leaves[i]
-                for index in sorted({0, len(leaf) // 2, len(leaf) - 1}):
-                    # Acceptance must inspect the requested index, not a
-                    # reader's runtime retry of a different, healthy window.
-                    read = getattr(leaf, "_getitem_impl", leaf.__getitem__)
-                    entry["samples"].append(validate_sample(read(index), getattr(leaf, "training_modality", mode)))
-            entry.update(training_modality=mode, windows=len(dataset), buckets=len(leaves),
-                         data_contract=getattr(dataset, "training_data_contract", None))
-            del dataset, leaves
-            gc.collect()
+            finally:
+                del dataset, leaves
+                gc.collect()
         if not report["sources"]:
             raise ValueError("No enabled data sources")
         if report["errors"]:

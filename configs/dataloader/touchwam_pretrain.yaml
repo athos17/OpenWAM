@@ -1,8 +1,8 @@
 # Reuse previously validated EgoDex / AgiBot / Sharpa data in place.
 # Only new FTP conversion and Sharpa tactile sidecars use data_root.
-# Infrastructure recipe only; the latest data-budget proposal is in
-# docs/data/pretrain_data_budget_20261028.md. Bulk FTP conversion is stopped.
-# Do not treat proportional defaults as the proposed 30/30/15/25 training budget.
+# PFS training: reuse ~300h EgoDex, ~240h Sharpa, ~140h AgiBot;
+# add up to ~80h verified FTP robot tactile. Exact sampling weights remain a separate decision.
+# FTP without action contracts is excluded, never downgraded to ego video.
 # Data publication must be complete before training. Hour budgets remain optional.
 # FTP-1 sharpa is intentionally absent; do not add it alongside native SharpaDex.
 type: mixture
@@ -11,6 +11,8 @@ data_root: ${oc.env:TOUCHWAM_DATA_ROOT,/mnt/pfs/v89atp/workspace/dataset/touchwa
 datasets:
   egodex:
     type: egodex_reuse_video
+    source_kind: ego
+    expected_modalities: [video_only]
     require_publication: true
     strict_buckets: true
     dataset_dir: ${oc.env:TOUCHWAM_EGODEX_ROOT,/mnt/pfs/v89atp/workspace/dataset/egodex_300h_video_v1}
@@ -25,6 +27,8 @@ datasets:
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   sharpadex:
     type: sharpadex_native_intensity
+    source_kind: robot
+    expected_modalities: [video_action_tactile]
     require_publication: true
     strict_buckets: true
     dataset_dir: ${oc.env:TOUCHWAM_SHARPA_ROOT,/mnt/pfs/v89atp/workspace/dataset/sharpadex_native_tcp_v1_20261026/buckets}
@@ -45,6 +49,8 @@ datasets:
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   agibot:
     type: agibotworld
+    source_kind: robot
+    expected_modalities: [video_action]
     require_publication: true
     strict_buckets: true
     dataset_dir: ${oc.env:TOUCHWAM_AGIBOT_ROOT,/mnt/pfs/v89atp/workspace/dataset/agibot_pretrain_v1}
@@ -62,11 +68,18 @@ datasets:
     multiview: true
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_freetacman:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/FreeTacMan
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -75,11 +88,19 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_motiontrans:
-    type: lerobot_video_intensity
+    enabled: false  # Not gripper spatial tactile; outside this round's ~80h selection.
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/MotionTrans
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -88,11 +109,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_rdp:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RDP
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -101,11 +129,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_rdp_bimanual:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RDP_Bimanual
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -114,11 +149,19 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_rh20tcfg5franka:
-    type: lerobot_video_intensity
+    enabled: false  # Not gripper spatial tactile; outside this round's ~80h selection.
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RH20TCfg5Franka
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -127,11 +170,19 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_rh20tcfg6atiaxia:
-    type: lerobot_video_intensity
+    enabled: false  # Not gripper spatial tactile; outside this round's ~80h selection.
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RH20TCfg6ATIAxia
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -140,11 +191,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_rh20tcfg7tactile:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RH20TCfg7Tactile
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -153,11 +211,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_unit:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/Unit
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -166,11 +231,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_unit_bimanual:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/Unit_Bimanual
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -179,11 +251,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_vla_touch:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/VLA_touch
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -192,11 +271,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_vitamin:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/ViTaMIn
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -205,11 +291,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_visuotactile_d_wheel:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/VisuoTactile_D-WHEEL
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -218,11 +311,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_visuotactile_qingloong:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/VisuoTactile_QINGLOONG
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -231,11 +331,18 @@ datasets:
     width: 320
     color_jitter: {brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
   ftp_exumi:
-    type: lerobot_video_intensity
+    type: lerobot_robot_intensity
+    source_kind: robot
+    source_family: ftp1
+    expected_modalities: [video_action_tactile]
+    action_contract: meta/action_contract.json
+    action_mode: eef
+    normalize_mode: min-max
+    unify_action: false  # Reader already returns normalized canonical 80-D vectors.
     require_publication: true
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/exUMI
-    tactile_mode: auto
+    tactile_mode: required
     total_hours: null
     num_frames: 33
     video_stride: 4

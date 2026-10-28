@@ -7,7 +7,7 @@ Call order — core skeleton only:
   train():     build optimizer/dataloader/scheduler -> setup output dir
                -> accelerate prepare -> loop{ compute_loss -> backward/clip/step
                -> reduce metrics -> log step -> maybe save ckpt }
-               -> finish_training (final ckpt, drop resume state, close wandb)
+               -> finish_training (final weights/state, retention, close wandb)
 
 Methods below are ordered by call sequence: __init__, train, then the
 helpers in the order train() reaches them (sub-helpers follow their caller).
@@ -31,7 +31,6 @@ from omegaconf import DictConfig
 
 from openwam.train.utils.checkpointing import (
     compute_resume_position,
-    finalize_keep_weights_only,
     find_latest_accel_state,
     load_full_state,
     manage_checkpoints,
@@ -39,15 +38,19 @@ from openwam.train.utils.checkpointing import (
     save_full_state,
     save_normalization_stats,
     save_weights,
+    validate_checkpoint_retention,
     verify_resume_normalization_stats,
 )
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sampler_seed
 from openwam.train.utils.training_utils import (
+    align_stop_step,
+    append_training_metrics,
     build_cosine_scheduler,
     cfg_get,
     init_wandb,
     log_parameter_counts,
+    optimizer_steps_through,
     reduce_step_metrics,
     write_debug_loss_row,
 )
@@ -191,11 +194,23 @@ class OpenWAMTrainer:
         (weights loaded at construction), or resume (load full state after prepare).
         """
         t = self.cfg.training
-        num_epochs = num_epochs or cfg_get(t, "num_epochs", None)
-        num_epochs = int(num_epochs) if num_epochs is not None else None
-        max_steps = max_steps or getattr(t, "max_steps", None)
-        batch_size = int(t.batch_size)
-        grad_accum = int(t.gradient_accumulation_steps)
+        num_epochs = cfg_get(t, "num_epochs", None) if num_epochs is None else num_epochs
+        max_steps = getattr(t, "max_steps", None) if max_steps is None else max_steps
+        batch_size = t.batch_size
+        grad_accum = t.gradient_accumulation_steps
+        if batch_size is None or grad_accum is None:
+            raise ValueError("training.batch_size and gradient_accumulation_steps cannot be null")
+        for name, value in (("num_epochs", num_epochs), ("max_steps", max_steps),
+                            ("batch_size", batch_size), ("gradient_accumulation_steps", grad_accum)):
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError(f"training.{name} must be a positive integer or null for an optional limit")
+        if self.accelerator.gradient_accumulation_steps != grad_accum:
+            raise ValueError("Accelerator gradient accumulation differs from training configuration")
+        keep_last_k = getattr(t, "keep_last_k_ckpts", 3)
+        validate_checkpoint_retention(keep_last_k)
+        configured_save_steps = getattr(t, "save_steps", None)
+        if configured_save_steps is not None and (type(configured_save_steps) is not int or configured_save_steps < 0):
+            raise ValueError("training.save_steps must be a nonnegative integer or null")
 
         debug = bool(getattr(t, "debug", False))
         if debug:
@@ -219,13 +234,20 @@ class OpenWAMTrainer:
         max_grad_norm = float(t.max_grad_norm) if getattr(t, "max_grad_norm", None) else None
 
         n_proc = self.accelerator.num_processes
-        steps_per_epoch = math.ceil(len(dataloader) / grad_accum)
-        # max_steps counts micro-steps (global_step); convert to optimizer steps for the LR horizon.
-        max_opt_steps = math.ceil(max_steps / grad_accum) if max_steps else None
+        if len(dataloader) == 0:
+            raise ValueError("Training dataloader has no batches")
+        batches_per_epoch = math.ceil(len(dataloader) / n_proc)
+        requested_max_steps = max_steps
+        if max_steps:
+            max_steps = align_stop_step(max_steps, batches_per_epoch, grad_accum)
+            if max_steps != requested_max_steps:
+                logger.warning("max_steps=%d ends inside accumulation; completing the update at step %d",
+                               requested_max_steps, max_steps)
+        steps_per_epoch = math.ceil(batches_per_epoch / grad_accum)
+        max_opt_steps = optimizer_steps_through(max_steps, batches_per_epoch, grad_accum) if max_steps else None
         if num_epochs is not None:
             # prepare() shards the dataloader ~1/n_proc; fold that in so total_opt_steps is the
             # per-process optimizer steps the loop actually runs (same unit as max_opt_steps).
-            steps_per_epoch = math.ceil(steps_per_epoch / n_proc)
             total_opt_steps = steps_per_epoch * num_epochs
             if max_opt_steps:
                 total_opt_steps = min(total_opt_steps, max_opt_steps)
@@ -236,10 +258,7 @@ class OpenWAMTrainer:
         if debug:
             save_steps = save_steps_override
         else:
-            save_steps = getattr(t, "save_steps", None)
-            if save_steps is not None:
-                save_steps = int(save_steps)
-        keep_last_k = int(getattr(t, "keep_last_k_ckpts", 3))
+            save_steps = configured_save_steps
         save_full_states_for_resume = bool(getattr(t, "save_full_states_for_resume", False))
 
         # Finetune warm-start weights were already loaded at architecture
@@ -247,6 +266,10 @@ class OpenWAMTrainer:
 
         output_path, resume_state_dir = self.setup_output_dir(debug, resume_path)
         optimizer, dataloader, scheduler = self.prepare_accelerate(optimizer, dataloader, scheduler)
+        self._batches_per_epoch = len(dataloader)
+        if self._batches_per_epoch != batches_per_epoch:
+            raise ValueError("Prepared dataloader length differs from the scheduler/accumulation plan")
+        self._last_checkpoint_step = None
 
         if self._run_seed is not None:
             from openwam.dataloader.mixture import MixtureDataset
@@ -279,6 +302,7 @@ class OpenWAMTrainer:
         global_step = 0
         start_epoch = 0
         skip_first = 0
+        checkpoint_pending = False
 
         # Resume: restore full state AFTER prepare, then map global_step -> (epoch, skip).
         if resume_state_dir is not None:
@@ -290,7 +314,9 @@ class OpenWAMTrainer:
             )
             if already_done:
                 logger.info("[resume] global_step=%d already complete; finishing.", global_step)
-                self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run)
+                # A no-op resume must not rewrite or prune existing checkpoints.
+                if wandb_run is not None:
+                    wandb_run.finish()
                 return
             if skip_first > 0 and self._run_seed is None:
                 logger.warning(
@@ -346,7 +372,8 @@ class OpenWAMTrainer:
                         if scheduler is not None:
                             scheduler.step()
                         optimizer.zero_grad()
-                        opt_step += 1
+                        if not self.accelerator.optimizer_step_was_skipped:
+                            opt_step += 1
 
                 global_step += 1
 
@@ -373,20 +400,29 @@ class OpenWAMTrainer:
 
                 # save_steps: write the weights line (+ the resumable full state when
                 # save_full_states_for_resume=true), then prune in lockstep.
-                if save_steps and global_step > 0 and global_step % save_steps == 0:
+                # Delay a due save until gradients have been applied. Gradients
+                # themselves are not part of Accelerate's resumable state.
+                if save_steps and global_step % save_steps == 0:
+                    checkpoint_pending = True
+                if (save_steps and checkpoint_pending and self.accelerator.sync_gradients):
                     save_weights(self.accelerator, self.architecture, output_path, global_step, final=False)
                     if save_full_states_for_resume:
-                        save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
+                        save_full_state(self.accelerator, output_path, global_step, opt_step, epoch,
+                                        batches_per_epoch=len(dataloader), grad_accum=grad_accum)
                     if is_main:
                         manage_checkpoints(output_path, keep_last_k)
+                    self._last_checkpoint_step = global_step
+                    checkpoint_pending = False
 
                 if max_steps and global_step >= max_steps:
                     pbar.close()
-                    self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run)
+                    self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run,
+                                         opt_step=opt_step, epoch=epoch)
                     return
 
         pbar.close()
-        self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run)
+        self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run,
+                             opt_step=opt_step, epoch=epoch)
 
     # (3) Called by train() first — AdamW over the per-module (action/video) LR param groups.
     def build_optimizer(self) -> torch.optim.Optimizer:
@@ -495,8 +531,8 @@ class OpenWAMTrainer:
         if resume_path and resume_state_dir is None:
             raise FileNotFoundError(
                 f"resume_ckpt_path={resume_path} has no usable accel_state_step_*; full states "
-                f"are only written when training.save_full_states_for_resume=true (and a finished run drops "
-                f"them) — use finetune_ckpt_path to warm-start from weights instead."
+                f"are only written when training.save_full_states_for_resume=true and save_steps is enabled "
+                f"— use finetune_ckpt_path to warm-start from weights instead."
             )
         if resume_state_dir is not None:
             output_path = os.path.dirname(resume_state_dir)
@@ -539,7 +575,8 @@ class OpenWAMTrainer:
         import torch.distributed as dist
 
         path_list = [output_path] if is_main else [None]
-        dist.broadcast_object_list(path_list, src=0)
+        if dist.is_available() and dist.is_initialized():
+            dist.broadcast_object_list(path_list, src=0)
         output_path = path_list[0]
         logger.info("Checkpoints will be saved to %s", output_path)
         return output_path, None
@@ -584,13 +621,26 @@ class OpenWAMTrainer:
         is_main = self.accelerator.is_main_process
         if is_main:
             logger.info("[resume] loading Accelerate state from %s", resume_state_dir)
-        meta = load_full_state(self.accelerator, resume_state_dir)
-        global_step = int(meta.get("global_step", 0))
-        # Align global_step to the grad_accum boundary skip was floored to, then derive
-        # opt_step from it — otherwise floored-off batches re-train and per-step seeds
-        # (keyed on global_step) drift. No-op at grad_accum=1.
-        start_epoch, skip, global_step = compute_resume_position(global_step, len(dataloader), grad_accum)
-        opt_step = global_step // grad_accum
+        import json
+
+        # Validate before mutating model/optimizer state. Old partial-window
+        # checkpoints cannot faithfully resume because their gradients are absent.
+        with open(os.path.join(resume_state_dir, "trainer_state.json")) as handle:
+            meta = json.load(handle)
+        global_step, opt_step = meta.get("global_step"), meta.get("opt_step")
+        if type(opt_step) is not int or opt_step < 0:
+            raise ValueError("Resume checkpoint is missing a valid saved opt_step")
+        for key, expected in (("batches_per_epoch", len(dataloader)),
+                              ("gradient_accumulation_steps", grad_accum)):
+            if key in meta and meta[key] != expected:
+                raise ValueError(f"Resume checkpoint {key} differs: saved={meta[key]}, live={expected}")
+        if meta.get("optimizer_boundary", True) is not True:
+            raise ValueError("Resume checkpoint was not saved at an optimizer boundary")
+        start_epoch, skip, global_step = compute_resume_position(
+            global_step, len(dataloader), grad_accum, require_boundary=True)
+        if opt_step > optimizer_steps_through(global_step, len(dataloader), grad_accum):
+            raise ValueError("Resume opt_step exceeds the number of consumed update boundaries")
+        load_full_state(self.accelerator, resume_state_dir)
         if is_main:
             logger.info(
                 "[resume] resumed at global_step=%d opt_step=%d epoch=%d skip_first=%d",
@@ -710,6 +760,11 @@ class OpenWAMTrainer:
                     log_dict["data/" + key] = value
             wandb_run.log(log_dict, step=global_step)
 
+        is_main = self.accelerator is None or self.accelerator.is_main_process
+        if is_main and output_path:
+            append_training_metrics(output_path, metrics=metrics, global_step=global_step,
+                                    opt_step=opt_step, epoch=epoch, lr=lr, steps_per_sec=steps_per_sec)
+
         if not debug:
             return
         is_main = self.accelerator is None or self.accelerator.is_main_process
@@ -740,7 +795,7 @@ class OpenWAMTrainer:
                 steps_per_sec=steps_per_sec,
             )
 
-    # (11) Called on every train() exit — final weights, drop resume state, close wandb.
+    # (11) Called on normal completion — final weights/state, retention, close wandb.
     def finish_training(
         self,
         output_path: str,
@@ -749,18 +804,26 @@ class OpenWAMTrainer:
         keep_last_k: int,
         is_main: bool,
         wandb_run,
+        *,
+        opt_step: int,
+        epoch: int,
     ) -> None:
-        """Unified teardown for every exit path: final weights, drop resume state, close wandb.
+        """Save a resumable final update when configured; never discard full states.
 
-        Falsy ``save_steps`` = a profiling/no-write run, so no final artifact (matches the
-        periodic-save gating). After the final weights land, ``finalize_keep_weights_only``
-        removes every ``accel_state_step_*`` and retains the configured number of recent
-        weight checkpoints (rank-0, post-barrier).
+        Falsy save_steps disables checkpoint IO, including retention. The final
+        full state is kept under the same retention policy as periodic saves.
         """
         if save_steps:
-            save_weights(self.accelerator, self.architecture, output_path, global_step, final=True)
+            if not self.accelerator.sync_gradients:
+                raise RuntimeError("Cannot finish training with unapplied accumulated gradients")
+            if self._last_checkpoint_step != global_step:
+                save_weights(self.accelerator, self.architecture, output_path, global_step, final=True)
+                if cfg_get(self.cfg.training, "save_full_states_for_resume", False):
+                    save_full_state(self.accelerator, output_path, global_step, opt_step, epoch,
+                                    batches_per_epoch=self._batches_per_epoch,
+                                    grad_accum=int(self.cfg.training.gradient_accumulation_steps))
         self.accelerator.wait_for_everyone()
-        if is_main:
-            finalize_keep_weights_only(output_path, keep_last_k)
+        if is_main and save_steps:
+            manage_checkpoints(output_path, keep_last_k)
         if wandb_run is not None:
             wandb_run.finish()

@@ -129,6 +129,45 @@ def test_manage_checkpoints_prunes_accel_state_in_lockstep(tmp_path):
     assert states == ["accel_state_step_200", "accel_state_step_300"]
 
 
+def test_negative_one_retains_all_checkpoint_pairs(tmp_path):
+    for step in (1, 2):
+        (tmp_path / f"checkpoint_step_{step}.safetensors").write_text("fixture")
+        _make_accel_state(tmp_path, step, marker=True)
+    before = sorted(p.name for p in tmp_path.iterdir())
+    manage_checkpoints(str(tmp_path), keep_last_k=-1)
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+    finalize_keep_weights_only(str(tmp_path), keep_last_k=-1)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "checkpoint_step_1.safetensors", "checkpoint_step_2.safetensors"]
+
+
+@pytest.mark.parametrize("keep", [0, -2, True, 1.5])
+def test_invalid_retention_fails_before_any_deletion(tmp_path, keep):
+    artifact = tmp_path / "checkpoint_step_1.safetensors"
+    artifact.write_text("fixture")
+    for operation in (manage_checkpoints, finalize_keep_weights_only):
+        with pytest.raises(ValueError, match="keep_last_k_ckpts"):
+            operation(str(tmp_path), keep_last_k=keep)
+        assert artifact.exists()
+
+
+def test_strict_resume_accepts_short_epoch_tail_and_rejects_partial_accumulation():
+    assert compute_resume_position(10, 10, 4, require_boundary=True) == (1, 0, 10)
+    with pytest.raises(ValueError, match="inside a gradient accumulation"):
+        compute_resume_position(6, 10, 4, require_boundary=True)
+
+
+def test_failed_full_state_rewrite_removes_old_completion_marker(tmp_path):
+    acc = _FakeAccelerator()
+    save_full_state(acc, str(tmp_path), 4, 1, 0)
+    def fail(_):
+        raise RuntimeError("interrupted save")
+    acc.save_state = fail
+    with pytest.raises(RuntimeError, match="interrupted save"):
+        save_full_state(acc, str(tmp_path), 4, 1, 0)
+    assert find_latest_accel_state(str(tmp_path)) is None
+
+
 # --- save/load_full_state metadata round-trip + atomic completion marker ---
 
 

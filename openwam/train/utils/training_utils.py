@@ -4,12 +4,41 @@ Pure compute / IO with no training state: config access, parameter reporting,
 LR scheduling, wandb, cross-rank reduction, debug-CSV writing.
 """
 
+import json
 import logging
+import math
 import os
 
 import torch
 
 logger = logging.getLogger(__name__)
+
+
+def align_stop_step(max_steps: int, batches_per_epoch: int, grad_accum: int) -> int:
+    """Finish the requested microstep budget at the next actual update boundary.
+
+    Epoch tails are update boundaries too, even when shorter than grad_accum.
+    """
+    if any(type(v) is not int or v < 1 for v in (max_steps, batches_per_epoch, grad_accum)):
+        raise ValueError("max_steps, batches_per_epoch and gradient_accumulation_steps must be positive integers")
+    offset = max_steps % batches_per_epoch
+    if offset == 0 or offset % grad_accum == 0:
+        return max_steps
+    return max_steps + min(grad_accum - offset % grad_accum, batches_per_epoch - offset)
+
+
+def optimizer_steps_through(microsteps: int, batches_per_epoch: int, grad_accum: int) -> int:
+    """Count update boundaries including the short tail of every complete epoch."""
+    epochs, remainder = divmod(microsteps, batches_per_epoch)
+    return epochs * math.ceil(batches_per_epoch / grad_accum) + math.ceil(remainder / grad_accum)
+
+
+def append_training_metrics(output_path, *, metrics, global_step, opt_step, epoch, lr, steps_per_sec):
+    """Rank-zero persistent microbatch metrics, independent of debug/W&B."""
+    row = {"step": int(global_step), "opt_step": int(opt_step), "epoch": int(epoch),
+           "lr": float(lr), "steps_per_sec": float(steps_per_sec), **metrics}
+    with open(os.path.join(output_path, "training_metrics.jsonl"), "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def cfg_get(cfg, key: str, default=None):
