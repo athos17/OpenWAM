@@ -135,3 +135,9 @@ Mini 修订作业 `job-wr53xgpsftkr` 已 Succeeded，三个来源均通过独立
 `validation/code_pytest_final.txt`、`validation/bos_all14_readonly.json` 与
 `deform_v2/attempt2/control/`。当前实验输出全部 `train_valid=false`，未经传感器
 标定或接触基线确认，不把数值审计通过解释成压力监督可用。
+
+最终图像抽查中，Unit 的条状接触、Unit_Bimanual 的左右局部接触在原 RGB 与
+形变预览中有对应关系。VLA_touch/Mango 的响应主要是宽泛边缘或倾斜场，并有
+明显 marker 格纹残影，尚不能确认可靠的局部压入形状。因此三个来源的结果均
+继续作为实验形变保存，VLA_touch 尤其需要重新确认空载参考、传感器标定与
+marker 去除质量。抽样可视化和独立审计随 BOS `_validation/pilot_20261028` 保存。
