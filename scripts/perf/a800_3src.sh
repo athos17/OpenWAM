@@ -16,11 +16,13 @@ cd "$(dirname "$0")/../.."
 CONFIG=${CONFIG:-train_h20_3src_s8b_gc20}
 ROOT=${A800_ROOT:-/gaozt-test1/lyh}
 PERF_ROOT=${PERF_ROOT:-$ROOT/perf_runs/a800_3src}
-OPENWAM_ENV=${OPENWAM_ENV:-$ROOT/envs/openwam}
+# Shared conda env on vePFS (torch 2.7.1+cu128, deepspeed 0.18.9, cuDNN 9.7.1 as on txy), used
+# read-only: PYTHONPATH puts this checkout ahead of the env's own editable openwam install.
+OPENWAM_ENV=${OPENWAM_ENV:-/gaozt-test1/zhanxch/miniconda3/envs/openwam}
 DATA=$ROOT/datasets
 NODE_RANK=${NODE_RANK:-0}
 mkdir -p "$PERF_ROOT"
-export PATH="$OPENWAM_ENV/bin:$PATH" VIRTUAL_ENV="$OPENWAM_ENV"
+export PATH="$OPENWAM_ENV/bin:$PATH" CONDA_PREFIX="$OPENWAM_ENV"
 export PYTHONPATH="$PWD" WANDB_MODE=disabled PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export NNODES=${NNODES:-1} NODE_RANK MASTER_ADDR=${MASTER_ADDR:-127.0.0.1} MASTER_PORT=${MASTER_PORT:-29500}
 LOG="$PERF_ROOT/$TAG.node$NODE_RANK.log"
