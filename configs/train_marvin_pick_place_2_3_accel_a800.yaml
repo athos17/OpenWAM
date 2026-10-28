@@ -1,0 +1,27 @@
+# train_marvin_pick_place_2_3_accel on 2 x 8 A800 (Volcano a800_1/a800_2, vePFS /gaozt-test1):
+# same data, pretrain init, global batch 768, 20 epochs = 5,540 updates, LR schedule, RTC and
+# recompute layers as the 2026-10-27 txy (2 x 8 H20) run, plus the s9 options validated on A800
+# (configs/train_h20_3src_s9.yaml): compiled Wan block regions, fused VAE norm, overlapped ZeRO-2
+# parameter all-gather.
+#   NNODES=2 NODE_RANK=<0|1> MASTER_ADDR=192.168.0.235 NCCL_SOCKET_IFNAME=eth1 GLOO_SOCKET_IFNAME=eth1 \
+#     bash scripts/train.sh --config-name train_marvin_pick_place_2_3_accel_a800
+defaults:
+  - train_marvin_pick_place_2_3_accel
+  - _self_
+
+dataloader:
+  dataset_dir: /gaozt-test1/zdx/datasets/pick_place_2_3_openwam_v3  # identical to txy's copy
+
+training:
+  finetune_ckpt_path: /gaozt-test1/lyh/models/OpenWAM-Alpha-Pretrain-Foundation-Model
+  dit_block_fusion: true
+  vae_fused_norm: true
+  overlap_param_allgather: true
+  step_timing:
+    peak_tflops: 312              # A800 dense bf16
+  output_path: /gaozt-test1/lyh/outputs/accel_pick_place_2_3_v3_a800
+
+project:
+  output_dir: outputs/accel_s9_pick_place_2_3_v3_a800_2node_bs48ga1_rtc16_ep20
+  wandb:
+    run_name: accel_s9_pick_place_2_3_v3_a800_2node_bs48ga1_rtc16_ep20
