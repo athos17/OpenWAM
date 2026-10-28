@@ -12,8 +12,59 @@ def source_publication_contract(config):
         tactile = publication_contract(Path(tactile_root) / "buckets")
         if any(record[k] != tactile[k] for k in ("episodes", "frames")):
             raise ValueError("External tactile publication and reused source populations differ")
+        tactile["binding"] = external_sharpa_binding(get_cfg(config, "dataset_dir"), tactile_root, record, tactile)
         record["tactile"] = tactile
     return record
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def external_sharpa_binding(source_root, tactile_root, source, tactile):
+    """Verify the exact source/cache identities recorded by the all-bucket audit.
+
+    Counts alone cannot detect a cache from a different run with equal lengths.
+    This checks metadata and manifest content, not every map payload. Run the
+    catalog validator before launch for array inventory/clock/mask acceptance.
+    """
+    root, cache = Path(source_root), Path(tactile_root)
+    publication = json.loads(Path(tactile["path"]).read_text())
+    path = cache / "tactile_catalog.json"
+    if (publication.get("schema") != "touchwam_sharpa_external_tactile_catalog_v1"
+            or publication.get("tactile_catalog_sha256") != _file_sha256(path)):
+        raise ValueError("External tactile catalog is missing, changed or unverified")
+    catalog = json.loads(path.read_text())
+    if (catalog.get("status") != "complete" or catalog.get("pending")
+            or catalog.get("source_manifest_sha256") != source["sha256"]):
+        raise ValueError("External tactile catalog belongs to a different source publication")
+    entries = catalog.get("bucket_manifest_by_name", {})
+    if set(entries) != set(source["buckets"]) or set(entries) != set(tactile["buckets"]):
+        raise ValueError("External tactile catalog bucket identities differ from the source")
+    for name, entry in entries.items():
+        bucket = root / name
+        if _file_sha256(bucket / "meta/info.json") != entry.get("source_info_sha256"):
+            raise ValueError(f"Original Sharpa bucket metadata changed: {name}")
+        episode_files = sorted(bucket.glob("meta/episodes/*/*.parquet"))
+        episode_digest = hashlib.sha256(json.dumps([
+            (str(p.relative_to(bucket)), _file_sha256(p)) for p in episode_files
+        ]).encode()).hexdigest()
+        if not episode_files or episode_digest != entry.get("source_episode_metadata_sha256"):
+            raise ValueError(f"Original Sharpa episode identities or video offsets changed: {name}")
+        # Use the actual reader path. Do not trust an arbitrary catalog pointer.
+        partition = bucket.resolve(strict=True)
+        manifest = cache / "partitions" / partition.parent.name / partition.name / "tactile/manifest.json"
+        alias = cache / "buckets" / name / "tactile/manifest.json"
+        if (alias.resolve(strict=True) != manifest.resolve(strict=True)
+                or _file_sha256(manifest) != entry.get("manifest_sha256")):
+            raise ValueError(f"External Sharpa tactile manifest changed or misbound: {name}")
+    return {"catalog_sha256": _file_sha256(path), "source_manifest_sha256": source["sha256"],
+            "buckets_verified": len(entries),
+            "scope": "source publication, bucket/episode metadata and tactile manifest hashes; array payload audited separately"}
 
 
 def publication_contract(dataset_dir):

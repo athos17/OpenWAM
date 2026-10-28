@@ -1,12 +1,12 @@
 # Native data reuse and tactile cache
 
-**Current accepted workflow:** reuse `egodex_300h_video_v1`, `sharpadex_native_tcp_v1_20261026/buckets`, and `agibot_pretrain_v1` exactly as prepared for the earlier training run. The user explicitly stopped repeated native conversion. The full EgoDex copy and aggregate native publisher have been stopped; their partial/new outputs remain unused. Do not restart those jobs as part of current preparation. Only the previously missing Sharpa ten-fingertip tactile sidecar is new work. Its standalone `catalog_sharpa_tactile.py` validates against the original bucket metadata and publishes an external `tactile_catalog.json`, without editing old data.
+**Current accepted workflow:** reuse `egodex_300h_video_v1`, `sharpadex_native_tcp_v1_20261026/buckets`, and `agibot_pretrain_v1` exactly as prepared for the earlier training run. Duplicate EgoDex/AgiBot publications and the partial full EgoDex copy were deleted at the user's request; do not recreate them. Only the previously missing Sharpa ten-fingertip tactile sidecar is active work. Its standalone `catalog_sharpa_tactile.py` validates against original metadata and publishes an external `tactile_catalog.json` without editing old data. Training and validation use existing PFS datasets.
 
 The conversion tools below describe the retained optional utilities and work performed before that correction; they are not prerequisites or default inputs for this training.
 
 These tools publish EgoDex, SharpaDex and AgiBot without changing the frozen source datasets. Dataset selection and mixture hours remain unset; `configs/data_sources/native/*.json` defines semantics, identities and supervision, not the eventual training allocation.
 
-## Releases
+## Historical optional layouts (not current preparation instructions)
 
 Under the configured release root:
 
@@ -17,7 +17,7 @@ Under the configured release root:
 
 `publication.json` is the release readiness gate. `complete` means the work owned by this publisher has finished; `pending_copy` or `pending_tactile` must fail training preflight. A reader being able to find one valid bucket is insufficient. Full GPU training acceptance is a separate model/runtime check.
 
-## Commands
+## Historical conversion commands (do not rerun for current native data)
 
 Use the prepared Python environment with NumPy, PyArrow, PyAV and OpenCV. Limit BLAS threads before running converters. The server exposes 128 logical CPUs but, when audited on 2026-10-28, `/sys/fs/cgroup/cpu.max` limited this process group to **8 CPU cores**. Size concurrency using the quota, and account for other converters.
 
@@ -50,17 +50,49 @@ Episode source video offsets are preserved exactly. Frames are matched by their 
 
 ## Validation
 
-`tests/data/test_native_publication.py` covers internal-link relocation, source immutability, exact tile identities, real v3 EgoDex row/video offsets without fabricated actions, cropped Sharpa video extraction and missing-frame masks, and restart recovery after a copied file precedes its receipt. `finalize_native.py` additionally checks every produced Sharpa array header, validity array, episode length and timestamp against the LeRobot metadata before publishing `complete`.
+`tests/data/test_native_publication.py` covers source immutability, tile identities and extraction masks. `tests/data/test_native_catalog.py` verifies original video offsets, all array headers/lengths/timestamps/masks, and detection of missing, truncated or modified arrays even when metadata was cached. Failed rechecks revoke `training_ready`; an old ready publication must not survive an error.
+
+`catalog_sharpa_tactile.py` records immutable array stat identities (inode, size, mtime, ctime); it does not compute cryptographic checksums of the entire 297 GB map payload. Changes after the receipt are rejected. Before the first receipt, arbitrary valid-shaped uint8 corruption cannot be identified from headers alone.
+
+`validate_sharpa_all.py` independently reads original video PTS at first/middle/last episodes and first/middle/last frames inside each selected episode, up to 9 samples per partition. It derives video paths and offsets from original metadata, crops each of the 10 original tiles independently, and compares every sampled pixel exactly. The frozen extractor's resize function is never called. Every episode also receives structural/time/mask validation. This covers every partition but remains sampled source replay, not every source frame. Receipts bind source metadata/video stat identities, sidecar arrays, and validator code; stale receipts do not count as passed.
+
+```bash
+# Pilot: only AUDIT_DIR is written; originals and sidecars remain read-only.
+OPENBLAS_NUM_THREADS=1 python scripts/data/native/validate_sharpa_all.py \
+  --source EXISTING_SHARPA_NATIVE_ROOT --cache EXTERNAL_TACTILE_ROOT \
+  --output AUDIT_DIR --workers 1 --limit 3
+
+# Full validation. Separate CPU nodes may use distinct --shard-index I and
+# identical --shard-count N; shards use the sorted ORIGINAL bucket inventory.
+OPENBLAS_NUM_THREADS=1 python scripts/data/native/validate_sharpa_all.py \
+  --source EXISTING_SHARPA_NATIVE_ROOT --cache EXTERNAL_TACTILE_ROOT \
+  --output AUDIT_DIR --workers 2
+
+# Final aggregate requires fresh passed receipts for ALL original buckets.
+python scripts/data/native/validate_sharpa_all.py \
+  --source EXISTING_SHARPA_NATIVE_ROOT --cache EXTERNAL_TACTILE_ROOT \
+  --output AUDIT_DIR --aggregate
+```
+
+An aggregate with missing, failed or stale partitions returns exit code 2.
+Individual runners return 1 for failures and 2 for pending manifests. Matching
+successful receipts are reused; rerun after remaining extraction completes.
 
 For independent CPU allocations, stop the unsharded Sharpa runner first, then
 run `run_native_shards.py --kind sharpa --output RELEASE/sharpadex
 --shard-index I --shard-count N --workers W` with distinct indices and identical
-`N`. It uses sorted partition order and POSIX advisory locks. Do not run the
+`N`. Current work relies on disjoint fixed shards, not cross-node advisory-lock
+work stealing. Do not run the
 older unsharded CLI concurrently on the same output, because that CLI predates
-the lock wrapper. `finalize_native.py` aggregates all manifests regardless of
-which allocation produced them. The corresponding EgoDex sharded launcher is
-also available when every allocation can read the original `/dataset` mount;
-its completion receipts are aggregated by the same finalizer.
+the lock wrapper. `catalog_sharpa_tactile.py` aggregates all Sharpa manifests
+regardless of which allocation produced them. The older aggregate native
+finalizer and EgoDex sharded launcher are not part of the active workflow.
+
+The resource pool ends peer replicas when the master exits successfully.
+`cluster_sharpa_cpu.py` therefore writes per-rank exit receipts under the unique
+`AIHC_JOB_ID` and holds rank 0 until every shard completes. Old-job receipts
+cannot satisfy this barrier. Scheduler `Succeeded` alone never proves that all
+495 manifests exist; the catalog remains the global readiness check.
 
 Current external-cache acceptance command:
 
