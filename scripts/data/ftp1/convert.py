@@ -20,6 +20,7 @@ import subprocess
 import tarfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -137,13 +138,41 @@ def index_group(files, group, path, archive_factory=None, source_fingerprint=Non
     return out
 
 
+def resolve_selection(group):
+    """Validate a pilot census without changing the immutable source census."""
+    original = group.get("source_census", group)
+    ends = [int(x) for x in original["episode_ends"]]
+    if not ends or any(b <= a for a, b in zip([0] + ends[:-1], ends)) or ends[-1] != original["frames"]:
+        raise ValueError("Invalid original episode boundaries")
+    ids = group.get("selected_source_episode_indices", list(range(len(ends))))
+    if not ids or ids != sorted(set(ids)) or any(type(i) is not int or not 0 <= i < len(ends) for i in ids):
+        raise ValueError("Selected episode IDs must be unique sorted original episode indices")
+    ranges = [[0 if i == 0 else ends[i - 1], ends[i]] for i in ids]
+    lengths = [b - a for a, b in ranges]
+    if "source_census" in group:
+        if group.get("selection_schema") != "touchwam.ftp1.episode_selection.v1":
+            raise ValueError("Unknown episode selection schema")
+        for key in ("group", "offset", "end_offset"):
+            if group[key] != original[key]:
+                raise ValueError("Pilot/source census identity mismatch")
+        if group["frames"] != sum(lengths) or group["episode_ends"] != np.cumsum(lengths).tolist():
+            raise ValueError("Pilot frame counts do not match selected source episodes")
+        if group.get("episodes") != len(ids):
+            raise ValueError("Pilot episode count mismatch")
+    return original, ranges, ids
+
+
 class Array:
     """Bounded-memory Zarr v2 array decoder over indexed tar members."""
 
-    def __init__(self, stream, spec):
+    def __init__(self, stream, spec, frame_ranges=None):
         self.stream, self.spec = stream, spec
         self.cfg = spec["config"]
-        self.shape = tuple(self.cfg["shape"])
+        self.source_shape = tuple(self.cfg["shape"])
+        self.frame_ranges = frame_ranges or [[0, self.source_shape[0]]]
+        if any(a < 0 or b <= a or b > self.source_shape[0] for a, b in self.frame_ranges):
+            raise ValueError("Selected frames outside source array")
+        self.shape = (sum(b - a for a, b in self.frame_ranges),) + self.source_shape[1:]
         self.chunk_shape = tuple(self.cfg["chunks"])
         self.dtype = np.dtype(self.cfg["dtype"])
         self.codec = get_codec(self.cfg["compressor"]) if self.cfg.get("compressor") else None
@@ -153,22 +182,29 @@ class Array:
             raise ValueError(f"Non-time-only chunking requires separate decoder: {self.shape}/{self.chunk_shape}")
 
     def blocks(self):
-        for begin in range(0, self.shape[0], self.chunk_shape[0]):
-            chunk_id = ".".join([str(begin // self.chunk_shape[0])] + ["0"] * (len(self.shape) - 1))
-            entry = self.spec["chunks"].get(chunk_id)
-            n = min(self.chunk_shape[0], self.shape[0] - begin)
-            if entry is None:
-                data = np.full((n,) + self.shape[1:], self.cfg.get("fill_value", 0), dtype=self.dtype)
-            else:
-                self.stream.seek(entry[0])
-                raw = self.stream.read(entry[1])
-                if len(raw) != entry[1]:
-                    raise EOFError(f"Short Zarr chunk {chunk_id}")
-                raw = self.codec.decode(raw) if self.codec else raw
-                data = np.frombuffer(raw, dtype=self.dtype).reshape(self.chunk_shape, order=self.cfg.get("order", "C"))[
-                    :n
-                ]
-            yield begin, data, entry is not None
+        out_begin, previous_chunk, previous_data, previous_present = 0, None, None, None
+        for start, stop in self.frame_ranges:
+            for begin in range(start // self.chunk_shape[0] * self.chunk_shape[0], stop, self.chunk_shape[0]):
+                chunk_id = ".".join([str(begin // self.chunk_shape[0])] + ["0"] * (len(self.shape) - 1))
+                if chunk_id != previous_chunk:
+                    entry = self.spec["chunks"].get(chunk_id)
+                    n = min(self.chunk_shape[0], self.source_shape[0] - begin)
+                    if entry is None:
+                        data = np.full((n,) + self.shape[1:], self.cfg.get("fill_value", 0), dtype=self.dtype)
+                    else:
+                        self.stream.seek(entry[0])
+                        raw = self.stream.read(entry[1])
+                        if len(raw) != entry[1]:
+                            raise EOFError(f"Short Zarr chunk {chunk_id}")
+                        raw = self.codec.decode(raw) if self.codec else raw
+                        data = np.frombuffer(raw, dtype=self.dtype).reshape(
+                            self.chunk_shape, order=self.cfg.get("order", "C")
+                        )[:n]
+                    previous_chunk, previous_data, previous_present = chunk_id, data, entry is not None
+                a, b = max(start, begin) - begin, min(stop, begin + len(previous_data)) - begin
+                block = previous_data[a:b]
+                yield out_begin, block, previous_present
+                out_begin += len(block)
 
     def read(self):
         out = np.empty(self.shape, dtype=self.dtype)
@@ -177,6 +213,58 @@ class Array:
             out[begin : begin + len(data)] = data
             valid[begin : begin + len(data)] = present
         return out, valid
+
+
+class ReusedArray:
+    """Select exact original frames from an already validated v3 bucket."""
+
+    def __init__(self, bucket, table, raw_key, spec, ranges, fps):
+        self.bucket, self.table, self.raw_key, self.spec = Path(bucket), table, raw_key, spec
+        self.ranges, self.fps = ranges, fps
+        self.dtype = np.dtype(spec["config"]["dtype"])
+        self.shape = (sum(b - a for a, b in ranges), *spec["config"]["shape"][1:])
+        self.indices = np.concatenate([np.arange(a, b, dtype=np.int64) for a, b in ranges])
+        self.is_rgb = len(self.shape) in (4, 5) and self.shape[-1] == 3 and self.dtype == np.uint8
+
+    def read(self):
+        key = "observation.ftp1." + self.raw_key
+        selected = self.table.select([key, key + ".valid"]).take(pa.array(self.indices))
+        value = np.asarray(selected[key].to_pylist(), dtype=self.dtype).reshape(self.shape)
+        valid = np.asarray(selected[key + ".valid"].to_numpy(), dtype=bool)
+        return value, valid
+
+    def video_blocks(self, sensor):
+        import av
+
+        feature = "observation.tactile_rgb." if "tactile_data" in self.raw_key else "observation.images."
+        feature += self.raw_key + (f".{sensor}" if sensor is not None else "")
+        valid = self.table[feature + ".valid"].to_numpy()
+        path = self.bucket / VIDEO_PATH.format(video_key=feature, chunk_index=0, file_index=0)
+        out_begin = 0
+        with av.open(str(path)) as container:
+            stream = container.streams.video[0]
+            for start, stop in self.ranges:
+                container.seek(int((start / self.fps) / stream.time_base), stream=stream, backward=True)
+                wanted = start
+                for frame in container.decode(video=0):
+                    index = round(float(frame.time) * self.fps)
+                    if index < start:
+                        continue
+                    if index >= stop:
+                        break
+                    if index != wanted:
+                        raise ValueError(f"Reused video frame discontinuity: {path}: {index} != {wanted}")
+                    yield out_begin, frame.to_ndarray(format="rgb24")[None], bool(valid[index])
+                    out_begin += 1
+                    wanted += 1
+                if wanted != stop:
+                    raise ValueError(f"Reused video ended before selected episode: {path}")
+
+
+def bucket_path(output_root, name, group):
+    task = group["group"].split("/", 1)[1].removesuffix(".zarr")
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", task).strip("_")
+    return Path(output_root) / name / (safe + "-" + hashlib.sha256(task.encode()).hexdigest()[:8])
 
 
 def arrow_column(value):
@@ -233,8 +321,9 @@ def video_stream(array, sensor, output, fps, encoder_threads):
     count = 0
     with subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE) as process:
         try:
-            for begin, data, present in array.blocks():
-                frames = data if sensor is None else data[:, sensor]
+            blocks = array.video_blocks(sensor) if isinstance(array, ReusedArray) else array.blocks()
+            for begin, data, present in blocks:
+                frames = data if sensor is None or isinstance(array, ReusedArray) else data[:, sensor]
                 process.stdin.write(np.ascontiguousarray(frames).tobytes())
                 count += len(frames)
                 if present:
@@ -285,16 +374,48 @@ def _feature(value):
 def convert_group(job):
     source_root, output_root, definition_path, group, encoder_threads = job[:5]
     staged_path = job[5] if len(job) > 5 else None
+    options = job[6] if len(job) > 6 else {}
+    reuse_bucket = options.get("reuse_bucket")
     started = time.time()
     definition = json.loads(Path(definition_path).read_text())
     name = definition["source"]
     task = group["group"].split("/", 1)[1].removesuffix(".zarr")
-    safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", task).strip("_")
-    bucket = Path(output_root) / name / (safe_task + "-" + hashlib.sha256(task.encode()).hexdigest()[:8])
+    bucket = bucket_path(output_root, name, group)
     if group["frames"] == 0:
         return {"source": name, "task": task, "status": "empty", "frames": 0}
-    if staged_path:
-        from stage import RangeArchive, load_manifest
+    original, frame_ranges, source_episode_ids = resolve_selection(group)
+    pilot = "source_census" in group
+    if reuse_bucket and not pilot:
+        raise ValueError("Reuse is only supported into a separate pilot namespace")
+    if reuse_bucket and staged_path:
+        raise ValueError("Choose either validated v3 reuse or sparse raw staging")
+    index = None
+    reuse_table = None
+    if reuse_bucket:
+        from validate import asset_identity
+
+        reuse_bucket = Path(reuse_bucket)
+        if reuse_bucket.resolve() == bucket.resolve():
+            raise ValueError("Pilot output must not overwrite reused source")
+        saved = json.loads((reuse_bucket / "meta/conversion_complete.json").read_text())
+        validation = json.loads((reuse_bucket / "meta/validation.json").read_text())
+        info = json.loads((reuse_bucket / "meta/info.json").read_text())
+        index = json.loads((reuse_bucket / "meta/archive_index.json").read_text())
+        expected = hashlib.sha256(
+            json.dumps([VERSION, definition, index["archive_fingerprint"], original], sort_keys=True).encode()
+        ).hexdigest()
+        if saved["signature"] != expected or validation.get("conversion_signature") != expected:
+            raise ValueError("Reuse definition/source conversion signature mismatch")
+        if validation.get("assets") != asset_identity(reuse_bucket, info):
+            raise ValueError("Reused v3 files changed since validation")
+        if saved["frames"] != original["frames"] or info["total_episodes"] != len(original["episode_ends"]):
+            raise ValueError("Reused v3 source population mismatch")
+        reuse_table = pq.read_table(reuse_bucket / DATA_PATH.format(chunk_index=0, file_index=0))
+
+        def archive_factory():
+            return nullcontext(None)
+    elif staged_path:
+        from stage import RangeArchive, SparseArchive, load_manifest
 
         staged = load_manifest(staged_path, verify=True)
         if staged["group"] != group or staged["source"] != name:
@@ -302,8 +423,12 @@ def convert_group(job):
         files = []
 
         def archive_factory():
-            return RangeArchive(staged_path, staged)
+            return (
+                SparseArchive(staged_path, staged) if "archive_index" in staged else RangeArchive(staged_path, staged)
+            )
 
+        if "archive_index" in staged:
+            index = staged["archive_index"]
         source_fingerprint = staged["source_fingerprint"]
     else:
         files = sorted(p for p in (Path(source_root) / name).iterdir() if ".tar" in p.name)
@@ -312,7 +437,12 @@ def convert_group(job):
             return Parts(files)
 
         source_fingerprint = None
-    index = index_group(files, group, bucket / "meta" / "archive_index.json", archive_factory, source_fingerprint)
+    if index is None:
+        index = index_group(
+            files, original, bucket / "meta" / "archive_index.json", archive_factory, source_fingerprint
+        )
+    elif not (bucket / "meta/archive_index.json").exists():
+        atomic_json(bucket / "meta/archive_index.json", index)
     signature = hashlib.sha256(
         json.dumps([VERSION, definition, index["archive_fingerprint"], group], sort_keys=True).encode()
     ).hexdigest()
@@ -322,6 +452,12 @@ def convert_group(job):
         if complete["signature"] != signature:
             raise ValueError(f"Existing conversion definition changed: {bucket}")
         return complete
+    if pilot:
+        selection_receipt = bucket / "meta/pilot_selection.json"
+        if selection_receipt.exists():
+            previous = json.loads(selection_receipt.read_text())
+            if previous.get("conversion_signature") != signature:
+                raise ValueError("Incomplete pilot output belongs to a different immutable selection/definition")
     log("group_started", source=name, task=task, frames=group["frames"], bucket=str(bucket))
     arrays = index["arrays"]
     n = group["frames"]
@@ -347,13 +483,40 @@ def convert_group(job):
         ("index", np.arange(n, dtype=np.int64)),
     ]:
         features[k] = _feature(value)
+    if pilot:
+        source_frames = np.concatenate([np.arange(a, b, dtype=np.int64) for a, b in frame_ranges])
+        source_eps = np.repeat(np.asarray(source_episode_ids, dtype=np.int64), lengths)
+        for key, value in [("source_frame_index", source_frames), ("source_episode_index", source_eps)]:
+            key = "observation.ftp1." + key
+            columns[key], features[key] = pa.array(value), _feature(value)
+        atomic_json(
+            bucket / "meta/pilot_selection.json",
+            {
+                "schema": group["selection_schema"],
+                "conversion_signature": signature,
+                "source_group": group["group"],
+                "selected_source_episode_indices": source_episode_ids,
+                "source_frame_ranges": frame_ranges,
+                "source_total_frames": original["frames"],
+                "selected_frames": n,
+                "source_archive_fingerprint": index["archive_fingerprint"],
+                "selection_sha256": hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest(),
+                "reused_from": str(reuse_bucket) if reuse_bucket else None,
+            },
+        )
     videos, raw_numeric, instructions = {}, [], None
     with archive_factory() as stream:
         for key, spec in sorted(arrays.items()):
             if not key.startswith("data/"):
                 continue
             raw_key = key[len("data/") :]
-            array = Array(stream, spec)
+            if spec["config"]["shape"][0] != original["frames"]:
+                raise ValueError(f"Original source array length mismatch: {key}")
+            array = (
+                ReusedArray(reuse_bucket, reuse_table, raw_key, spec, frame_ranges, fps)
+                if reuse_bucket
+                else Array(stream, spec, frame_ranges)
+            )
             if array.shape[0] != n:
                 raise ValueError(f"Length mismatch {key} {array.shape[0]} != {n}")
             is_rgb = len(array.shape) in (4, 5) and array.shape[-1] == 3 and array.dtype == np.uint8
@@ -428,7 +591,9 @@ def convert_group(job):
             "meta/episodes/chunk_index": 0,
             "meta/episodes/file_index": 0,
             "source/group": group["group"],
-            "source/episode_index": i,
+            "source/episode_index": source_episode_ids[i],
+            "source/from_frame": frame_ranges[i][0],
+            "source/to_frame": frame_ranges[i][1],
         }
         for feature in videos:
             row.update(
@@ -475,6 +640,9 @@ def convert_group(job):
     regions_path = Path(definition_path).parent / "regions" / f"{name}.json"
     if regions_path.exists():
         definition["tactile_region_definition"] = json.loads(regions_path.read_text())
+    if pilot:
+        definition["selection_scope"] = "pilot_episodes"
+        definition["selected_source_episode_indices"] = source_episode_ids
     atomic_json(bucket / "meta" / "source_definition.json", definition)
     info = {
         "codebase_version": "v3.0",
@@ -516,6 +684,15 @@ def convert_group(job):
         "episodes": len(ends),
         "videos": len(videos),
         "seconds": time.time() - started,
+        **(
+            {
+                "selection_scope": "pilot_episodes",
+                "selected_source_episode_indices": source_episode_ids,
+                "reused_from": str(reuse_bucket) if reuse_bucket else None,
+            }
+            if pilot
+            else {}
+        ),
     }
     atomic_json(complete_path, complete)
     log("group_complete", **complete)
@@ -533,6 +710,9 @@ def main():
     parser.add_argument("--sources", nargs="*")
     parser.add_argument(
         "--staged-manifest", help="Convert one verified PFS task range; original archive mount is unnecessary"
+    )
+    parser.add_argument(
+        "--reuse-root", help="Validated full v3 root; pilot episodes reuse existing videos and numeric data"
     )
     parser.add_argument("--limit-groups", type=int)
     parser.add_argument("--exclude-sources", nargs="*", default=[])
@@ -564,6 +744,14 @@ def main():
         jobs = [(*job, args.staged_manifest) for job in jobs if job[3] == staged["group"]]
         if len(jobs) != 1:
             parser.error("Staged manifest must match exactly one selected census task")
+    if args.reuse_root:
+        reused = []
+        for job in jobs:
+            candidate = bucket_path(args.reuse_root, Path(job[2]).stem, job[3])
+            if (candidate / "meta/validation.json").exists():
+                job = (*job[:5], job[5] if len(job) > 5 else None, {"reuse_bucket": str(candidate)})
+            reused.append(job)
+        jobs = reused
     jobs.sort(key=lambda job: job[3]["frames"])
     if args.limit_groups is not None:
         jobs = jobs[: args.limit_groups]

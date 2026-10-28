@@ -252,7 +252,7 @@ def publish_sources(root, census, done, errors):
             "schema_version": "touchwam.ftp1.publication.v1",
             "source_id": "ftp1/" + name,
             "source": name,
-            "status": "ready"
+            "status": "complete"
             if ready
             else "blocked_time"
             if all_done and not time_valid
