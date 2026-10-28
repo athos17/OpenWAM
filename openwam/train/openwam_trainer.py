@@ -41,6 +41,7 @@ from openwam.train.utils.checkpointing import (
     save_weights,
     verify_resume_normalization_stats,
 )
+from openwam.train.utils import deferred_allgather
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sampler_seed
 from openwam.train.utils.step_timing import StepTimer
@@ -420,6 +421,7 @@ class OpenWAMTrainer:
                 if save_steps and global_step > 0 and global_step % save_steps == 0:
                     with timer.stage("checkpoint"):
                         self._flush_logs()
+                        deferred_allgather.wait()
                         save_weights(self.accelerator, self.architecture, output_path, global_step, final=False)
                         if save_full_states_for_resume:
                             save_full_state(self.accelerator, output_path, global_step, opt_step, epoch)
@@ -606,6 +608,11 @@ class OpenWAMTrainer:
         arch.move_frozen_to_device(self.accelerator.device)
         self._configure_input_fast_paths(arch)
         self._configure_compute_options(arch)
+        cfg = getattr(self, "cfg", None)
+        if cfg is not None and bool(cfg.training.get("overlap_param_allgather", False)):
+            if not hasattr(self.architecture, "optimizer"):
+                raise ValueError("training.overlap_param_allgather needs the DeepSpeed ZeRO-1/2 engine")
+            deferred_allgather.install()
         logger.info(
             "architecture wrapped (%s), device=%s",
             type(self.architecture).__name__,
@@ -617,8 +624,8 @@ class OpenWAMTrainer:
         """Opt-in frozen-encoder input options; runs after frozen modules reach the device.
 
         ``training.text_padding`` / ``training.text_dedup`` (UMT5) and
-        ``training.vae_cudnn_benchmark`` / ``training.vae_channels_last`` (VAE encode).
-        All default to the reference path.
+        ``training.vae_cudnn_benchmark`` / ``training.vae_channels_last`` /
+        ``training.vae_fused_norm`` (VAE encode). All default to the reference path.
         """
         cfg = getattr(self, "cfg", None)  # tests may build the trainer without a cfg
         if cfg is None:
@@ -634,16 +641,22 @@ class OpenWAMTrainer:
             logger.info("text encode: padding=%s dedup=%s", padding, dedup)
         cudnn_benchmark = bool(t.get("vae_cudnn_benchmark", False))
         channels_last = bool(t.get("vae_channels_last", False))
-        if cudnn_benchmark or channels_last:
+        fused_norm = bool(t.get("vae_fused_norm", False))
+        if cudnn_benchmark or channels_last or fused_norm:
             if not hasattr(vb, "set_vae_encode_options"):
-                raise ValueError("training.vae_cudnn_benchmark / vae_channels_last need a Wan video backbone")
-            vb.set_vae_encode_options(cudnn_benchmark=cudnn_benchmark, channels_last=channels_last)
-            logger.info("VAE encode: cudnn_benchmark=%s channels_last=%s", cudnn_benchmark, channels_last)
+                raise ValueError(
+                    "training.vae_cudnn_benchmark / vae_channels_last / vae_fused_norm need a Wan video backbone"
+                )
+            vb.set_vae_encode_options(cudnn_benchmark=cudnn_benchmark, channels_last=channels_last, fused_norm=fused_norm)
+            logger.info(
+                "VAE encode: cudnn_benchmark=%s channels_last=%s fused_norm=%s", cudnn_benchmark, channels_last, fused_norm
+            )
 
     def _configure_compute_options(self, arch) -> None:
-        """Opt-in DiT compute options: ``training.rope_impl`` (Wan RoPE precision/kernel) and
-        ``training.frame_time_modulation`` (per-latent-frame AdaLN modulation). Defaults keep
-        the reference path."""
+        """Opt-in DiT compute options: ``training.rope_impl`` (Wan RoPE precision/kernel),
+        ``training.frame_time_modulation`` (per-latent-frame AdaLN modulation) and
+        ``training.dit_block_fusion`` (compiled elementwise regions per Wan block). Defaults
+        keep the reference path."""
         cfg = getattr(self, "cfg", None)
         if cfg is None:
             return
@@ -665,6 +678,12 @@ class OpenWAMTrainer:
 
             wan_dit.set_rope_impl(rope_impl)
             logger.info("Wan RoPE: %s", rope_impl)
+        if bool(t.get("dit_block_fusion", False)):
+            vb = getattr(arch, "video_backbone", None)
+            if not hasattr(vb, "set_block_fusion"):
+                raise ValueError(f"training.dit_block_fusion needs a Wan video backbone (got {type(vb).__name__})")
+            vb.set_block_fusion(True)
+            logger.info("Wan block fusion: compiled elementwise regions")
 
     def _setup_step_timer(self, samples_per_step: int, output_path: str, is_main: bool) -> None:
         """``training.step_timing``: stage timers, incl. DeepSpeed's backward / step inside
@@ -737,6 +756,9 @@ class OpenWAMTrainer:
         if self.lambda_action > 0 and inputs.get("actions") is None:
             raise ValueError("lambda_action > 0 but no action in data.")
 
+        # training.overlap_param_allgather: the frozen-encoder work above overlapped the
+        # previous step's parameter all-gather; the DiT forward needs its result.
+        deferred_allgather.wait()
         with self.step_timer.count_flops("model"):
             result = self.architecture.compute_loss(
                 **inputs,
@@ -865,6 +887,7 @@ class OpenWAMTrainer:
         weight checkpoints (rank-0, post-barrier).
         """
         self._flush_logs()
+        deferred_allgather.wait()
         if save_steps:
             save_weights(self.accelerator, self.architecture, output_path, global_step, final=True)
         self.accelerator.wait_for_everyone()

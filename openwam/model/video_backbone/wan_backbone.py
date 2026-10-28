@@ -37,6 +37,9 @@ from openwam.model.video_backbone.wan import conditioning as wan_conditioning
 from openwam.model.video_backbone.wan import dit_forward as wan_dit_forward
 from openwam.model.video_backbone.wan import encode as wan_encode
 from openwam.model.video_backbone.wan import loader
+from openwam.model.video_backbone.wan import fused_block as wan_fused
+from openwam.model.video_backbone.wan.models import dit as wan_dit_models
+from openwam.model.video_backbone.wan.models import vae as wan_vae
 from openwam.model.video_backbone.wan.models.dit import modulate, rope_apply, split_time_modulation
 from openwam.model.video_backbone.wan.preprocess import (
     check_resize_height_width,
@@ -337,6 +340,22 @@ class WanBase(VideoBackbone):
                 self._wan_blocks_compile_enabled = False
                 logger.warning("Wan block torch.compile failed at block %s; falling back to eager: %s", block_id, exc)
 
+        if getattr(self, "_block_fusion", False):
+            cos, sin = self._rope_cos_sin(state)
+            return gradient_checkpoint_forward(
+                wan_fused.block_forward,
+                state.use_gradient_checkpointing,
+                state.use_gradient_checkpointing_offload,
+                block,
+                state.hidden_states,
+                state.context,
+                block_context_mask,
+                state.time_mod,
+                cos,
+                sin,
+                attn_mask,
+            )
+
         if attn_mask is not None:
             return gradient_checkpoint_forward(
                 block,
@@ -549,6 +568,13 @@ class WanBase(VideoBackbone):
         """Compile-friendly Wan pre-attention half using a tensor tuple post-state."""
         block = state.extras["dit"].blocks[layer_id]
 
+        if getattr(self, "_block_fusion", False):
+            cos, sin = self._rope_cos_sin(state)
+            q, k, v, gate_msa, shift_mlp, scale_mlp, gate_mlp = wan_fused.compiled("pre_attn")(
+                block, state.hidden_states, state.time_mod, cos, sin
+            )
+            return q, k, v, (state.hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp)
+
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = split_time_modulation(
             block.modulation, state.time_mod
         )
@@ -591,10 +617,19 @@ class WanBase(VideoBackbone):
         self_attn = block.self_attn
         residual_x, gate_msa, shift_mlp, scale_mlp, gate_mlp = post_state
 
-        hidden_states = block.gate(residual_x, gate_msa, self_attn.o(attn_out))
         context_mask = None
         if state.context_mask is not None:
-            context_mask = state.context_mask.unsqueeze(1).expand(-1, hidden_states.shape[1], -1).unsqueeze(1)
+            context_mask = state.context_mask.unsqueeze(1).expand(-1, residual_x.shape[1], -1).unsqueeze(1)
+        if getattr(self, "_block_fusion", False):
+            hidden_states, cross_q = wan_fused.compiled("post_self_attn")(block, residual_x, gate_msa, attn_out)
+            cross_out = wan_fused.cross_attn_core(block, cross_q, state.context, context_mask)
+            state.hidden_states = wan_fused.compiled("post_cross_attn")(
+                block, hidden_states, cross_out, shift_mlp, scale_mlp, gate_mlp
+            )
+            wan_dit_forward.apply_post_block_residuals(layer_id, state)
+            return state
+
+        hidden_states = block.gate(residual_x, gate_msa, self_attn.o(attn_out))
         hidden_states = hidden_states + block.cross_attn(
             block.norm3(hidden_states), state.context, ctx_mask=context_mask
         )
@@ -790,16 +825,41 @@ class WanBase(VideoBackbone):
         """
         self._frame_time_modulation = bool(enabled)
 
-    def set_vae_encode_options(self, *, cudnn_benchmark: bool = False, channels_last: bool = False) -> None:
+    def set_block_fusion(self, enabled: bool) -> None:
+        """Train-time option: run each Wan block's elementwise stretches as compiled
+        regions (``wan.fused_block``), in both the MoT pre/post halves and the
+        video-only block loop. Same math; bf16-rounding-level change."""
+        if enabled and any(b.cross_attn.has_image_input for b in self._dit.blocks):
+            raise ValueError("Wan block fusion does not cover image-conditioned cross-attention (I2V)")
+        self._block_fusion = bool(enabled)
+
+    def _rope_cos_sin(self, state: BlockLoopState) -> tuple[Tensor, Tensor]:
+        """Real cos/sin of ``state.rope_freqs`` for the fused RoPE, cached per forward
+        (float64 = the reference complex128 product, float32 under ``rope_impl=fp32``)."""
+        dtype = torch.float64 if wan_dit_models._ROPE_IMPL == "fp64" else torch.float32
+        cached = state.extras.get("_rope_cos_sin")
+        if cached is None or cached[0] is not state.rope_freqs or cached[1].dtype != dtype:
+            cached = (state.rope_freqs, *wan_fused.rope_cos_sin(state.rope_freqs, dtype))
+            state.extras["_rope_cos_sin"] = cached
+        return cached[1], cached[2]
+
+    def set_vae_encode_options(
+        self, *, cudnn_benchmark: bool = False, channels_last: bool = False, fused_norm: bool = False
+    ) -> None:
         """Train-time options for the frozen native VAE encode only.
 
         ``cudnn_benchmark`` lets cuDNN autotune the VAE convs (and lifts
         ``cudnn.deterministic``) inside the encode call; the trainable DiT keeps the
         global setting. ``channels_last`` stores the VAE Conv3d weights and input in
-        ``channels_last_3d``. Both change VAE rounding only at the bf16 level.
+        ``channels_last_3d``. ``fused_norm`` runs each RMS_norm + SiLU (and each down
+        block's shortcut add) as one compiled kernel (``vae.vae_fusion``). All three
+        change VAE rounding only at the bf16 level.
         """
         self._vae_cudnn_benchmark = bool(cudnn_benchmark)
         self._vae_channels_last = bool(channels_last)
+        self._vae_fused_norm = bool(fused_norm)
+        if self._vae_fused_norm and self.vae is None:
+            raise ValueError("vae fused_norm needs the native Wan VAE")
         if self._vae_channels_last:
             if self.vae is None:
                 raise ValueError("vae channels_last needs the native Wan VAE")
@@ -846,7 +906,11 @@ class WanBase(VideoBackbone):
                 frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device,
                 uint8_clips=kw.get("frames_uint8"),
             )
-        with self._timed("encode_video"), _cudnn_autotune(getattr(self, "_vae_cudnn_benchmark", False)):
+        with (
+            self._timed("encode_video"),
+            _cudnn_autotune(getattr(self, "_vae_cudnn_benchmark", False)),
+            wan_vae.vae_fusion(getattr(self, "_vae_fused_norm", False)),
+        ):
             vae_inputs = stacked_inputs
             if getattr(self, "_vae_channels_last", False):
                 vae_inputs = stacked_inputs.contiguous(memory_format=torch.channels_last_3d)

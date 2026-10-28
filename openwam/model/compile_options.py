@@ -213,6 +213,19 @@ def torch_compile_kwargs(compile_cfg: Any, *, default_mode: str | None = None) -
     return kwargs
 
 
+def raise_recompile_limit(limit: int) -> None:
+    """Let each compiled function keep at least ``limit`` shape specializations.
+
+    Train-time fusions compile one small function per call site and see one shape per
+    stage / data source; past Dynamo's default of 8 the rest would silently run eager.
+    """
+    import torch._dynamo.config as dynamo_config
+
+    for name in ("recompile_limit", "cache_size_limit"):
+        if getattr(dynamo_config, name, limit) < limit:
+            setattr(dynamo_config, name, limit)
+
+
 __all__ = [
     "as_bool",
     "compile_enabled",
@@ -222,6 +235,7 @@ __all__ = [
     "cfg_namespace",
     "idm_compile_cfg",
     "normalize_compile_enabled",
+    "raise_recompile_limit",
     "section_enabled",
     "self_attn_compile_cfg",
     "torch_compile_kwargs",

@@ -1,3 +1,5 @@
+import contextlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -53,6 +55,63 @@ class RMS_norm(nn.Module):
 
     def forward(self, x):
         return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.gamma + self.bias
+
+
+# Train-time encode fusion (training.vae_fused_norm, scoped by vae_fusion()): each
+# RMS_norm + SiLU pair and each AvgDown3D shortcut + residual add run as one
+# torch.compile kernel instead of a chain of eager elementwise kernels. Same math with
+# fp32 intermediates (rounding-level change); deploy/decode keep the eager path.
+_VAE_FUSION = False
+_vae_fused_fns = {}
+
+
+@contextlib.contextmanager
+def vae_fusion(enabled: bool):
+    global _VAE_FUSION
+    previous, _VAE_FUSION = _VAE_FUSION, bool(enabled)
+    try:
+        yield
+    finally:
+        _VAE_FUSION = previous
+
+
+def _norm_silu(x, gamma, bias, scale: float, dim: int):
+    return F.silu(F.normalize(x, dim=dim) * scale * gamma + bias)
+
+
+def _avg_down_add(x, shortcut_in, factor_t: int, factor_s: int, out_channels: int, group_size: int):
+    return x + _avg_down(shortcut_in, factor_t, factor_s, out_channels, group_size)
+
+
+def _vae_fused(name):
+    fn = _vae_fused_fns.get(name)
+    if fn is None:
+        from openwam.model.compile_options import raise_recompile_limit
+
+        raise_recompile_limit(64)
+        if name == "norm_silu":
+            # Shapes change with every encoder stage and temporal chunk: one dynamic graph.
+            fn = torch.compile(_norm_silu, dynamic=True)
+        else:
+            # Static: the dynamic-shape kernel for these views over channels_last input
+            # faults (torch 2.7); only a handful of (stage, chunk) shapes occur.
+            fn = torch.compile(_avg_down_add, dynamic=False)
+        _vae_fused_fns[name] = fn
+    return fn
+
+
+def _fusable_norm_silu(layers, i) -> bool:
+    return (
+        _VAE_FUSION
+        and isinstance(layers[i], RMS_norm)
+        and i + 1 < len(layers)
+        and isinstance(layers[i + 1], nn.SiLU)
+    )
+
+
+def _run_norm_silu(norm: "RMS_norm", x):
+    bias = norm.bias if isinstance(norm.bias, torch.Tensor) else torch.zeros((), dtype=x.dtype, device=x.device)
+    return _vae_fused("norm_silu")(x, norm.gamma, bias, float(norm.scale), 1 if norm.channel_first else -1)
 
 
 class Upsample(nn.Upsample):
@@ -209,8 +268,16 @@ class ResidualBlock(nn.Module):
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
         h = self.shortcut(x)
-        for layer in self.residual:
-            if check_is_instance(layer, CausalConv3d) and feat_cache is not None:
+        layers = list(self.residual)
+        skip = False
+        for i, layer in enumerate(layers):
+            if skip:  # SiLU already applied by the fused RMS_norm + SiLU
+                skip = False
+                continue
+            if _fusable_norm_silu(layers, i):
+                x = _run_norm_silu(layer, x)
+                skip = True
+            elif check_is_instance(layer, CausalConv3d) and feat_cache is not None:
                 idx = feat_idx[0]
                 cache_x = x[:, :, -CACHE_T:, :, :].clone()
                 if cache_x.shape[2] < 2 and feat_cache[idx] is not None:
@@ -279,38 +346,42 @@ class AvgDown3D(nn.Module):
         self.group_size = in_channels * self.factor // out_channels
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pad_t = (self.factor_t - x.shape[2] % self.factor_t) % self.factor_t
-        pad = (0, 0, 0, 0, pad_t, 0)
-        x = F.pad(x, pad)
-        B, C, T, H, W = x.shape
-        x = x.view(
-            B,
-            C,
-            T // self.factor_t,
-            self.factor_t,
-            H // self.factor_s,
-            self.factor_s,
-            W // self.factor_s,
-            self.factor_s,
-        )
-        x = x.permute(0, 1, 3, 5, 7, 2, 4, 6).contiguous()
-        x = x.view(
-            B,
-            C * self.factor,
-            T // self.factor_t,
-            H // self.factor_s,
-            W // self.factor_s,
-        )
-        x = x.view(
-            B,
-            self.out_channels,
-            self.group_size,
-            T // self.factor_t,
-            H // self.factor_s,
-            W // self.factor_s,
-        )
-        x = x.mean(dim=2)
-        return x
+        return _avg_down(x, self.factor_t, self.factor_s, self.out_channels, self.group_size)
+
+
+def _avg_down(x: torch.Tensor, factor_t: int, factor_s: int, out_channels: int, group_size: int) -> torch.Tensor:
+    pad_t = (factor_t - x.shape[2] % factor_t) % factor_t
+    pad = (0, 0, 0, 0, pad_t, 0)
+    x = F.pad(x, pad)
+    B, C, T, H, W = x.shape
+    x = x.view(
+        B,
+        C,
+        T // factor_t,
+        factor_t,
+        H // factor_s,
+        factor_s,
+        W // factor_s,
+        factor_s,
+    )
+    x = x.permute(0, 1, 3, 5, 7, 2, 4, 6).contiguous()
+    x = x.view(
+        B,
+        C * factor_t * factor_s * factor_s,
+        T // factor_t,
+        H // factor_s,
+        W // factor_s,
+    )
+    x = x.view(
+        B,
+        out_channels,
+        group_size,
+        T // factor_t,
+        H // factor_s,
+        W // factor_s,
+    )
+    x = x.mean(dim=2)
+    return x
 
 
 class DupUp3D(nn.Module):
@@ -383,7 +454,8 @@ class Down_ResidualBlock(nn.Module):
         self.downsamples = nn.Sequential(*downsamples)
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
-        x_copy = x.clone()
+        # The blocks below never write x in place, so the fused path skips the copy.
+        x_copy = x if _VAE_FUSION else x.clone()
         for module in self.downsamples:
             out = module(x, feat_cache, feat_idx)
             if isinstance(out, tuple):
@@ -391,6 +463,10 @@ class Down_ResidualBlock(nn.Module):
             else:
                 x = out
 
+        if _VAE_FUSION:
+            s = self.avg_shortcut
+            x = _vae_fused("avg_down_add")(x, x_copy, s.factor_t, s.factor_s, s.out_channels, s.group_size)
+            return x, feat_cache, feat_idx
         return x + self.avg_shortcut(x_copy), feat_cache, feat_idx
 
 
@@ -614,8 +690,16 @@ class Encoder3d_38(nn.Module):
                 x = layer(x)
 
         ## head
-        for layer in self.head:
-            if isinstance(layer, CausalConv3d) and feat_cache is not None:
+        layers = list(self.head)
+        skip = False
+        for i, layer in enumerate(layers):
+            if skip:  # SiLU already applied by the fused RMS_norm + SiLU
+                skip = False
+                continue
+            if _fusable_norm_silu(layers, i):
+                x = _run_norm_silu(layer, x)
+                skip = True
+            elif isinstance(layer, CausalConv3d) and feat_cache is not None:
                 idx = feat_idx[0]
                 cache_x = x[:, :, -CACHE_T:, :, :].clone()
                 if cache_x.shape[2] < 2 and feat_cache[idx] is not None:

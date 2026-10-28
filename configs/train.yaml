@@ -66,11 +66,18 @@ training:
   text_dedup: false               # UMT5: encode each distinct prompt in the batch once
   vae_cudnn_benchmark: false      # cuDNN autotune for the frozen VAE encode only (training stays as configured)
   vae_channels_last: false        # channels_last_3d VAE Conv3d weights + input (bf16-level rounding change)
+  vae_fused_norm: false           # VAE encode: each RMS_norm + SiLU and down-block shortcut add as one compiled
+                                  # kernel (torch.compile; bf16-level rounding change)
   rope_impl: fp64                 # Wan RoPE: fp64 = reference complex128; fp32 = float32 cos/sin, fused by
                                   # torch.compile (bf16 output; rounding-level change)
   frame_time_modulation: false    # Wan TI2V AdaLN modulation kept per latent frame (B, F, 1, 6, dim) and broadcast
                                   # in the blocks instead of materialized per token; same values, less activation
                                   # memory (dual_system joint_self_attn only)
+  dit_block_fusion: false         # Wan blocks: the elementwise stretches around the attentions (norms, modulate,
+                                  # RMSNorm, RoPE, gates, residuals) as compiled regions, forward and backward;
+                                  # GEMMs stay on cuBLAS (bf16-level rounding change)
+  overlap_param_allgather: false  # DeepSpeed ZeRO-1/2: launch the post-step parameter all-gather async and wait
+                                  # before the next DiT forward, so the next batch's VAE/T5 encode overlaps it
 
   # --- Memory optimization ---
   use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
