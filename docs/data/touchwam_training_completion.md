@@ -1,5 +1,7 @@
 # TouchWAM 训练实现修复与使用边界
 
+后续更新：光学触觉现采用 [原始 RGB 编码与预测分支](../touchwam/optical_rgb.md)，不再要求 FTP 光学来源先重建 deform。下文记录 `4b6b4fa` 时的单通道基线；当前 RGB 来源还需发布 [RGB 映射合同](tactile_rgb_contract.md) 和已验证动作合同。已有 Sharpa deform 路线保留。
+
 本次从 `25401f8` 开始，在 `codex/touchwam-training-complete` 独立分支修复，并合入后续数据说明提交至 `1d2d7dd`；本次代码改动的比较基线为 `1d2d7dd`。服务器独立工作区为 `/mnt/pfs/v89atp/workspace/OpenWAM-touchwam-training`。原 `OpenWAM-touchwam` 数据转换工作区保持独立，不重转已有 EgoDex、SharpaDex、AgiBot，不实现 BOS 训练预取。
 
 ## 已补齐的代码

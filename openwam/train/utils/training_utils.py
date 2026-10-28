@@ -150,7 +150,7 @@ def reduce_step_metrics(accelerator, losses: dict, grad_norm) -> dict:
     def _f(v):
         return v.item() if isinstance(v, torch.Tensor) else float(v)
 
-    extra_keys = [key for key in ("tactile", "tactile_contact", "tactile_distance", "tactile_deform", "tactile_intensity") if key in losses]
+    extra_keys = [key for key in ("tactile", "tactile_contact", "tactile_distance", "tactile_deform", "tactile_intensity", "tactile_rgb") if key in losses]
     count_keys = sorted(k for k in losses if k.startswith("samples_") or k.startswith("tactile_labeled_"))
     if accelerator is not None and accelerator.num_processes > 1:
         local = torch.tensor(

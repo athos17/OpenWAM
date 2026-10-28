@@ -80,6 +80,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/FreeTacMan
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -101,6 +104,7 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/MotionTrans
     tactile_mode: required
+    tactile_representation: intensity  # Requires verified scalar labels; no RGB fallback.
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -121,6 +125,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RDP
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -141,6 +148,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RDP_Bimanual
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -162,6 +172,7 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RH20TCfg5Franka
     tactile_mode: required
+    tactile_representation: intensity  # Requires verified scalar labels; no RGB fallback.
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -183,6 +194,7 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RH20TCfg6ATIAxia
     tactile_mode: required
+    tactile_representation: intensity  # Requires verified scalar labels; no RGB fallback.
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -203,6 +215,7 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/RH20TCfg7Tactile
     tactile_mode: required
+    tactile_representation: intensity  # Requires verified scalar labels; no RGB fallback.
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -223,6 +236,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/Unit
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -243,6 +259,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/Unit_Bimanual
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -263,6 +282,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/VLA_touch
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -283,6 +305,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/ViTaMIn
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -303,6 +328,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/VisuoTactile_D-WHEEL
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -323,6 +351,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/VisuoTactile_QINGLOONG
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4
@@ -343,6 +374,9 @@ datasets:
     strict_buckets: true
     dataset_dir: ${dataloader.data_root}/ftp1/exUMI
     tactile_mode: required
+    tactile_representation: rgb  # Optical appearance, not pressure or reconstructed depth.
+    tactile_rgb_manifest: meta/tactile_rgb.json
+    tactile_rgb_map_size: 128
     total_hours: null
     num_frames: 33
     video_stride: 4

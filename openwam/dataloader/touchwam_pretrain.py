@@ -31,6 +31,7 @@ from openwam.dataloader.utils.lerobotv3 import (
 )
 from openwam.dataloader.utils.video_io import decode_video_frames
 from openwam.tactile.intensity_store import FUTURE_TIMES, HISTORY_TIMES, IntensityStore
+from openwam.tactile.rgb_store import RGB_CODEC, RGBTactileStore
 
 
 def _sha(path):
@@ -72,6 +73,10 @@ class HomogeneousPublishedBuckets(MultiLeRobotV3Reader):
         if len(modes) != 1:
             raise ValueError("Split differing supervision modes into separate mixture sources")
         self.training_modality = modes.pop()
+        codecs = {getattr(b, "tactile_codec", None) for b in buckets} - {None}
+        if len(codecs) > 1:
+            raise ValueError("A source must use one tactile representation; split RGB and intensity sources explicitly")
+        self.tactile_codec = next(iter(codecs), None)
         self.normalization_stats_path = None
         paths = [getattr(b, "normalization_stats_path", None) for b in buckets]
         if any(paths):
@@ -87,6 +92,7 @@ class HomogeneousPublishedBuckets(MultiLeRobotV3Reader):
     @property
     def training_data_contract(self):
         return {"schema": "touchwam_published_buckets_v1", "training_modality": self.training_modality,
+                "tactile_codec": self.tactile_codec,
                 "buckets": [b.training_data_contract for b in self.buckets]}
 
 
@@ -100,6 +106,7 @@ class PublishedModalityBuckets(MultiLeRobotV3Reader):
 
     training_modality = "mixed"
     normalization_stats_path = None
+    tactile_codec = None
 
     def __init__(self, buckets):
         super().__init__(buckets)
@@ -173,6 +180,8 @@ class LeRobotVideoIntensityDataset(BaseDataset):
     def __init__(self, dataset_dir, *, split="train", sampling_fps=30, num_frames=33,
                  video_stride=4, window_stride=1, height=384, width=320,
                  camera_layout=None, tactile_mode="auto", tactile_map_size=32,
+                 tactile_representation="intensity", tactile_rgb_manifest="meta/tactile_rgb.json",
+                 tactile_rgb_map_size=128,
                  history_times=HISTORY_TIMES, future_times=FUTURE_TIMES,
                  color_jitter=None, seed=42, max_hours=None):
         self.root = Path(dataset_dir).resolve(strict=True)
@@ -277,12 +286,17 @@ class LeRobotVideoIntensityDataset(BaseDataset):
                     self.tasks[tid] = text
         if tactile_mode not in ("auto", "required", "off"):
             raise ValueError("tactile_mode must be auto, required or off")
-        manifest = self.root / "tactile/manifest.json"
+        if tactile_representation not in ("intensity", "rgb"):
+            raise ValueError("tactile_representation must be intensity or rgb")
+        self.tactile_representation = tactile_representation
+        manifest = self.root / (tactile_rgb_manifest if tactile_representation == "rgb" else "tactile/manifest.json")
         if tactile_mode == "required" and not manifest.exists():
             raise FileNotFoundError(f"Required tactile publication missing: {manifest}")
-        self.touch = IntensityStore(manifest, self.root, size=tactile_map_size,
-                                    history_times=history_times, future_times=future_times) \
+        store = RGBTactileStore if tactile_representation == "rgb" else IntensityStore
+        map_size = tactile_rgb_map_size if tactile_representation == "rgb" else tactile_map_size
+        self.touch = store(manifest, self.root, size=map_size, history_times=history_times, future_times=future_times) \
             if tactile_mode != "off" and manifest.exists() else None
+        self.tactile_codec = (RGB_CODEC if tactile_representation == "rgb" else "tactile_intensity_v1") if self.touch else None
         if self.touch and any(str(int(e)) not in self.touch.episodes for e in eps.episode_index):
             raise ValueError("Tactile manifest does not cover every selected episode")
         self.training_modality = "video_tactile" if self.touch else "video_only"
@@ -296,6 +310,8 @@ class LeRobotVideoIntensityDataset(BaseDataset):
                                  for p in sorted((self.root / "meta/episodes").rglob("*.parquet"))},
             "definition_sha256": _sha(definition) if definition.exists() else None,
             "tactile_manifest_sha256": self.touch.digest if self.touch else None,
+            "tactile_codec": self.tactile_codec, "tactile_representation": tactile_representation,
+            "tactile_map_size": map_size if self.touch else None,
             "split": split, "selected_episodes": eps.episode_index.astype(int).tolist(),
             "source_fps": self.fps, "sampling_fps": self.sampling_fps,
             "video_times_s": self.video_offsets_s.tolist(), "window_stride": window_stride,
@@ -413,6 +429,7 @@ class LeRobotVideoIntensityDataset(BaseDataset):
         root = Path(get_cfg(config, "dataset_dir"))
         fields = ("sampling_fps", "num_frames", "video_stride", "window_stride", "height", "width",
                   "camera_layout", "tactile_mode", "tactile_map_size", "history_times", "future_times",
+                  "tactile_representation", "tactile_rgb_manifest", "tactile_rgb_map_size",
                   "color_jitter", "seed") + cls.EXTRA_CONFIG_FIELDS
         kwargs = {k: get_cfg(config, k) for k in fields if get_cfg(config, k) is not None}
         total_hours = get_cfg(config, "total_hours")
@@ -438,6 +455,8 @@ class LeRobotVideoIntensityDataset(BaseDataset):
             budgets = water_fill_hours(hours, float(total_hours))
         buckets = [cls(p, split=split, max_hours=h, **kwargs)
                    for p, h in zip(paths, budgets) if h is None or h > 0]
+        if len({b.tactile_codec for b in buckets} - {None}) > 1:
+            raise ValueError("A source cannot mix RGB and intensity tactile representations")
         if len({b.training_modality for b in buckets}) > 1:
             return PublishedModalityBuckets(buckets)
         return HomogeneousPublishedBuckets(buckets)
@@ -445,6 +464,7 @@ class LeRobotVideoIntensityDataset(BaseDataset):
 
 class MultiSharpaIntensityDataset(MultiSharpaDexTianjiGlobalDataset):
     training_modality = "video_action_tactile"
+    tactile_codec = "tactile_intensity_v1"
 
     @property
     def training_data_contract(self):
@@ -454,6 +474,7 @@ class MultiSharpaIntensityDataset(MultiSharpaDexTianjiGlobalDataset):
 
 class SharpaNativeIntensityDataset(SharpaDexNativeTCPDataset):
     training_modality = "video_action_tactile"
+    tactile_codec = "tactile_intensity_v1"
     NEEDED_COLS = (*SharpaDexNativeTCPDataset.NEEDED_COLS, "timestamp")
     CONFIG_KEYS = (*SharpaDexNativeTCPDataset.CONFIG_KEYS, "tactile_map_size", "history_times", "future_times", "tactile_root")
 

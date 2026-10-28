@@ -23,6 +23,13 @@ def cpu_only_optional_backend_detection(monkeypatch):
     # Accelerate probes an installed DeepSpeed even on its plain CPU backend.
     # Hide that optional backend so these CPU tests need no CUDA compiler.
     monkeypatch.setattr("accelerate.utils.other.is_deepspeed_available", lambda: False)
+    # Sampler tests initialize Accelerate's process-global state for simulated
+    # ranks. Isolate the actual CPU backend from those preceding test cases.
+    from accelerate.state import AcceleratorState
+
+    AcceleratorState._reset_state(reset_partial_state=True)
+    yield
+    AcceleratorState._reset_state(reset_partial_state=True)
 
 
 class TinyDataset(torch.utils.data.Dataset):

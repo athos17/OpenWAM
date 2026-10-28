@@ -27,13 +27,13 @@ from openwam.model.architectures.base import BaseWAMArchitecture
 from openwam.model.action_backbone.scheduler import ActionScheduler
 from openwam.model.video_backbone.wan.models.dit import WanModel
 from openwam.model.video_backbone.wan_backbone import Wan21
-from openwam.tactile.regions import INTENSITY_CODEC
+from openwam.tactile.regions import INTENSITY_CODEC, RGB_CODEC
 from openwam.train.utils.modality_optimizer import (
     ModalityAwareAdamW, build_modality_groups, validate_global_modality_layout,
 )
 
 
-def tiny_model(device, dtype):
+def tiny_model(device, dtype, *, rgb_enabled=False):
     def init_video(self, cfg):
         dit = WanModel(dim=96, in_dim=4, out_dim=4, ffn_dim=192, text_dim=32, freq_dim=32,
                        eps=1e-6, patch_size=(1, 2, 2), num_heads=4, num_layers=2,
@@ -46,6 +46,8 @@ def tiny_model(device, dtype):
                tactile=dict(width=16, heads=4, layers=2, bridge_layers=[0, 1], history_layers=1,
                             map_size=32, patch_size=16, history=4, future_frames=8, future_stride=3,
                             codec=INTENSITY_CODEC))
+    if rgb_enabled:
+        cfg["tactile"].update(rgb_enabled=True, rgb_map_size=128, rgb_patch_size=64)
     with patch.object(BaseWAMArchitecture, "_init_video_backbone", init_video):
         model = build_architecture("touchwam_regions", cfg)
     model.set_dtype_device(dtype, device)
@@ -53,7 +55,7 @@ def tiny_model(device, dtype):
     return model
 
 
-def make_inputs(modality, device, dtype, *, absent="none"):
+def make_inputs(modality, device, dtype, *, absent="none", tactile_codec=None):
     # Small spatial video grid and real 80-slot actions; tactile time/grid matches production.
     inputs = dict(input_latents=torch.randn(1, 4, 3, 4, 4, device=device, dtype=dtype),
                   context=torch.randn(1, 4, 32, device=device, dtype=dtype),
@@ -68,12 +70,17 @@ def make_inputs(modality, device, dtype, *, absent="none"):
     else:
         inputs["video_only_mask"] = torch.ones(1, device=device, dtype=torch.bool)
     if "tactile" in modality and absent != "layout":
-        inputs.update(tactile_maps=torch.rand(1, 4, 2, 1, 32, 32, device=device, dtype=dtype),
+        if tactile_codec not in (None, INTENSITY_CODEC, RGB_CODEC):
+            raise ValueError(f"Unsupported smoke tactile codec: {tactile_codec}")
+        channels, size = (3, 128) if tactile_codec == RGB_CODEC else (1, 32)
+        inputs.update(tactile_maps=torch.rand(1, 4, 2, channels, size, size, device=device, dtype=dtype),
                       tactile_valid=torch.ones(1, 4, 2, device=device, dtype=torch.bool),
                       tactile_region_ids=torch.tensor([[58, 59]], device=device),
                       tactile_layout_present=torch.ones(1, 2, device=device, dtype=torch.bool),
-                      future_tactile_maps=torch.rand(1, 8, 2, 1, 32, 32, device=device, dtype=dtype),
+                      future_tactile_maps=torch.rand(1, 8, 2, channels, size, size, device=device, dtype=dtype),
                       future_tactile_valid=torch.ones(1, 8, 2, device=device, dtype=torch.bool))
+        if tactile_codec is not None:
+            inputs["tactile_codec"] = tactile_codec
         if absent in ("labels", "queries"):
             inputs["future_tactile_valid"].zero_()
         if absent == "queries":

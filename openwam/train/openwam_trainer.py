@@ -483,11 +483,15 @@ class OpenWAMTrainer:
             )
             accelerator = getattr(self, "accelerator", None)
             world_size = accelerator.num_processes if accelerator is not None else 1
-            mixed_modalities = len(set(self.dataset.source_modalities)) > 1
+            source_graphs = list(zip(self.dataset.source_modalities, self.dataset.source_tactile_codecs))
+            mixed_modalities = len(set(source_graphs)) > 1
+            tactile_codecs = {codec for codec in self.dataset.source_tactile_codecs if codec is not None}
+            codec_batching = "tactile_rgb_v1" in tactile_codecs or len(tactile_codecs) > 1
             self.dataset.training_layout = {
                 "world_size": world_size, "microbatch": batch_size,
                 "gradient_accumulation": int(getattr(t, "gradient_accumulation_steps", 1)),
-                "batching": ("global_modality_v2" if any("tactile" in m for m in self.dataset.source_modalities)
+                "batching": ("global_modality_codec_v3" if codec_batching else
+                             "global_modality_v2" if any("tactile" in m for m in self.dataset.source_modalities)
                              else "global_modality_v1") if mixed_modalities else "shuffled_windows",
             }
             if mixed_modalities:
@@ -691,14 +695,16 @@ class OpenWAMTrainer:
             lambda_action=self.lambda_action,
         )
         if active_modality is not None:
-            self._modality_optimizer.activate(active_modality)
+            from openwam.dataloader.modality_sampler import batch_tactile_codec
+
+            self._modality_optimizer.activate(active_modality, batch_tactile_codec(batch))
 
         losses = {
             "total": result["loss"],
             "video": result.get("loss_video", torch.tensor(0.0)),
             "action": result.get("loss_action", torch.tensor(0.0)),
         }
-        for key in ("tactile", "tactile_contact", "tactile_distance", "tactile_deform", "tactile_intensity"):
+        for key in ("tactile", "tactile_contact", "tactile_distance", "tactile_deform", "tactile_intensity", "tactile_rgb"):
             if f"loss_{key}" in result:
                 losses[key] = result[f"loss_{key}"]
         for key in ("tactile_labeled_regions", "tactile_labeled_frames"):
@@ -706,6 +712,12 @@ class OpenWAMTrainer:
         modes = ("video_only", "video_action", "video_tactile", "video_action_tactile")
         for mode in modes:
             losses["samples_" + mode] = sum(s.get("training_modality", "video_action") == mode for s in batch)
+        from openwam.dataloader.modality_sampler import TACTILE_CODEC_CODES
+
+        for codec in TACTILE_CODEC_CODES:
+            losses["samples_codec/" + (codec or "none")] = sum(
+                (s.get("tactile_codec", "tactile_intensity_v1")
+                 if "tactile" in s.get("training_modality", "video_action") else None) == codec for s in batch)
         for name in getattr(getattr(self, "dataset", None), "names", []):
             losses["samples_source/" + name] = sum(s.get("_dataset_name") == name for s in batch)
         return losses
@@ -728,7 +740,7 @@ class OpenWAMTrainer:
     ) -> None:
         """Update progress bar, log to wandb, and (debug) write the loss-history CSV row."""
         labels = [("action", "loss_action")]
-        labels.extend((key, f"loss_{key}") for key in ("tactile", "tactile_contact", "tactile_distance", "tactile_deform", "tactile_intensity")
+        labels.extend((key, f"loss_{key}") for key in ("tactile", "tactile_contact", "tactile_distance", "tactile_deform", "tactile_intensity", "tactile_rgb")
                       if f"loss_{key}" in metrics)
         loss_total = metrics["loss_total"]
         loss_video = metrics["loss_video"]

@@ -320,8 +320,11 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
                 vstate.hidden_states = vx
                 if astate is not None:
                     astate.payload.x_action = ax
-        prediction = self.touch_v2.output(future).masked_fill(~tactile_future_valid[..., None], 0)
+        prediction = self._predict_tactile(future, touch_condition).masked_fill(~tactile_future_valid[..., None], 0)
         return vb.finalize(vstate), None if astate is None else ab.extract_prediction(astate), prediction
+
+    def _predict_tactile(self, future, condition):
+        return self.touch_v2.output(future)
 
     def _prepare_tactile(self, noisy_actions, noisy_tactile, tactile_timestep, tactile_future_valid,
                          tactile_maps, tactile_valid, touch_condition):

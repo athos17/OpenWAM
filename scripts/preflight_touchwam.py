@@ -21,6 +21,7 @@ from omegaconf import OmegaConf
 
 from openwam.dataloader.publication import source_publication_contract
 from openwam.dataloader.registry import build_dataset
+from openwam.tactile.regions import INTENSITY_CODEC, RGB_CODEC
 
 
 MODALITIES = {
@@ -47,7 +48,11 @@ def validate_source_contract(name, source):
         raise ValueError("FTP-1 is a robot source and requires measured action supervision")
     if kind == "robot" and source.get("type") in ("lerobot_video_intensity", "egodex_reuse_video"):
         raise ValueError("Robot sources require an action reader; V/VT readers are forbidden")
-    return {"source_kind": kind, "expected_modalities": expected}
+    representation = source.get("tactile_representation", "intensity")
+    if representation not in ("intensity", "rgb"):
+        raise ValueError("tactile_representation must be intensity or rgb")
+    return {"source_kind": kind, "expected_modalities": expected,
+            "expected_tactile_codec": RGB_CODEC if representation == "rgb" else INTENSITY_CODEC}
 
 
 def validate_training_schedule(training):
@@ -84,6 +89,17 @@ def validate_tactile_sample(sample, spec):
 
     if spec is None:
         raise ValueError("Tactile preflight requires the resolved model tactile specification")
+    codec = sample.get("tactile_codec")
+    if codec == RGB_CODEC:
+        if spec.get("rgb_enabled", False) is not True:
+            raise ValueError("RGB tactile data requires the model's rgb_enabled adapter")
+        size, channels, meaning = spec.get("rgb_map_size", 128), 3, "optical_rgb"
+    elif codec == spec["codec"] == INTENSITY_CODEC:
+        size, channels, meaning = spec["map_size"], 1, "normalized_contact_intensity"
+    else:
+        raise ValueError("Sample tactile codec is not supported by the live model")
+    if type(size) is not int or size < 1:
+        raise ValueError("Selected tactile map size must be a positive integer")
     for key in ("map_size", "history", "future_frames", "future_stride", "fps"):
         if type(spec[key]) is not int or spec[key] < 1:
             raise ValueError(f"Model tactile {key} must be a positive integer")
@@ -97,13 +113,13 @@ def validate_tactile_sample(sample, spec):
     }
     for key, grid in expected.items():
         if key not in sample:
-            raise ValueError(f"Intensity samples require explicit {key}")
+            raise ValueError(f"Tactile samples require explicit {key}")
         times = torch.as_tensor(sample[key], dtype=torch.float64).cpu()
         if times.shape != grid.shape or not torch.allclose(times, grid, atol=1e-6, rtol=0):
             raise ValueError(f"Dataset/model {key} differ; resample to the configured model grid")
     batch = collate_regions(
-        [sample], map_size=spec["map_size"], history=spec["history"], future_frames=spec["future_frames"],
-        region_names=list(spec["region_names"]), sensor_names=sensors, codec=spec["codec"],
+        [sample], map_size=size, history=spec["history"], future_frames=spec["future_frames"],
+        region_names=list(spec["region_names"]), sensor_names=sensors, codec=codec,
     )
     present = batch["tactile_layout_present"]
     spatial = batch["tactile_spatial_valid"]
@@ -117,9 +133,9 @@ def validate_tactile_sample(sample, spec):
         if (valid & ~measured_region[:, None]).any():
             raise ValueError(f"{validity} labels a region absent from the layout or spatial ROI")
         pixels = valid[..., None, None, None] & spatial[:, None]
-        observed = batch[key][pixels]
+        observed = batch[key][pixels.expand_as(batch[key])]
         if not torch.isfinite(observed).all() or (observed < 0).any() or (observed > 1).any():
-            raise ValueError("Observed tactile intensity outside [0,1]")
+            raise ValueError(f"Observed tactile {meaning} values outside [0,1]")
         counts[validity] = int(valid.sum())
     for key, validity, grid_key in (
         ("tactile_history_source_times_s", "tactile_valid", "tactile_history_times_s"),
@@ -139,6 +155,8 @@ def validate_tactile_sample(sample, spec):
     # Availability of a future label never determines the prediction query.
     effective = batch["future_tactile_valid"] & query
     return {"regions": list(sample["tactile_region_names"]),
+            "tactile_codec": codec, "tactile_representation": meaning,
+            "channels": channels, "map_size": size,
             "history_observations": counts["tactile_valid"],
             "future_labels": counts["future_tactile_valid"],
             "supervised_future_regions": int(effective.sum()),
@@ -155,7 +173,8 @@ def atomic_json(path, obj):
     tmp.replace(path)
 
 
-def validate_sample(sample, mode, *, tactile_spec=None, source_kind=None, expected_modalities=None):
+def validate_sample(sample, mode, *, tactile_spec=None, source_kind=None, expected_modalities=None,
+                    expected_tactile_codec=None):
     if mode not in MODALITIES["ego"] | MODALITIES["robot"]:
         raise ValueError(f"Unknown training modality: {mode}")
     if source_kind is not None and mode not in MODALITIES[source_kind]:
@@ -200,8 +219,8 @@ def validate_sample(sample, mode, *, tactile_spec=None, source_kind=None, expect
     if tactile:
         if not sample.get("tactile_region_names"):
             raise ValueError("Tactile modalities require an explicit nonempty regional layout")
-        if sample.get("tactile_codec") != "tactile_intensity_v1":
-            raise ValueError("Expected the intensity-v1 data contract")
+        if expected_tactile_codec is not None and sample.get("tactile_codec") != expected_tactile_codec:
+            raise ValueError("Reader tactile codec differs from the selected source representation")
         touch, touch_supervised = validate_tactile_sample(sample, tactile_spec)
         summary.update(touch)
         supervised |= touch_supervised
@@ -252,6 +271,9 @@ def run(config, overrides, output, *, metadata_only=False, alpha_audit=None):
             try:
                 contract = validate_source_contract(name, source)
                 entry.update(contract)
+                if (contract["expected_tactile_codec"] == RGB_CODEC
+                        and cfg.model.architecture.tactile.get("rgb_enabled", False) is not True):
+                    raise ValueError("RGB source selected but the model RGB adapter is disabled")
                 entry["publication"] = source_publication_contract(source)
                 if metadata_only:
                     continue

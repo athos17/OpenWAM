@@ -1,8 +1,8 @@
-"""Align each global microbatch's modality across data-parallel workers.
+"""Align each global microbatch's modality and codec across parallel workers.
 
 ZeRO-2's gradient buckets must follow the same graph on every rank. Robot
 sources may mix within a batch; strict video-only samples use separate batches.
-All virtual windows are retained, with at most one padded global batch per modality.
+All virtual windows are retained, with at most one padded batch per modality/codec.
 """
 import math
 
@@ -10,6 +10,19 @@ import numpy as np
 from torch.utils.data import Sampler
 
 MODALITY_CODES = {"video_action": 0, "video_only": 1, "video_tactile": 2, "video_action_tactile": 3}
+TACTILE_CODEC_CODES = {None: 0, "tactile_intensity_v1": 1, "sharpa_deform_gray_v1": 2, "tactile_rgb_v1": 3}
+
+
+def batch_tactile_codec(samples):
+    """One selected tactile representation; never mix RGB/intensity in a batch."""
+    if any("tactile" in sample.get("training_modality", "video_action")
+           and sample.get("tactile_codec", "tactile_intensity_v1") is None for sample in samples):
+        raise ValueError("Tactile microbatch requires a non-null tactile codec")
+    codecs = {sample.get("tactile_codec", "tactile_intensity_v1")
+              if "tactile" in sample.get("training_modality", "video_action") else None for sample in samples}
+    if len(codecs) != 1 or next(iter(codecs)) not in TACTILE_CODEC_CODES:
+        raise ValueError("Microbatch contains mixed or unsupported tactile codecs")
+    return next(iter(codecs))
 
 
 def batch_modality_code(samples):
@@ -26,7 +39,16 @@ class GlobalModalitySampler(Sampler):
         self.global_batch_size = int(batch_size) * int(world_size)
         if any(m not in MODALITY_CODES for m in dataset.source_modalities):
             raise ValueError("Unregistered training modality")
-        self._source_codes = np.asarray([MODALITY_CODES[m] for m in dataset.source_modalities])
+        codecs = getattr(dataset, "source_tactile_codecs", [
+            "tactile_intensity_v1" if "tactile" in mode else None for mode in dataset.source_modalities])
+        if len(codecs) != len(dataset.source_modalities) or any(
+            (codec is not None) != ("tactile" in mode) for mode, codec in zip(dataset.source_modalities, codecs)
+        ):
+            raise ValueError("Every tactile source requires a codec; sources without tactile use null")
+        if any(codec not in TACTILE_CODEC_CODES for codec in codecs):
+            raise ValueError("Unregistered tactile codec")
+        self._source_codes = np.asarray([4 * MODALITY_CODES[m] + TACTILE_CODEC_CODES[c]
+                                         for m, c in zip(dataset.source_modalities, codecs)])
         self._modalities = tuple(sorted(set(self._source_codes.tolist())))
 
     def set_epoch(self, epoch):

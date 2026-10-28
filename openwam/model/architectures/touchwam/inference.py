@@ -50,7 +50,8 @@ def _predict(model, actions, at, touch, shared, vt, scale, merge, *, tt=None):
             v_timestep=vt,
             a_timestep=at,
         )
-        expanded["touch_condition"] = tuple(torch.cat((x, x)) for x in shared["touch_condition"])
+        expanded["touch_condition"] = tuple(torch.cat((x, x)) if isinstance(x, torch.Tensor) else x
+                                            for x in shared["touch_condition"])
         expanded["tactile_future_valid"] = torch.cat((shared["tactile_future_valid"],) * 2)
         if "uncond_context_mask" in shared:
             expanded["context_mask"] = torch.cat((shared["uncond_context_mask"], shared["context_mask"]))
@@ -85,6 +86,7 @@ def generate_three_stream(
     tactile_spatial_valid=None,
     tactile_sensor_ids=None,
     tactile_palm_mode=None,
+    tactile_codec=None,
     vace_video=None,
     first_frame_image=None,
     num_frames=9,
@@ -117,7 +119,7 @@ def generate_three_stream(
     model.eval()
     tactile_options = (tactile_maps, tactile_valid, tactile_region_ids, tactile_layout_present,
                        tactile_query_mask, tactile_spatial_valid, tactile_sensor_ids)
-    has_touch_input = any(value is not None for value in tactile_options)
+    has_touch_input = any(value is not None for value in tactile_options) or tactile_codec is not None
     explicit_modality = generation_modality is not None
     if generation_modality is None:
         generation_modality = "video_action_tactile" if has_touch_input else "video_action"
@@ -188,11 +190,13 @@ def generate_three_stream(
         if proprio is None:
             raise ValueError("use_proprioception=True requires proprio")
         shared["proprio"] = torch.as_tensor(proprio, device=device, dtype=dtype)
+    codec_options = {"tactile_codec": tactile_codec} if tactile_codec is not None else {}
     history, future_valid, token_valid = model.prepare_tactile_generation(
         tactile_maps, tactile_valid, region_ids=tactile_region_ids,
         layout_present=tactile_layout_present, query_mask=tactile_query_mask,
         spatial_valid=tactile_spatial_valid, sensor_ids=tactile_sensor_ids,
         palm_mode=tactile_palm_mode,
+        **codec_options,
     )
     shared["touch_condition"] = history
     shared["tactile_future_valid"] = token_valid

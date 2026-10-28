@@ -63,6 +63,33 @@ def test_partial_source_draw_changes_and_reaches_tail(fake_dataset_factory):
     assert len(visited) > 90 and max(visited) == 99
 
 
+@pytest.mark.parametrize("batch,world", [(1, 4), (3, 2), (2, 1)])
+def test_rgb_and_intensity_vat_sources_get_separate_global_batches(fake_dataset_factory, batch, world):
+    sources = [fake_dataset_factory(count) for count in (13, 17, 21)]
+    for source, codec in zip(sources, ("tactile_intensity_v1", "tactile_rgb_v1", "tactile_rgb_v1")):
+        source.training_modality, source.tactile_codec = "video_action_tactile", codec
+    dataset = MixtureDataset(sources, names=["scalar", "rgb_a", "rgb_b"])
+    sampler = GlobalModalitySampler(dataset, batch, world)
+    order = list(sampler)
+    assert set(order) == set(range(len(dataset)))
+    assert len(order) - len(dataset) < 2 * batch * world
+    loaders = [prepare_data_loader(
+        torch.utils.data.DataLoader(dataset, batch_size=batch, sampler=sampler, collate_fn=list),
+        device=torch.device("cpu"), num_processes=world, process_index=rank,
+        split_batches=False, put_on_device=False) for rank in range(world)]
+    for global_batches in zip_longest(*loaders):
+        assert all(row is not None and len(row) == batch for row in global_batches)
+        assert len({dataset.source_tactile_codecs[sample["_dataset_index"]]
+                    for row in global_batches for sample in row}) == 1
+    from tests.dataloader.test_mixture_trainer_dataloader import _bare_trainer
+
+    trainer_loader = _bare_trainer(dataset).build_dataloader(batch_size=batch)
+    assert isinstance(trainer_loader.sampler, GlobalModalitySampler)
+    assert dataset.training_layout["batching"] == "global_modality_codec_v3"
+    assert dataset.training_data_contract["sources"]["rgb_a"]["tactile_codec"] == "tactile_rgb_v1"
+    assert "tactile_codec" not in dataset.training_data_contract["sources"]["scalar"]
+
+
 def package_sources(tmp_path):
     sources = {}
     for name, mode, offset in [('agi', 'quantile', 1), ('sharpa', 'min-max', 5)]:

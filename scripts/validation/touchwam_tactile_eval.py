@@ -1,4 +1,4 @@
-"""Held-out intensity-map generation metrics; never scores flow velocity as maps.
+"""Held-out tactile map/image metrics; never scores flow velocity as observations.
 
 Use ``evaluate_sample(model, sample, ...)`` with an already normalized reader
 sample, or the CLI's small JSON manifest + NPZ sample interchange (see docs).
@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-from openwam.tactile.regions import CODEC, INTENSITY_CODEC
+from openwam.tactile.regions import CODEC, INTENSITY_CODEC, RGB_CODEC
 
 
 def array(value):
@@ -28,7 +28,7 @@ def maps(value):
     if value.dtype == np.uint8:
         return value.astype(np.float32) / 255
     if not np.issubdtype(value.dtype, np.floating):
-        raise ValueError("Intensity maps must be uint8 or float [0,1]")
+        raise ValueError("Tactile maps/images must be uint8 or float [0,1]")
     return value.astype(np.float32)
 
 
@@ -38,7 +38,7 @@ def metric(prediction, target, valid):
     if prediction.shape != target.shape or valid.shape != target.shape:
         raise ValueError("Prediction, target and pixel mask shapes must match")
     if not np.isfinite(prediction[valid]).all() or not np.isfinite(target[valid]).all():
-        raise ValueError("Nonfinite generated/target intensity on evaluated pixels")
+        raise ValueError("Nonfinite generated/target values on evaluated pixels")
     difference = prediction[valid].astype(np.float64) - target[valid].astype(np.float64)
     count = int(difference.size)
     absolute, squared = float(np.abs(difference).sum()), float(np.square(difference).sum())
@@ -79,11 +79,11 @@ def score_maps(prediction, target, valid, history, history_valid, region_names):
 
 
 def save_region_panels(directory, names, target, prediction, held, valid, common, times):
-    """One PNG per anatomical region, fixed [0,1] grayscale, pink = missing."""
+    """One PNG per region, retaining RGB channels; pink marks missing pixels."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     size, left, top = 96, 125, 32
-    rows = ("target", "generated", "zero", "hold last", "absolute error")
+    rows = ("target", "generated", "black image" if target.shape[2] == 3 else "zero", "hold last", "absolute error")
     paths = []
     for region, name in enumerate(names):
         canvas = Image.new("RGB", (left + size * len(target), top + size * len(rows)), "white")
@@ -95,9 +95,11 @@ def save_region_panels(directory, names, target, prediction, held, valid, common
         for row, (label, value) in enumerate(zip(rows, values)):
             draw.text((4, top + row * size + 8), label, fill="black")
             for t in range(len(target)):
-                mask = (common if label == "hold last" else valid)[t, region, 0]
-                gray = (np.nan_to_num(value[t, region, 0]).clip(0, 1) * 255).round().astype(np.uint8)
-                rgb = np.repeat(gray[..., None], 3, axis=-1)
+                mask = (common if label == "hold last" else valid)[t, region].all(axis=0)
+                tile_values = (np.nan_to_num(value[t, region]).clip(0, 1) * 255).round().astype(np.uint8)
+                rgb = np.moveaxis(tile_values, 0, -1)
+                if rgb.shape[-1] == 1:
+                    rgb = np.repeat(rgb, 3, axis=-1)
                 rgb[~mask] = [245, 190, 220]
                 tile = Image.fromarray(rgb).resize((size, size), Image.Resampling.NEAREST)
                 canvas.paste(tile, (left + t * size, top + row * size))
@@ -117,23 +119,36 @@ def evaluate_sample(model, sample, *, schedule, output_dir=None, seed=42, cfg_sc
     modality = sample.get("training_modality")
     if modality not in ("video_tactile", "video_action_tactile"):
         raise ValueError("Tactile evaluation requires VT or VAT")
-    if sample.get("tactile_codec") not in (CODEC, INTENSITY_CODEC):
-        raise ValueError("Evaluation requires normalized intensity/deform maps")
+    codec = sample.get("tactile_codec")
+    if codec not in (CODEC, INTENSITY_CODEC, RGB_CODEC):
+        raise ValueError("Evaluation requires a supported tactile codec")
     if modality == "video_tactile" and any(sample.get(k) is not None for k in ("action", "proprio")):
         raise ValueError("Ego VT evaluation cannot carry robot action/proprio")
     spec = model.tactile_spec
+    if codec == RGB_CODEC:
+        if getattr(model, "model_version", None) != "touchwam_regions_v1" or not spec.get("rgb_enabled", False):
+            raise ValueError("RGB evaluation requires a regional checkpoint with the RGB adapter enabled")
+        channels, size, representation = 3, spec.get("rgb_map_size", 128), "optical_rgb"
+    else:
+        channels, size, representation = 1, spec["map_size"], "normalized_contact_intensity"
+    generation_codec = codec
+    if codec in (CODEC, INTENSITY_CODEC) and spec.get("codec") in (CODEC, INTENSITY_CODEC):
+        # Older scalar checkpoints use the same [-1,1] patch transform under
+        # the legacy deform name. This alias does not apply to optical RGB.
+        generation_codec = spec["codec"]
     names = list(sample["tactile_region_names"])
     if not names or len(set(names)) != len(names) or set(names) - set(spec["region_names"]):
         raise ValueError("Expected unique registered region names")
     history, target = maps(sample["tactile_maps"]), maps(sample["future_tactile_maps"])
-    expected = (len(names), 1, spec["map_size"], spec["map_size"])
+    expected = (len(names), channels, size, size)
+    roi_shape = (len(names), 1, size, size)
     if history.shape != (spec["history"], *expected) or target.shape != (spec["future_frames"], *expected):
         raise ValueError("Evaluation map shape differs from checkpoint")
     valid, history_valid = array(sample["future_tactile_valid"]), array(sample["tactile_valid"])
-    spatial = array(sample.get("tactile_spatial_valid", np.ones(expected, dtype=bool)))
+    spatial = array(sample.get("tactile_spatial_valid", np.ones(roi_shape, dtype=bool)))
     layout = array(sample["tactile_layout_present"])
     if (valid.dtype != np.bool_ or valid.shape != target.shape[:2] or history_valid.dtype != np.bool_
-            or history_valid.shape != history.shape[:2] or spatial.dtype != np.bool_ or spatial.shape != expected
+            or history_valid.shape != history.shape[:2] or spatial.dtype != np.bool_ or spatial.shape != roi_shape
             or layout.dtype != np.bool_ or layout.shape != (len(names),)):
         raise ValueError("Invalid evaluation validity/ROI/layout masks")
     times = np.arange(1, spec["future_frames"] + 1) * spec["future_stride"] / spec["fps"]
@@ -142,11 +157,13 @@ def evaluate_sample(model, sample, *, schedule, output_dir=None, seed=42, cfg_sc
         value = array(sample[key])
         if value.shape != expected_times.shape or not np.allclose(value, expected_times, atol=1e-6, rtol=0):
             raise ValueError(f"{key} differs from checkpoint")
-    observed = history_valid[..., None, None, None] & spatial[None] & layout[None, :, None, None, None]
-    labeled = valid[..., None, None, None] & spatial[None] & layout[None, :, None, None, None]
+    observed = np.broadcast_to(history_valid[..., None, None, None] & spatial[None]
+                               & layout[None, :, None, None, None], history.shape)
+    labeled = np.broadcast_to(valid[..., None, None, None] & spatial[None]
+                              & layout[None, :, None, None, None], target.shape)
     for value, mask in ((history, observed), (target, labeled)):
         if not np.isfinite(value[mask]).all() or ((value[mask] < 0) | (value[mask] > 1)).any():
-            raise ValueError("Observed intensities must be finite in [0,1]")
+            raise ValueError(f"Observed {representation} values must be finite in [0,1]")
     sensors = sample.get("tactile_sensor_names")
     if sensors is not None:
         if len(sensors) != len(names) or set(sensors) - set(spec["sensor_names"]):
@@ -176,6 +193,8 @@ def evaluate_sample(model, sample, *, schedule, output_dir=None, seed=42, cfg_sc
         tactile_region_ids=np.array([spec["region_names"].index(name) for name in names], dtype=np.int64),
         tactile_layout_present=layout, tactile_spatial_valid=spatial, tactile_sensor_ids=sensors,
     )
+    if getattr(model, "model_version", None) == "touchwam_regions_v1":
+        kwargs["tactile_codec"] = generation_codec
     if "tactile_query_mask" in sample:
         kwargs["tactile_query_mask"] = sample["tactile_query_mask"]
     if modality == "video_action_tactile":
@@ -196,6 +215,8 @@ def evaluate_sample(model, sample, *, schedule, output_dir=None, seed=42, cfg_sc
     finally:
         if hasattr(model, "train"):
             model.train(was_training)
+    if codec == RGB_CODEC and result.get("tactile_codec") != codec:
+        raise ValueError("Generation returned the wrong tactile codec")
     prediction = np.zeros_like(target)
     generated_valid = np.zeros_like(valid)
     if len(set(result["tactile_region_names"])) != len(result["tactile_region_names"]):
@@ -214,7 +235,11 @@ def evaluate_sample(model, sample, *, schedule, output_dir=None, seed=42, cfg_sc
     if not pixels.any():
         raise ValueError("No measured future pixels overlap the generation request")
     scores, held, common = score_maps(prediction, target, pixels, history, history_valid & layout[None], names)
-    report = dict(schema="touchwam_tactile_eval_v1", units="normalized intensity [0,1]",
+    report = dict(schema="touchwam_tactile_eval_v1", tactile_codec=codec, generation_codec=generation_codec,
+                  tactile_representation=representation,
+                  units="RGB channel values [0,1]" if codec == RGB_CODEC else "normalized intensity [0,1]",
+                  channels=channels, metric_elements="channel_values" if channels == 3 else "pixels",
+                  baselines={"zero": "black RGB image" if channels == 3 else "zero intensity", "hold_last": "last observed image/map"},
                   generation_modality=modality, seed=int(seed), cfg_scale=float(cfg_scale), cfg_merge=cfg_merge,
                   region_names=names, future_times_s=times.tolist(), metrics=scores)
     if output_dir is not None:
@@ -222,7 +247,8 @@ def evaluate_sample(model, sample, *, schedule, output_dir=None, seed=42, cfg_sc
         output.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(output / "predictions.npz", prediction=prediction, target=target, pixel_valid=pixels,
                             hold_last=held, common_history_valid=common, region_names=np.asarray(names),
-                            future_times_s=times)
+                            future_times_s=times, tactile_codec=np.asarray(codec),
+                            tactile_representation=np.asarray(representation))
         report["panels"] = save_region_panels(output, names, target, prediction, held, pixels, common, times)
         (output / "metrics.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     return report
@@ -230,6 +256,8 @@ def evaluate_sample(model, sample, *, schedule, output_dir=None, seed=42, cfg_sc
 
 def aggregate(reports):
     """Aggregate exact pixel counts/sums, not an unweighted mean of MAEs."""
+    if len({report.get("tactile_codec", INTENSITY_CODEC) for report in reports}) > 1:
+        raise ValueError("Aggregate RGB and intensity metrics separately by tactile codec")
     result = {}
     for support in ("all_target_support", "common_history_support"):
         result[support] = {}
@@ -256,6 +284,19 @@ def load_sample(root, entry):
     with Image.open(root / entry["first_frame_image"]) as image:
         sample["first_frame_image"] = image.convert("RGB")
     return sample
+
+
+def aggregate_by_source(reports):
+    """A source may be evaluated through two adapters; keep their units separate."""
+    result = {}
+    for source in sorted({row["sample"]["source_id"] for row in reports}):
+        rows = [row for row in reports if row["sample"]["source_id"] == source]
+        codecs = sorted({row["tactile_codec"] for row in rows})
+        result[source] = aggregate(rows) if len(codecs) == 1 else {
+            "metrics": None,
+            "by_representation": {codec: aggregate([row for row in rows if row["tactile_codec"] == codec])
+                                  for codec in codecs}}
+    return result
 
 
 def main(argv=None):
@@ -309,12 +350,14 @@ def main(argv=None):
     summary = dict(schema="touchwam_tactile_eval_v1", split=manifest["split"],
                    manifest_sha256=hashlib.sha256(raw).hexdigest(), checkpoint=str(checkpoint),
                    checkpoint_size=checkpoint.stat().st_size, checkpoint_mtime_ns=checkpoint.stat().st_mtime_ns,
-                   steps=args.steps, seed=args.seed, metrics=aggregate(reports),
-                   by_source={source: aggregate([row for row in reports if row["sample"]["source_id"] == source])
-                              for source in sorted({row["sample"]["source_id"] for row in reports})},
+                   steps=args.steps, seed=args.seed,
+                   metrics=aggregate(reports) if len({r["tactile_codec"] for r in reports}) == 1 else None,
+                   by_representation={codec: aggregate([row for row in reports if row["tactile_codec"] == codec])
+                                      for codec in sorted({row["tactile_codec"] for row in reports})},
+                   by_source=aggregate_by_source(reports),
                    samples=reports)
     (output / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n")
-    print(json.dumps(summary["metrics"], indent=2, allow_nan=False))
+    print(json.dumps(summary["metrics"] or summary["by_representation"], indent=2, allow_nan=False))
 
 
 if __name__ == "__main__":

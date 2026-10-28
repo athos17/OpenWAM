@@ -33,6 +33,7 @@ def phase(args):
 
     from openwam.dataloader.mixture import MixtureDataset
     from openwam.tactile.registry import REGION_NAMES
+    from openwam.tactile.regions import INTENSITY_CODEC, RGB_CODEC
     from openwam.train.openwam_trainer import OpenWAMTrainer
     from openwam.train.utils.checkpointing import find_latest_accel_state
     from openwam.train.utils.seeding import seed_everything
@@ -59,8 +60,9 @@ def phase(args):
     class Source(torch.utils.data.Dataset):
         action_dim = 80
 
-        def __init__(self, mode):
+        def __init__(self, mode, codec=None):
             self.training_modality = mode
+            self.tactile_codec = codec
 
         def __len__(self):
             return 2
@@ -69,29 +71,41 @@ def phase(args):
             result = {"training_modality": self.training_modality}
             if "tactile" in self.training_modality:
                 result["tactile_region_names"] = [REGION_NAMES[i] for i in (58, 59)]
+                result["tactile_codec"] = self.tactile_codec
             return result
 
     modes = ["video_only", "video_action", "video_tactile", "video_action_tactile"]
-    dataset = MixtureDataset([Source(mode) for mode in modes], names=modes, seed=42,
-                             strict_action_dim=True, source_configs=[{"type": "synthetic_smoke"}] * 4)
+    sources = [Source(mode, INTENSITY_CODEC if "tactile" in mode else None) for mode in modes]
+    if args.rgb:
+        sources.extend(Source(mode, RGB_CODEC) for mode in modes if "tactile" in mode)
+    names = [source.training_modality + ("_rgb" if source.tactile_codec == RGB_CODEC else "")
+             for source in sources]
+    total_steps = 2 * len(sources)
+    dataset = MixtureDataset(sources, names=names, seed=42, strict_action_dim=True,
+                             source_configs=[{"type": "synthetic_smoke"}] * len(sources))
     output = Path(args.output).resolve()
     resume = json.loads((output / "pilot.json").read_text())["run_dir"] if args.phase == "resume" else None
     cfg = OmegaConf.create({"training": {
-        "num_epochs": 1, "max_steps": 8, "batch_size": 1, "gradient_accumulation_steps": 2,
+        "num_epochs": 1, "max_steps": total_steps, "batch_size": 1, "gradient_accumulation_steps": 2,
         "dataset_num_workers": 0, "max_grad_norm": 1.0, "learning_rate": 1e-5,
         "weight_decay": 0.01, "offload_optimizer_device": "none", "zero_stage": 2,
         "lr_scheduler": "cosine", "warmup_ratio": 0.25, "lr_min_ratio": 0.01,
         "save_steps": 3, "save_full_states_for_resume": True, "keep_last_k_ckpts": -1,
         "resume_ckpt_path": resume, "output_path": str(output / args.phase)},
         "project": {"seed": 42, "wandb": None}, "model": {}})
-    model = tiny_model(torch.device("cpu"), torch.bfloat16)
+    model = tiny_model(torch.device("cpu"), torch.bfloat16, rgb_enabled=args.rgb)
     model.set_training_runtime(use_gradient_checkpointing=True, use_gradient_checkpointing_offload=False,
                                max_timestep_boundary=1.0, min_timestep_boundary=0.0)
+
+    seen_codecs = set()
 
     def prepare_latents(self, samples):
         if len(samples) != 1:
             raise ValueError("Smoke input preparation expects one sample")
-        return make_inputs(samples[0]["training_modality"], self.device, self.dtype)
+        codec = samples[0].get("tactile_codec")
+        if codec is not None:
+            seen_codecs.add(codec)
+        return make_inputs(samples[0]["training_modality"], self.device, self.dtype, tactile_codec=codec)
 
     model.prepare_inputs = MethodType(prepare_latents, model)
     model.save_assets_for_deployment = MethodType(lambda self, path, cfg: None, model)
@@ -146,14 +160,15 @@ def phase(args):
         unwrapped = accelerator.unwrap_model(trainer.architecture)
         rows = [json.loads(line) for line in (run / "training_metrics.jsonl").read_text().splitlines()]
         seen = sorted({name.removeprefix("samples_") for row in rows for name, value in row.items()
-                       if name.startswith("samples_") and not name.startswith("samples_source/") and value})
+                       if name.startswith("samples_") and name.removeprefix("samples_") in modes and value})
         report = {"status": "passed", "phase": args.phase, "run_dir": str(run), "trainer_state": meta,
                   "world_size": dist.get_world_size(), "communication": dist.get_backend(),
                   "model_parameters": sum(p.numel() for p in unwrapped.parameters()),
                   "model_sha256": tree_hash(unwrapped.state_dict()),
                   "optimizer_sha256": tree_hash(trainer._modality_optimizer.state_dict()),
                   "scheduler_sha256": tree_hash(accelerator._schedulers[0].state_dict()),
-                  "seen_modalities": seen, "elapsed_s": time.monotonic() - started,
+                  "seen_modalities": seen, "seen_codecs_this_phase": sorted(seen_codecs),
+                  "rgb_enabled": args.rgb, "elapsed_s": time.monotonic() - started,
                   "peak_allocated_mib": torch.cuda.max_memory_allocated() / 1024**2,
                   "peak_reserved_mib": torch.cuda.max_memory_reserved() / 1024**2}
         if report["peak_allocated_mib"] > args.max_allocated_mib:
@@ -181,6 +196,8 @@ def run(args):
                    "--node_rank=0", "--master_addr=127.0.0.1", f"--master_port={port}",
                    "-m", "scripts.validation.touchwam_trainer_smoke", "--phase", name,
                    "--output", str(output), "--max-allocated-mib", str(args.max_allocated_mib)]
+        if args.rgb:
+            command.append("--rgb")
         with (output / f"{name}.log").open("w") as log:
             child = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
@@ -198,15 +215,19 @@ def run(args):
     for field in ("model_sha256", "optimizer_sha256", "scheduler_sha256"):
         if baseline[field] != resumed[field]:
             raise RuntimeError(f"Interrupted/resumed trainer differs from uninterrupted: {field}")
-    if len(baseline["seen_modalities"]) != 4 or baseline["trainer_state"]["opt_step"] != 4:
+    expected_updates = 6 if args.rgb else 4
+    if len(baseline["seen_modalities"]) != 4 or baseline["trainer_state"]["opt_step"] != expected_updates:
         raise RuntimeError("Missing four-modality coverage or optimizer updates")
+    if args.rgb and baseline["seen_codecs_this_phase"] != ["tactile_intensity_v1", "tactile_rgb_v1"]:
+        raise RuntimeError("Both intensity and raw RGB sources must reach the production trainer")
     report = {"status": "passed", "validation_only": True, "world_size": 1, "communication": "nccl",
               "full_model": False, "real_t5_vae": False, "real_datasets": False,
               "production_trainer_loop": True, "gradient_accumulation_steps": 2,
               "exact_model_optimizer_scheduler_resume": True, "phases": ["baseline", "pilot", "resume"],
               "peak_allocated_mib": max(json.loads((output / f"{name}.json").read_text())["peak_allocated_mib"]
                                         for name in ("baseline", "pilot", "resume")),
-              "seen_modalities": baseline["seen_modalities"]}
+              "seen_modalities": baseline["seen_modalities"], "rgb_enabled": args.rgb,
+              "seen_codecs": baseline["seen_codecs_this_phase"], "optimizer_updates": expected_updates}
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
 
@@ -215,6 +236,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True)
     parser.add_argument("--phase", choices=("baseline", "pilot", "resume"))
+    parser.add_argument("--rgb", action="store_true", help="Mix optical RGB and intensity sources with separate heads")
     parser.add_argument("--max-allocated-mib", type=int, default=768)
     parser.add_argument("--phase-timeout-seconds", type=int, default=120)
     arguments = parser.parse_args()

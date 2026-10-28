@@ -86,6 +86,9 @@ class MixtureDataset(BaseDataset):
         self.weight_strategy = weight_strategy or ("proportional" if weights is None else "manual")
         self.training_layout = None
         self.source_modalities = [getattr(d, "training_modality", "video_action") for d in self._datasets]
+        self.source_tactile_codecs = [
+            (getattr(d, "tactile_codec", None) or "tactile_intensity_v1") if "tactile" in mode else None
+            for d, mode in zip(self._datasets, self.source_modalities)]
         if any(m not in ("video_only", "video_action", "video_tactile", "video_action_tactile")
                for m in self.source_modalities):
             raise ValueError(f"Unsupported mixture modalities: {self.source_modalities}")
@@ -277,6 +280,8 @@ class MixtureDataset(BaseDataset):
                              "contract": copy.deepcopy(getattr(dataset, "training_data_contract", None)),
                              "dataset_manifest_sha256": file_sha256(manifest) if manifest else None,
                              "normalization_sha256": file_sha256(stats) if stats else None}
+            if getattr(dataset, "tactile_codec", None) == "tactile_rgb_v1":
+                sources[name]["tactile_codec"] = "tactile_rgb_v1"
         return {"schema_version": 1, "dataset_type": "mixture", "seed": self._base_seed,
                 "weight_strategy": self.weight_strategy, "weights": dict(zip(self._names, self._weights)),
                 "source_order": self.names, "sources": sources, "training_layout": self.training_layout,

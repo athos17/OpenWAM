@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from scripts.validation.touchwam_tactile_eval import aggregate, evaluate_sample, metric, score_maps
+from scripts.validation.touchwam_tactile_eval import aggregate, aggregate_by_source, evaluate_sample, metric, score_maps
 from tests.test_touchwam_regions import models as regional_models
 
 
@@ -159,3 +159,51 @@ def test_cli_heldout_archive_runs_without_action_normalizer(monkeypatch, tmp_pat
     path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="held-out"):
         main(["--checkpoint", str(checkpoint), "--manifest", str(path), "--output", str(tmp_path / "bad")])
+
+
+def test_rgb_eval_retains_all_color_channels_and_labels_units(tmp_path):
+    row = sample()
+    row["tactile_codec"] = "tactile_rgb_v1"
+    row["tactile_maps"] = np.repeat(row["tactile_maps"], 3, axis=2)
+    row["future_tactile_maps"] = np.repeat(row["future_tactile_maps"], 3, axis=2)
+    row["future_tactile_maps"][:, :, 0] = 0.1
+    model = EvaluationModel()
+    model.model_version = "touchwam_regions_v1"
+    model.tactile_spec = dict(model.tactile_spec, rgb_enabled=True, rgb_map_size=2, codec="tactile_intensity_v1")
+    old_generate = model.generate
+
+    def generate(*args, **kwargs):
+        result = old_generate(*args, **kwargs)
+        result["tactile_codec"] = "tactile_rgb_v1"
+        result["future_tactile_maps"] = np.repeat(result["future_tactile_maps"], 3, axis=2)
+        return result
+
+    model.generate = generate
+    report = evaluate_sample(model, row, schedule=[(1000, 1000), (0, 0)], output_dir=tmp_path)
+    assert model.kwargs["tactile_codec"] == "tactile_rgb_v1"
+    assert model.kwargs["tactile_spatial_valid"].shape == (2, 1, 2, 2)
+    assert report["units"] == "RGB channel values [0,1]"
+    assert report["metrics"]["all_target_support"]["model"]["pixels"] == 48
+    with np.load(tmp_path / "predictions.npz") as archive:
+        assert archive["prediction"].shape == (2, 2, 3, 2, 2)
+        assert archive["tactile_codec"].item() == "tactile_rgb_v1"
+    with Image.open(tmp_path / "region_00.png") as panel:
+        assert panel.getpixel((140, 48)) == (26, 204, 204)
+    scalar_report = evaluate_sample(EvaluationModel(), sample(), schedule=[(1000, 1000), (0, 0)])
+    with pytest.raises(ValueError, match="separately"):
+        aggregate([report, scalar_report])
+    report["sample"] = scalar_report["sample"] = {"source_id": "same_sensor"}
+    grouped = aggregate_by_source([report, scalar_report])["same_sensor"]
+    assert grouped["metrics"] is None
+    assert grouped["by_representation"]["tactile_rgb_v1"]["all_target_support"]["model"]["pixels"] == 48
+    assert grouped["by_representation"]["tactile_intensity_v1"]["all_target_support"]["model"]["pixels"] == 16
+
+
+def test_rgb_eval_rejects_older_nonregional_generation_before_call():
+    row = sample()
+    row["tactile_codec"] = "tactile_rgb_v1"
+    model = EvaluationModel()
+    model.tactile_spec = dict(model.tactile_spec, rgb_enabled=True, rgb_map_size=2)
+    with pytest.raises(ValueError, match="regional checkpoint"):
+        evaluate_sample(model, row, schedule=[(1000, 1000), (0, 0)])
+    assert not hasattr(model, "kwargs")

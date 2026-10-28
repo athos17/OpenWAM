@@ -218,3 +218,49 @@ def test_metadata_only_checks_source_identity_without_allowing_launch(tmp_path, 
     cfg.dataloader.datasets.ftp_unit.expected_modalities = ["video_tactile"]
     with pytest.raises(ValueError, match="One or more selected"):
         preflight.run("unused", [], tmp_path / "invalid.json", metadata_only=True)
+
+
+def rgb_sample(spec):
+    spec.update(rgb_enabled=True, rgb_map_size=16, rgb_patch_size=8)
+    sample = sample_for("video_action_tactile", spec)
+    sample["tactile_codec"] = "tactile_rgb_v1"
+    sample["tactile_maps"] = torch.full((2, 1, 3, 16, 16), .25)
+    sample["future_tactile_maps"] = torch.full((3, 1, 3, 16, 16), .75)
+    sample["tactile_spatial_valid"] = torch.ones(1, 1, 16, 16, dtype=torch.bool)
+    return sample
+
+
+def test_rgb_preflight_uses_live_rgb_size_and_one_channel_roi(tactile_spec):
+    sample = rgb_sample(tactile_spec)
+    sample["tactile_spatial_valid"][..., 0, 0] = False
+    sample["tactile_maps"][..., 0, 0] = float("nan")
+    report = preflight.validate_sample(sample, "video_action_tactile", tactile_spec=tactile_spec)
+    assert report["history_shape"] == [1, 2, 1, 3, 16, 16]
+    assert report["tactile_representation"] == "optical_rgb"
+    assert report["tactile_codec"] == "tactile_rgb_v1"
+    sample["future_tactile_maps"][0, 0, 2, 1, 1] = 2
+    with pytest.raises(ValueError, match="outside"):
+        preflight.validate_sample(sample, "video_action_tactile", tactile_spec=tactile_spec)
+
+
+def test_rgb_preflight_rejects_disabled_adapter_or_wrong_source_representation(tactile_spec):
+    sample = rgb_sample(tactile_spec)
+    tactile_spec["rgb_enabled"] = False
+    with pytest.raises(ValueError, match="rgb_enabled"):
+        preflight.validate_sample(sample, "video_action_tactile", tactile_spec=tactile_spec)
+    tactile_spec["rgb_enabled"] = True
+    with pytest.raises(ValueError, match="selected source representation"):
+        preflight.validate_sample(sample, "video_action_tactile", tactile_spec=tactile_spec,
+                                  expected_tactile_codec="tactile_intensity_v1")
+
+
+def test_raw_optical_source_config_does_not_reclassify_array_or_wrench_sources():
+    from pathlib import Path
+    cfg = OmegaConf.load(Path(__file__).resolve().parents[1] / "configs/dataloader/touchwam_pretrain.yaml")
+    for name in ("ftp_unit", "ftp_freetacman", "ftp_rdp", "ftp_exumi", "ftp_visuotactile_d_wheel"):
+        assert cfg.datasets[name].tactile_representation == "rgb"
+        assert cfg.datasets[name].expected_modalities == ["video_action_tactile"]
+    assert cfg.datasets.ftp_rh20tcfg7tactile.tactile_representation == "intensity"
+    assert cfg.datasets.ftp_rh20tcfg7tactile.tactile_mode == "required"
+    for name in ("ftp_motiontrans", "ftp_rh20tcfg5franka", "ftp_rh20tcfg6atiaxia"):
+        assert cfg.datasets[name].enabled is False

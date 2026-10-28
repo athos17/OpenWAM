@@ -6,7 +6,7 @@ import torch
 
 from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
 from openwam.model.architectures.registry import register_architecture
-from openwam.tactile.regions import CODEC, INTENSITY_CODEC, REGION_NAMES, SCHEMA, collate_regions
+from openwam.tactile.regions import CODEC, INTENSITY_CODEC, RGB_CODEC, REGION_NAMES, SCHEMA, collate_regions
 from openwam.tactile.registry import (
     LEGACY_REGION_NAMES,
     PREVIOUS_REGION_NAMES,
@@ -19,7 +19,7 @@ from openwam.tactile.registry import (
 )
 
 from .architecture import TouchWAMArchitecture
-from .regional_modules import CODECS, RegionalTactileFlowStream, globally_normalized_sum, regional_flow_loss
+from .regional_modules import RegionalTactileFlowStream, globally_normalized_sum, regional_flow_loss
 
 
 @register_architecture(
@@ -54,6 +54,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             palm_dropout=0.0,
             history_dropout=0.0,
             allow_missing_history=False,
+            rgb_enabled=False,
+            rgb_map_size=128,
+            rgb_patch_size=64,
         )
         provided = dict(cfg.get("tactile", {}))
         if set(provided) - set(defaults):
@@ -71,6 +74,8 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             "future_frames",
             "future_stride",
             "fps",
+            "rgb_map_size",
+            "rgb_patch_size",
         ):
             if type(s[key]) is not int or s[key] < 1:
                 raise ValueError(f"{key} must be a positive integer")
@@ -97,8 +102,15 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             if not s[key] or any(not isinstance(x, str) or not x for x in s[key]) or len(set(s[key])) != len(s[key]):
                 raise ValueError(f"{key} must contain unique names")
         validate_registry(s["region_names"])
-        if s["codec"] not in CODECS:
-            raise ValueError(f"Unsupported tactile codec: {s['codec']}; pressure is not deform")
+        if s["codec"] not in (CODEC, INTENSITY_CODEC):
+            raise ValueError("The default tactile codec must remain deform/intensity; enable the separate RGB route")
+        if type(s["rgb_enabled"]) is not bool:
+            raise ValueError("rgb_enabled must be boolean")
+        if not s["rgb_enabled"]:
+            # Keep old checkpoint metadata/specs exactly loadable when this
+            # optional route is disabled, including explicitly passed false.
+            for key in ("rgb_enabled", "rgb_map_size", "rgb_patch_size"):
+                s.pop(key)
         depth = self.action_backbone.num_layers
         layers = s["bridge_layers"]
         layers = [(i + 1) * depth // s["layers"] - 1 for i in range(s["layers"])] if layers is None else list(layers)
@@ -110,6 +122,21 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             raise ValueError("bridge_layers must be ordered, unique and inside the V/A depth")
         s["bridge_layers"] = layers
         self.touch_v2 = RegionalTactileFlowStream(s, self.video_backbone.dim, self.action_backbone.dim)
+
+    def _codec_name(self, name=None):
+        name = self.tactile_spec["codec"] if name is None else name
+        # Already normalized legacy deform remains compatible with the
+        # source-normalized intensity route. RGB is always explicitly selected.
+        if name == CODEC and self.tactile_spec["codec"] == INTENSITY_CODEC:
+            name = INTENSITY_CODEC
+        self.touch_v2.get_codec(name)
+        return name
+
+    def _condition_codec(self, condition):
+        return self._codec_name(condition[7] if len(condition) == 8 else None)
+
+    def _predict_tactile(self, future, condition):
+        return self.touch_v2.predict(future, self._condition_codec(condition))
 
     @property
     def checkpoint_metadata(self):
@@ -126,7 +153,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
     @property
     def tactile_input_contract(self):
         s = self.tactile_spec
-        return dict(
+        contract = dict(
             model_version=self.model_version,
             schema=SCHEMA,
             codec=s["codec"],
@@ -153,6 +180,14 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             allow_missing_history=s["allow_missing_history"],
             output_validity="generation request, not measured contact or sensor validity",
         )
+        if s.get("rgb_enabled", False):
+            contract["supported_codecs"] = [s["codec"], RGB_CODEC]
+            contract["rgb"] = dict(codec=RGB_CODEC, representation="optical_rgb", channels=["red", "green", "blue"],
+                                   map_size=s["rgb_map_size"], patch_size=s["rgb_patch_size"],
+                                   units="image channel values [0,1], not force or deformation",
+                                   tokens_per_region=self.touch_v2.rgb_codec.patches_per_site,
+                                   routing="one codec per microbatch; independent image encoder/output head")
+        return contract
 
     def _condition(
         self,
@@ -166,8 +201,11 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         sensor_ids=None,
         palm_mode=None,
         augment=False,
+        tactile_codec=None,
     ):
         s, device = self.tactile_spec, self.device
+        codec_name = self._codec_name(tactile_codec)
+        codec = self.touch_v2.get_codec(codec_name)
 
         def tensor(value, ndim, dtype, name):
             value = torch.as_tensor(value, device=device)
@@ -208,7 +246,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             drop = torch.rand(batch_size, 1, device=device) < s["palm_dropout"]
             active &= ~(drop & palms)
         n = ids.shape[1]
-        shape = (batch_size, n, 1, s["map_size"], s["map_size"])
+        shape = (batch_size, n, 1, codec.map_size, codec.map_size)
         spatial = (
             torch.ones(shape, dtype=torch.bool, device=device)
             if spatial_valid is None
@@ -225,7 +263,8 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             if valid is not None:
                 raise ValueError("Observation validity requires maps")
             maps = torch.zeros(
-                batch_size, s["history"], n, 1, s["map_size"], s["map_size"], device=device, dtype=self.dtype
+                batch_size, s["history"], n, codec.channels, codec.map_size, codec.map_size,
+                device=device, dtype=self.dtype
             )
             valid = torch.zeros(batch_size, s["history"], n, device=device, dtype=torch.bool)
         elif valid is None:
@@ -234,12 +273,12 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         if maps.dtype == torch.uint8:
             maps = maps.to(self.dtype) / 255
         elif not maps.is_floating_point():
-            raise ValueError("Deform maps must be uint8 or float [0,1]")
+            raise ValueError("Tactile maps must be uint8 or float [0,1]")
         else:
             maps = maps.to(self.dtype)
         if maps.ndim == 5 and batch_size == 1:
             maps = maps.unsqueeze(0)
-        if maps.shape != (batch_size, s["history"], n, 1, s["map_size"], s["map_size"]):
+        if maps.shape != (batch_size, s["history"], n, codec.channels, codec.map_size, codec.map_size):
             raise ValueError("History map shape differs from layout/configuration")
         valid = tensor(valid, 3, torch.bool, "observation validity")
         if valid.shape != maps.shape[:3]:
@@ -248,8 +287,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         if augment and s["history_dropout"]:
             # Drop entire region histories, so completely stale sensors occur in training.
             valid &= ~(torch.rand(batch_size, 1, n, device=device) < s["history_dropout"])
-        history, mask, available = self.touch_v2.encode_history(maps, valid, ids, sensors, spatial)
-        return history, mask, ids, active, spatial, sensors, available
+        history, mask, available = self.touch_v2.encode_history(maps, valid, ids, sensors, spatial, codec_name)
+        condition = (history, mask, ids, active, spatial, sensors, available)
+        return (*condition, codec_name) if s.get("rgb_enabled", False) else condition
 
     def _query(self, condition, requested=None):
         active, spatial = condition[3], condition[4]
@@ -263,7 +303,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             if requested.dtype != torch.bool or requested.shape != shape:
                 raise ValueError("Query mask must be bool [B,F,N]")
         requested = requested & active[:, None]
-        return requested, self.touch_v2.codec.pixel_mask(requested, spatial)
+        return requested, self.touch_v2.get_codec(self._condition_codec(condition)).pixel_mask(requested, spatial)
 
     def forward(
         self,
@@ -277,6 +317,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         tactile_spatial_valid=None,
         tactile_sensor_ids=None,
         tactile_palm_mode=None,
+        tactile_codec=None,
         tactile_query_mask=None,
         touch_condition=None,
         **kwargs,
@@ -295,6 +336,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                 spatial_valid=tactile_spatial_valid,
                 sensor_ids=tactile_sensor_ids,
                 palm_mode=tactile_palm_mode,
+                tactile_codec=tactile_codec,
             )
         elif any(
             x is not None
@@ -306,6 +348,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                 tactile_spatial_valid,
                 tactile_sensor_ids,
                 tactile_palm_mode,
+                tactile_codec,
             )
         ):
             raise ValueError("Pass raw history/layout OR touch_condition")
@@ -320,7 +363,8 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                 if key != "tactile_timestep" and value is not None and value.numel():
                     raise ValueError("Nonempty future tactile tokens require a regional layout")
             video, action = DualSystemSelfAttnArchitecture.forward(self, noisy_actions, action_timestep, **kwargs)
-            return video, action, video.new_empty(video.shape[0], 0, self.touch_v2.codec.patch_dim)
+            codec = self.touch_v2.get_codec(self._condition_codec(touch_condition))
+            return video, action, video.new_empty(video.shape[0], 0, codec.patch_dim)
         return super().forward(noisy_actions, action_timestep, touch_condition=touch_condition, **kwargs)
 
     def _prepare_tactile(
@@ -333,7 +377,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         tactile_valid,
         touch_condition,
     ):
-        history, history_valid, ids, _, spatial, sensors, _ = touch_condition
+        history, history_valid, ids, _, spatial, sensors, _ = touch_condition[:7]
         _, possible = self._query(touch_condition)
         shape = possible.shape
         if noisy_tactile is None:
@@ -353,7 +397,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         noisy_tactile = torch.where(possible, noisy_tactile, 0)
         if not torch.isfinite(noisy_tactile).all():
             raise ValueError("Nonfinite noise in requested tactile regions")
-        future, time = self.touch_v2.prepare_future(noisy_tactile, tactile_timestep, ids, sensors, spatial)
+        future, time = self.touch_v2.prepare_future(
+            noisy_tactile, tactile_timestep, ids, sensors, spatial, self._condition_codec(touch_condition)
+        )
         future = future.masked_fill(~tactile_future_valid[..., None], 0)
         return history, history_valid, future, time, tactile_future_valid
 
@@ -369,6 +415,12 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         with_action = [m in ("video_action", "video_action_tactile") for m in modalities]
         if any(with_action) and not all(with_action):
             raise ValueError("Use globally aligned microbatches; mixed action/no-action batches are not supported")
+        codec_names = {self._codec_name(sample.get("tactile_codec")) for sample in samples
+                       if sample.get("tactile_region_names")}
+        if len(codec_names) > 1:
+            raise ValueError("Use homogeneous tactile codecs per microbatch; RGB and intensity cannot be silently mixed")
+        codec_name = next(iter(codec_names), self.tactile_spec["codec"])
+        codec = self.touch_v2.get_codec(codec_name)
         expected_future = torch.arange(1, s["future_frames"] + 1, dtype=torch.float64) * s["future_stride"] / s["fps"]
         expected_history = torch.arange(1 - s["history"], 1, dtype=torch.float64) / s["fps"]
         base_samples = []
@@ -405,11 +457,12 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                 base.pop("proprio", None)
             base_samples.append(base)
         tactile = collate_regions(
-            samples, map_size=s["map_size"], history=s["history"], future_frames=s["future_frames"],
-            region_names=s["region_names"], sensor_names=s["sensor_names"], codec=s["codec"],
+            samples, map_size=codec.map_size, history=s["history"], future_frames=s["future_frames"],
+            region_names=s["region_names"], sensor_names=s["sensor_names"], codec=codec_name,
         )
         result = DualSystemSelfAttnArchitecture.prepare_inputs(self, base_samples)
         result.update(tactile)
+        result["tactile_codec"] = codec_name
         return result
 
     def compute_loss(self, *, actions=None, lambda_video=1.0, lambda_action=1.0, **inputs):
@@ -444,13 +497,16 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             spatial_valid=inputs.pop("tactile_spatial_valid", None),
             sensor_ids=inputs.pop("tactile_sensor_ids", None),
             palm_mode=inputs.pop("tactile_palm_mode", None), augment=self.training,
+            tactile_codec=inputs.pop("tactile_codec", None),
         )
         query, query_pixels = self._query(condition, requested)
-        codec, s = self.touch_v2.codec, self.tactile_spec
+        codec_name = self._condition_codec(condition)
+        codec, s = self.touch_v2.get_codec(codec_name), self.tactile_spec
         if (future_maps is None) != (future_valid is None):
             raise ValueError("Future maps and validity must be provided together")
         if future_maps is None:
-            future_maps = torch.zeros(*query.shape, 1, s["map_size"], s["map_size"], device=self.device, dtype=self.dtype)
+            future_maps = torch.zeros(*query.shape, codec.channels, codec.map_size, codec.map_size,
+                                      device=self.device, dtype=self.dtype)
             future_valid = torch.zeros_like(query)
         else:
             future_maps = torch.as_tensor(future_maps, device=self.device)
@@ -462,7 +518,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         elif future_maps.is_floating_point():
             future_maps = future_maps.to(self.dtype)
         else:
-            raise ValueError("Intensity targets must be uint8 or float [0,1]")
+            raise ValueError("Tactile targets must be uint8 or float [0,1]")
         clean, labels = codec.encode(future_maps, future_valid & query, condition[4])
         label_pixels = codec.pixel_mask(labels, condition[4])
         if self.tactile_scheduler.timesteps is None:
@@ -519,8 +575,10 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         return dict(
             loss=lambda_video * loss_v + lambda_action * loss_a + s["loss_weight"] * loss_t,
             loss_video=(lambda_video * loss_v).detach(), loss_action=(lambda_action * loss_a).detach(),
-            loss_tactile=(s["loss_weight"] * loss_t).detach(), loss_tactile_deform=loss_t.detach(),
-            loss_tactile_intensity=loss_t.detach(),
+            loss_tactile=(s["loss_weight"] * loss_t).detach(),
+            loss_tactile_deform=(loss_t * (codec_name != RGB_CODEC)).detach(),
+            loss_tactile_intensity=(loss_t * (codec_name != RGB_CODEC)).detach(),
+            loss_tactile_rgb=(loss_t * (codec_name == RGB_CODEC)).detach(),
             tactile_labeled_regions=labels.any(1).sum().detach(), tactile_labeled_frames=labels.sum().detach(),
         )
 
@@ -572,7 +630,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
 
     def sample_tactile_noise(self, condition, token_valid, seed):
         ids = condition[2]
-        codec, s = self.touch_v2.codec, self.tactile_spec
+        codec, s = self.touch_v2.get_codec(self._condition_codec(condition)), self.tactile_spec
         shape = (ids.shape[0], s["future_frames"], ids.shape[1], codec.patches_per_site, codec.patch_dim)
         noise = torch.zeros(shape, device=self.device, dtype=self.dtype)
         # Stable per-region noise: optional palms/padding do not shift finger RNG.
@@ -587,9 +645,10 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
 
     def decode_tactile_generation(self, tokens, future_valid, condition):
         ids, spatial = condition[2], condition[4]
-        maps = self.touch_v2.codec.decode(tokens, ids.shape[1]) if ids.shape[1] else tokens.new_empty(
-            ids.shape[0], self.tactile_spec["future_frames"], 0, 1,
-            self.tactile_spec["map_size"], self.tactile_spec["map_size"],
+        codec_name = self._condition_codec(condition)
+        codec = self.touch_v2.get_codec(codec_name)
+        maps = codec.decode(tokens, ids.shape[1]) if ids.shape[1] else tokens.new_empty(
+            ids.shape[0], self.tactile_spec["future_frames"], 0, codec.channels, codec.map_size, codec.map_size,
         )
         maps = maps.masked_fill(~(future_valid[..., None, None, None] & spatial[:, None]), 0)
         keep = future_valid[0].any(0)
@@ -601,8 +660,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             tactile_region_ids=ids[0, keep].cpu().numpy(),
             tactile_history_available=condition[6][0, keep].cpu().numpy(),
             tactile_spatial_valid=spatial[0, keep].cpu().numpy(),
-            tactile_representation="contact_intensity" if self.tactile_spec["codec"] == INTENSITY_CODEC else "deform_gray",
-            tactile_codec=self.tactile_spec["codec"],
+            tactile_representation=("optical_rgb" if codec_name == RGB_CODEC else
+                                    "contact_intensity" if codec_name == INTENSITY_CODEC else "deform_gray"),
+            tactile_codec=codec_name,
             future_tactile_times_s=(
                 torch.arange(1, self.tactile_spec["future_frames"] + 1)
                 * self.tactile_spec["future_stride"]

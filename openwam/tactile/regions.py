@@ -11,7 +11,8 @@ from .registry import FINGERTIP_NAMES, REGION_NAMES, validate_registry
 SCHEMA = "tactile_regions_v1"
 CODEC = "sharpa_deform_gray_v1"
 INTENSITY_CODEC = "tactile_intensity_v1"
-SUPPORTED_CODECS = (CODEC, INTENSITY_CODEC)
+RGB_CODEC = "tactile_rgb_v1"
+SUPPORTED_CODECS = (CODEC, INTENSITY_CODEC, RGB_CODEC)
 
 
 def resize_deform(image, size):
@@ -34,19 +35,22 @@ def collate_regions(
     sensor_names=("sharpa_real", "bench2dex_sim"),
     codec=CODEC,
 ):
-    """Collate measured regional intensity without inventing missing modalities.
+    """Collate one regional tactile representation per microbatch.
 
     Empty layouts have N=0 when the entire batch is non-tactile. Mixed layouts
     use masked padding only. Query availability is independent of target labels.
     ``tactile_intensity_v1`` also accepts already normalized legacy deform maps;
     this is a representation compatibility rule, not sensor calibration.
+    RGB maps preserve three optical channels; [0,1] means pixel range, not force.
+    Their spatial ROI remains one channel and applies to all three color channels.
     """
     if not samples:
         raise ValueError("Cannot collate an empty tactile batch")
     validate_registry(region_names)
     if codec not in SUPPORTED_CODECS:
         raise ValueError(f"Unsupported tactile_codec: {codec}")
-    accepted = SUPPORTED_CODECS if codec == INTENSITY_CODEC else (CODEC,)
+    accepted = (CODEC, INTENSITY_CODEC) if codec == INTENSITY_CODEC else (codec,)
+    channels = 3 if codec == RGB_CODEC else 1
     ns = []
     for sample in samples:
         names = list(sample.get("tactile_region_names", ()))
@@ -59,8 +63,8 @@ def collate_regions(
         if names:
             if sample.get("tactile_codec") not in accepted:
                 raise ValueError(f"Expected explicit tactile_codec in {accepted}")
-            if codec == INTENSITY_CODEC and not any(k in sample for k in ("tactile_sensor_ids", "tactile_sensor_names")):
-                raise ValueError("Intensity maps require explicit tactile sensor/source identity")
+            if codec in (INTENSITY_CODEC, RGB_CODEC) and not any(k in sample for k in ("tactile_sensor_ids", "tactile_sensor_names")):
+                raise ValueError("Intensity/RGB maps require explicit tactile sensor/source identity")
         elif any(torch.as_tensor(sample[k]).numel() for k in (
             "tactile_maps", "tactile_valid", "future_tactile_maps", "future_tactile_valid"
         ) if k in sample):
@@ -68,9 +72,9 @@ def collate_regions(
         ns.append(len(names))
     n = max(ns)
     specs = {
-        "tactile_maps": ((history, n, 1, map_size, map_size), torch.float32, 0),
+        "tactile_maps": ((history, n, channels, map_size, map_size), torch.float32, 0),
         "tactile_valid": ((history, n), torch.bool, False),
-        "future_tactile_maps": ((future_frames, n, 1, map_size, map_size), torch.float32, 0),
+        "future_tactile_maps": ((future_frames, n, channels, map_size, map_size), torch.float32, 0),
         "future_tactile_valid": ((future_frames, n), torch.bool, False),
         "tactile_layout_present": ((n,), torch.bool, False),
         "tactile_query_mask": ((future_frames, n), torch.bool, False),
@@ -93,7 +97,7 @@ def collate_regions(
             "tactile_query_mask": layout[None].expand(future_frames, -1),
             "tactile_spatial_valid": torch.ones(count, 1, map_size, map_size, dtype=torch.bool, device=device),
             "tactile_sensor_ids": torch.zeros(count, dtype=torch.long, device=device),
-            "future_tactile_maps": torch.zeros(future_frames, count, 1, map_size, map_size, device=device),
+            "future_tactile_maps": torch.zeros(future_frames, count, channels, map_size, map_size, device=device),
             "future_tactile_valid": torch.zeros(future_frames, count, dtype=torch.bool, device=device),
         }
         for key, (shape, dtype, _) in specs.items():
