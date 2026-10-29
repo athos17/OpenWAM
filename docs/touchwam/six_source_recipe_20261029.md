@@ -158,6 +158,13 @@ explicit budget; this does not measure long-run stability or model quality.
   `gpu_status.json` and `code_manifest.json` retain the evidence. The smoke
   disabled checkpoint writes; exact interrupted/resumed optimizer behavior
   was separately checked by the existing tiny production-trainer validation.
+- CPU resource-pool job `job-bjxqv67sxwp8` also succeeded: the complete
+  86,837,962-window mixture initialized in 74.97 seconds, and the production
+  loader with four workers decoded/validated 16 batches using rank 0's
+  eight-rank sampling layout. Parent-process peak RSS was 4.07 GiB. This
+  complements the GPU fixture test without loading the model on the CPU job;
+  it is not a measurement of eight simultaneous full-population processes.
+  Evidence: `population_v2_report.json` and `population_v2_status.json`.
 
 The later launcher-only fix makes explicit `PYTHON_BIN` apply to torchrun as
 well as preflight. It does not change the validated model or training loop.
