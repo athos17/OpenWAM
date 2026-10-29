@@ -1,0 +1,34 @@
+# Capacity candidate: per-GPU batch 8, no activation checkpointing anywhere.
+# Optimizer/scheduler parameters match alpha_native_64gpu_aug/2026-10-26_23-07-36.
+defaults:
+  - train_touchwam_six_source_20261029_s9
+  - _self_
+
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 1
+  learning_rate: 0.0001
+  adam_betas: [0.9, 0.95]
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  lr_min_ratio: 0.01
+  action_lr: null
+  video_lr: null
+  mixed_precision: bf16
+  zero_stage: 2
+  num_epochs: 1
+  max_steps: null
+  use_gradient_checkpointing: false
+  use_gradient_checkpointing_offload: false
+  gradient_checkpointing_layers: []
+  gradient_checkpointing_layers_video_only: []
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_six_source_bs8_norecompute_20261029}
+
+model:
+  architecture:
+    mot_checkpoint_mixed_attn: false
+
+project:
+  name: touchwam-six-source-bs8-norecompute-20261029
