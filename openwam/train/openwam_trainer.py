@@ -224,6 +224,9 @@ class OpenWAMTrainer:
         num_epochs = num_epochs or cfg_get(t, "num_epochs", None)
         num_epochs = int(num_epochs) if num_epochs is not None else None
         max_steps = max_steps or getattr(t, "max_steps", None)
+        # Ends the loop after N micro-steps but, unlike max_steps, leaves the LR horizon at the
+        # full run's: a short run then follows a long run's schedule and data order step by step.
+        stop_after_steps = int(getattr(t, "stop_after_steps", None) or 0) or None
         batch_size = int(t.batch_size)
         grad_accum = int(t.gradient_accumulation_steps)
 
@@ -435,7 +438,7 @@ class OpenWAMTrainer:
                 timer.finish_iteration()
                 profile.step()
 
-                if max_steps and global_step >= max_steps:
+                if (max_steps and global_step >= max_steps) or (stop_after_steps and global_step >= stop_after_steps):
                     pbar.close()
                     profile.stop()
                     self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run)

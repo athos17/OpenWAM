@@ -1,0 +1,8 @@
+defaults:
+  - egodex_300h_video@datasets.egodex
+  - agibot_pretrain_v1@datasets.agibot
+  - sharpadex_native_tcp@datasets.sharpa
+  - _self_
+
+type: mixture
+weight_strategy: proportional

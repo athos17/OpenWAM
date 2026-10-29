@@ -1,0 +1,26 @@
+# The 2026-10-26 formal 8-node run (dev-cpu setup/sharpa_native_64gpu_aug_20261026, output
+# outputs/alpha_native_64gpu_aug): full Alpha initialization (ActionDiT included), native
+# SharpaDex TCP, ColorJitter on all three sources, batch 48 x 64 GPUs, one mixture epoch.
+# Composes to that run's saved config.yaml; new trainer options keep their train.yaml defaults.
+defaults:
+  - train_action_random_64gpu_sharpa_native
+  - _self_
+
+dataloader:
+  datasets:
+    egodex:
+      color_jitter: {enabled: true, brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
+    agibot:
+      color_jitter: {enabled: true, brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
+    sharpa:
+      color_jitter: {enabled: true, brightness: 0.2, contrast: 0.2, saturation: 0.2, hue: 0.0}
+
+training:
+  action_backbone_init: pretrained
+  resume_ckpt_path: null
+  output_path: /mnt/pfs/v89atp/workspace/outputs/alpha_native_64gpu_aug
+  save_steps: 2000
+  keep_last_k_ckpts: -1
+
+project:
+  name: openwam-alpha-native-64gpu-aug

@@ -1,0 +1,45 @@
+# train_alpha_native_64gpu_aug (the 2026-10-26 formal 8-node run: same data, seed, batch,
+# schedule and ColorJitter) with the s9 acceleration options measured on 2 x 8 A800
+# (configs/train_h20_3src_s9.yaml: 5.23 vs 6.06 s/step for s8b_gc20, 9.35 for no options).
+# Used for the 8-node speed test (scripts/experiments/alpha_native_64gpu_s9_speed_20261029),
+# which stops early via training.stop_after_steps so the LR schedule stays the full run's.
+defaults:
+  - train_alpha_native_64gpu_aug
+  - _self_
+
+training:
+  output_path: /mnt/pfs/v89atp/workspace/outputs/alpha_native_64gpu_aug_s9
+  # s7d: overlapped ZeRO-2 communication, text padding to the longest prompt + dedup
+  deepspeed_zero:
+    overlap_comm: true
+    contiguous_gradients: true
+    reduce_bucket_size: 200000000
+    allgather_bucket_size: 500000000
+  text_padding: longest
+  text_dedup: true
+  # s7p: frames stacked to uint8 in the DataLoader workers
+  video_uint8_in_workers: true
+  log_flush_every: 50
+  # s8a / s8b: VAE cuDNN autotune + channels_last, per-frame time modulation
+  vae_cudnn_benchmark: true
+  vae_channels_last: true
+  frame_time_modulation: true
+  # gc20: full recompute on layers 0-19 of 30
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  # s9: compiled Wan block regions, fused VAE norm, overlapped parameter all-gather
+  dit_block_fusion: true
+  vae_fused_norm: true
+  overlap_param_allgather: true
+  loss_log_csv: true
+  step_timing:
+    enabled: true
+    summary_every: 50
+    mfu: true
+    peak_tflops: 312               # A800 dense bf16
+
+model:
+  architecture:
+    mot_split_attention: true
+
+project:
+  name: openwam-alpha-native-64gpu-aug-s9

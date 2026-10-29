@@ -93,6 +93,8 @@ def _register_builtins():
     register_dataset("sharpadex_tianji")(SharpaDexTianjiDataset)
     from openwam.dataloader.sharpadex_tianji_global import SharpaDexTianjiGlobalDataset
     register_dataset("sharpadex_tianji_global")(SharpaDexTianjiGlobalDataset)
+    from openwam.dataloader.sharpadex_native_tcp import SharpaDexNativeTCPDataset
+    register_dataset("sharpadex_native_tcp")(SharpaDexNativeTCPDataset)
 
     from openwam.dataloader.egodex_video import EgoDexVideoDataset
     register_dataset("egodex_video")(EgoDexVideoDataset)

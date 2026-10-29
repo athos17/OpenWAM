@@ -1,0 +1,11 @@
+# Same three-source recipe, with original SharpaDex TCP instead of Tianji EEF.
+defaults:
+  - train_action_random_64gpu
+  - override dataloader: egodex_agibot_sharpa_native
+  - _self_
+
+training:
+  output_path: /mnt/pfs/v89atp/workspace/outputs/action_random_64gpu_sharpa_native
+
+project:
+  name: openwam-action-random-64gpu-sharpa-native
