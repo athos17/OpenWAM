@@ -290,13 +290,16 @@ class LeRobotVideoIntensityDataset(BaseDataset):
                     self.tasks[tid] = text
         if tactile_mode not in ("auto", "required", "off"):
             raise ValueError("tactile_mode must be auto, required or off")
-        if tactile_representation not in ("intensity", "rgb"):
-            raise ValueError("tactile_representation must be intensity or rgb")
+        if tactile_representation not in ("intensity", "rgb", "touchscale_force"):
+            raise ValueError("Unknown tactile_representation")
         self.tactile_representation = tactile_representation
         manifest = self.root / (tactile_rgb_manifest if tactile_representation == "rgb" else "tactile/manifest.json")
         if tactile_mode == "required" and not manifest.exists():
             raise FileNotFoundError(f"Required tactile publication missing: {manifest}")
         store = RGBTactileStore if tactile_representation == "rgb" else IntensityStore
+        if tactile_representation == "touchscale_force":
+            from openwam.tactile.touchscale_store import TouchScaleForceStore
+            store = TouchScaleForceStore
         map_size = tactile_rgb_map_size if tactile_representation == "rgb" else tactile_map_size
         self.touch = store(manifest, self.root, size=map_size, history_times=history_times, future_times=future_times,
                            observation_size=tactile_observation_map_size, encoder_name=tactile_encoder_name) \

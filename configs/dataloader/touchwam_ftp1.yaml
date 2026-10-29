@@ -5,6 +5,26 @@
     "_self_"
   ],
   "datasets": {
+    "touchscale": {
+      "type": "lerobot_video_intensity",
+      "source_kind": "ego",
+      "expected_modalities": ["video_tactile"],
+      "require_publication": true,
+      "dataset_dir": "${oc.env:TOUCHWAM_TOUCHSCALE_ROOT,/mnt/pfs/v89atp/workspace/dataset/touchscale_lerobot_v3_full_v1_20261029/buckets}",
+      "tactile_mode": "required",
+      "tactile_representation": "touchscale_force",
+      "tactile_map_size": 32,
+      "tactile_observation_map_size": [16, 10],
+      "tactile_encoder_name": "TouchScaleForce",
+      "num_frames": 33,
+      "video_stride": 4,
+      "window_stride": 1,
+      "sampling_fps": 30,
+      "height": 384,
+      "width": 320,
+      "camera_layout": ["observation.images.rgb_head", "observation.images.wrist_left", "observation.images.wrist_right"],
+      "color_jitter": {"brightness": 0.2, "contrast": 0.2, "saturation": 0.2, "hue": 0.0}
+    },
     "sharpadex": {
       "tactile_observation_map_size": 224,
       "tactile_encoder_name": "SharpaWave",

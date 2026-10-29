@@ -144,6 +144,21 @@ def publication_contract(dataset_dir):
             raise ValueError(f"Published {key} count no longer matches metadata: {root}")
     if any(m.get("codebase_version") != "v3.0" for m in metadata):
         raise ValueError(f"Publication contains a non-v3 bucket: {root}")
+    if record.get("schema") == "touchscale_lerobot_v3_v1":
+        release = path.parent
+        if _file_sha256(release / "conversion_plan.json") != record.get("conversion_plan_sha256"):
+            raise ValueError("TouchScale conversion plan changed")
+        for info in infos:
+            bucket = info.parent.parent
+            bound = record.get("buckets", {}).get(bucket.name, {})
+            for rel, key in (("meta/info.json", "info_sha256"), ("tactile/manifest.json", "tactile_sha256"),
+                             ("validation.json", "validation_sha256")):
+                if _file_sha256(bucket / rel) != bound.get(key):
+                    raise ValueError(f"TouchScale published identity changed: {bucket.name}/{rel}")
+            validation = json.loads((bucket / "validation.json").read_text())
+            for rel, entry in validation["files"].items():
+                if rel.startswith("meta/") and _file_sha256(bucket / rel) != entry["sha256"]:
+                    raise ValueError(f"TouchScale episode/source metadata changed: {rel}")
     return {"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
             "buckets": [str(p.parent.parent.relative_to(root)) for p in infos],
             "episodes": sum(int(m["total_episodes"]) for m in metadata),

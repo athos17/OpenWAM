@@ -49,8 +49,8 @@ def validate_source_contract(name, source):
     if kind == "robot" and source.get("type") in ("lerobot_video_intensity", "egodex_reuse_video"):
         raise ValueError("Robot sources require an action reader; V/VT readers are forbidden")
     representation = source.get("tactile_representation", "intensity")
-    if representation not in ("intensity", "rgb"):
-        raise ValueError("tactile_representation must be intensity or rgb")
+    if representation not in ("intensity", "rgb", "touchscale_force"):
+        raise ValueError("Unknown tactile_representation")
     return {"source_kind": kind, "expected_modalities": expected,
             "expected_tactile_codec": RGB_CODEC if representation == "rgb" else INTENSITY_CODEC}
 
@@ -173,11 +173,19 @@ def validate_tactile_sample(sample, spec):
         if key not in sample:
             continue
         times = torch.as_tensor(sample[key], dtype=torch.float64).cpu()
-        measured = batch[validity][0].any(-1).cpu()
-        if times.shape != expected[grid_key].shape or not torch.isfinite(times[measured]).all():
+        grid = expected[grid_key].cpu()
+        if times.ndim == 2:
+            # Independent native glove clocks: do not collapse them to one time.
+            measured = torch.as_tensor(sample[validity]).cpu()
+            if times.shape != measured.shape or times.shape[0] != len(grid):
+                raise ValueError(f"Invalid measured {key}")
+            grid = grid[:, None].expand_as(times)
+        else:
+            measured = batch[validity][0].any(-1).cpu()
+        if times.shape != grid.shape or not torch.isfinite(times[measured]).all():
             raise ValueError(f"Invalid measured {key}")
         if grid_key == "tactile_history_times_s":
-            if (times[measured] > expected[grid_key][measured] + 1e-6).any():
+            if (times[measured] > grid[measured] + 1e-6).any():
                 raise ValueError("Tactile history must not borrow future measurements")
         elif (times[measured] <= 0).any():
             raise ValueError("Future tactile supervision requires strictly future measurements")

@@ -23,7 +23,8 @@
         "visuotactile_dwheel",
         "visuotactile_qingloong",
         "exumi",
-        "normalized_pressure"
+        "normalized_pressure",
+        "touchscale_glove"
       ],
       "observation_encoder": {
         "kind": "ftp1_heterogeneous_v1",
@@ -116,9 +117,17 @@
               4
             ],
             "initialization": "random"
+          },
+          {
+            "name": "TouchScaleForce",
+            "kind": "matrix",
+            "input_representation": "normalized_normal_force",
+            "input_shape": [16, 10],
+            "initialization": "random"
           }
         ],
         "source_to_encoder": {
+          "touchscale_glove": ["TouchScaleForce"],
           "sharpa_real": [
             "SharpaWave"
           ],
