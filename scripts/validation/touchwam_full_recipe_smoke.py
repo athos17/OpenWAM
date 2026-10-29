@@ -180,9 +180,14 @@ def train(args):
 
     started = time.time()
     trainer = TracedTrainer(cfg, accelerator=accelerator, dataset=dataset)
+    initialization = getattr(trainer.architecture, 'initialization_provenance', {})
+    if initialization.get('openwam_tensors_preserved') is not True:
+        raise ValueError('Complete pretrained OpenWAM initialization was not preserved')
+    if initialization.get('tactile_observation_encoder', {}).get('initialization') != 'ftp1_pretrained':
+        raise ValueError('The FTP tactile observation encoder was not initialized from pretrained weights')
     if rank == 0:
         (output / 'initialization.json').write_text(json.dumps(
-            getattr(trainer.architecture, 'initialization_provenance', {}), indent=2, default=str) + '\n')
+            initialization, indent=2, default=str) + '\n')
     trainer.train()
     if len(seen) != len(names):
         raise ValueError(f'Incomplete batch count on rank {rank}: {seen}')
@@ -202,6 +207,8 @@ def train(args):
         metrics = [json.loads(line) for line in files[0].read_text().splitlines()]
         if len(metrics) != len(names):
             raise ValueError('Production trainer did not complete the requested update budget')
+        if [row.get('opt_step') for row in metrics] != list(range(1, len(names) + 1)):
+            raise ValueError('A real optimizer update was skipped during the smoke')
         for row in metrics:
             for key, value in row.items():
                 if isinstance(value, (int, float)) and not math.isfinite(value):
