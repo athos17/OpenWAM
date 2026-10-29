@@ -1,0 +1,13 @@
+# Optional capacity candidate; the default launcher remains batch 8.
+# Keep the reference LR for a controlled capacity/performance comparison.
+# Choosing a production peak LR requires a separate global-batch decision.
+defaults:
+  - train_touchwam_six_source_bs8_norecompute_20261029
+  - _self_
+
+training:
+  batch_size: 12
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_six_source_bs12_norecompute_20261029}
+
+project:
+  name: touchwam-six-source-bs12-norecompute-20261029

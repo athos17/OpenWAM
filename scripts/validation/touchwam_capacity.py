@@ -87,7 +87,8 @@ def train(args):
     torch.cuda.set_device(int(os.environ.get('LOCAL_RANK', 0)))
     cfg = compose_config(args.config)
     t = cfg.training
-    assert t.batch_size == 8 and t.gradient_accumulation_steps == 1
+    microbatch = int(t.batch_size)
+    assert microbatch > 0 and t.gradient_accumulation_steps == 1
     assert not t.use_gradient_checkpointing and not t.use_gradient_checkpointing_offload
     assert not cfg.model.architecture.mot_checkpoint_mixed_attn
     names = args.sources.split(',') if args.sources else [k for k,v in cfg.dataloader.datasets.items() if v.get('enabled', True)]
@@ -96,9 +97,9 @@ def train(args):
     stop = len(names) * args.cycles
     output = Path(args.output); output.mkdir(parents=True, exist_ok=True)
     # Keep a long schedule while stopping the capacity run after explicit coverage.
-    # Its horizon represents the requested 64-card batch-8 run approximately;
+    # Its horizon represents the requested 64-card run approximately;
     # production modality-group padding is not part of this capacity fixture.
-    horizon = math.ceil(106277944 / (64 * 8))
+    horizon = math.ceil(106277944 / (64 * microbatch))
     t.update(dataset_num_workers=0, max_steps=horizon, num_epochs=1, stop_after_steps=stop,
              save_steps=0, save_full_states_for_resume=False, output_path=str(output/'run'),
              log_flush_every=1)
@@ -112,6 +113,8 @@ def train(args):
             if sha256(p) != proof['sha256']:
                 raise ValueError('Fixture changed')
             self.record = torch.load(p, map_location='cpu', weights_only=False)
+            if len(self.record['samples']) != microbatch or proof['distinct_windows'] != microbatch:
+                raise ValueError(f'Expected {microbatch} distinct fixture windows: {name}')
             live = OmegaConf.to_container(cfg.dataloader.datasets[name], resolve=True)
             frozen = dict(self.record['source_config']); frozen.pop('seed', None)
             live.pop('seed', None)
@@ -139,7 +142,7 @@ def train(args):
     dataset = Coverage(sources, names=names, seed=42, strict_action_dim=True,
                        source_configs=[s.record['source_config'] for s in sources])
     dataset.training_layout = dict(batching='validation_source_round_robin', world_size=world,
-                                   microbatch=8, gradient_accumulation=1)
+                                   microbatch=microbatch, gradient_accumulation=1)
     accelerator = _build_accelerator(cfg)
     records, pending = [], {}
 
@@ -150,7 +153,7 @@ def train(args):
         def compute_loss(self, batch):
             torch.cuda.synchronize(); torch.cuda.reset_peak_memory_stats()
             routes = [row['_dataset_name'] for row in batch]
-            if len(routes) != 8 or len(set(routes)) != 1:
+            if len(routes) != microbatch or len(set(routes)) != 1:
                 raise ValueError(f'Wrong per-rank capacity batch: {routes}')
             pending.update(source=routes[0], start=time.monotonic())
             print(json.dumps(dict(rank=rank, stage='forward', source=routes[0], batch_size=len(routes))), flush=True)
@@ -183,9 +186,11 @@ def train(args):
     accelerator.wait_for_everyone()
     if rank == 0:
         ranks = [json.loads((output/f'rank-{i}.json').read_text()) for i in range(world)]
-        write(output/'report.json', dict(status='passed', ranks=ranks, per_gpu_batch=8,
+        device = torch.cuda.get_device_properties(torch.cuda.current_device())
+        write(output/'report.json', dict(status='passed', ranks=ranks, per_gpu_batch=microbatch,
+              gpu_name=device.name, gpu_total_memory_gib=device.total_memory/1024**3,
               world_size=world, explicit_activation_checkpoint_calls=0, sources=names,
-              steps=stop, real_reader_windows_per_source=8, repeated_across_ranks=True,
+              steps=stop, real_reader_windows_per_source=microbatch, repeated_across_ranks=True,
               full_population_io_benchmarked=False, checkpoint_io=False,
               validation_scope='full_model_capacity_and_optimizer_updates'))
     accelerator.wait_for_everyone()
