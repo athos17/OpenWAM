@@ -88,7 +88,8 @@ def main():
         video = sample['video']
         samples[name] = {'frames': len(video), 'size': list(video[0].size), 'seconds': round(time.time() - start, 2),
                          'episode_id': str(sample.get('episode_id'))}
-        assert len(video) == 33 and video[0].size == (320, 384), samples[name]
+        # 33-step windows, every 4th frame decoded -> 9 frames on the 320x384 multiview canvas.
+        assert len(video) == len(range(0, 33, 4)) and video[0].size == (320, 384), samples[name]
     report['samples'] = samples
     report['status'] = 'passed'
     write_json(ROOT / 'results/preflight.json', report)
