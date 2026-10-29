@@ -2,6 +2,7 @@
 
 from contextlib import nullcontext
 import json
+from types import SimpleNamespace
 
 from omegaconf import OmegaConf
 from PIL import Image
@@ -10,6 +11,31 @@ import torch
 
 from scripts import preflight_touchwam as preflight
 from openwam.tactile.registry import REGION_NAMES
+
+
+def test_preflight_normalization_rejects_missing_robot_statistics_but_accepts_ego():
+    robot = SimpleNamespace(training_modality="video_action", normalization_stats_path=None)
+    with pytest.raises(ValueError, match="has no statistics artifact"):
+        preflight.validate_source_normalization("ftp", robot, {"normalize_mode": "min-max", "action_mode": "eef"})
+    ego = SimpleNamespace(training_modality="video_tactile", normalization_stats_path=None)
+    result = preflight.validate_source_normalization("touchscale", ego, {})
+    assert result["touchscale"]["stats_sha256"] is None
+
+
+def test_preflight_normalization_matches_checkpoint_per_robot_expansion(tmp_path):
+    import numpy as np
+    from openwam.dataloader.utils.normalization_package import save_normalization_package, read_normalization_package
+
+    entries = {name: {"config": {"normalize_mode": "min-max", "action_mode": "joint"},
+                     "training_modality": "video_action",
+                     "stats_payload": {"joint": {"action_min": np.zeros(size), "action_max": np.ones(size)}}}
+               for name, size in (("arm", 7), ("bimanual", 14))}
+    reader = SimpleNamespace(normalization_sources_for_config=lambda config: entries)
+    result = preflight.validate_source_normalization("robot", reader, {})
+    save_normalization_package(tmp_path, {"robot/" + key: value for key, value in entries.items()})
+    saved = read_normalization_package(tmp_path)["sources"]
+    assert set(result) == {"robot/arm", "robot/bimanual"}
+    assert all(result[key]["stats_sha256"] == saved[key]["stats_sha256"] for key in result)
 
 
 @pytest.fixture

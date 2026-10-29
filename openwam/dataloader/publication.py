@@ -144,6 +144,8 @@ def publication_contract(dataset_dir):
             raise ValueError(f"Published {key} count no longer matches metadata: {root}")
     if any(m.get("codebase_version") != "v3.0" for m in metadata):
         raise ValueError(f"Publication contains a non-v3 bucket: {root}")
+    if record.get("schema") == "touchwam_ftp1_frozen_training_v1":
+        _validate_frozen_ftp_publication(root, record, infos)
     if record.get("schema") == "touchscale_lerobot_v3_v1":
         release = path.parent
         if _file_sha256(release / "conversion_plan.json") != record.get("conversion_plan_sha256"):
@@ -163,6 +165,48 @@ def publication_contract(dataset_dir):
             "buckets": [str(p.parent.parent.relative_to(root)) for p in infos],
             "episodes": sum(int(m["total_episodes"]) for m in metadata),
             "frames": sum(int(m["total_frames"]) for m in metadata)}
+
+
+def _validate_frozen_ftp_publication(root, record, infos):
+    """Bind a frozen FTP source to its snapshot, statistics and reader metadata."""
+    snapshot_path = root.parent / "snapshot.json"
+    inventory_path = root.parent / "publication_inventory.json"
+    if (_file_sha256(snapshot_path) != record.get("snapshot_sha256")
+            or _file_sha256(inventory_path) != record.get("publication_inventory_sha256")):
+        raise ValueError("Frozen FTP snapshot/publication inventory changed")
+    source = record.get("source")
+    snapshot = json.loads(snapshot_path.read_text())
+    if source != root.name or source not in snapshot.get("sources", {}):
+        raise ValueError("Frozen FTP source identity differs from its snapshot")
+    selected = {entry["bucket"] for entry in snapshot["sources"][source]["buckets_snapshot"]}
+    actual = {p.parent.parent.relative_to(root).as_posix() for p in infos}
+    if selected != actual:
+        raise ValueError("Frozen FTP bucket population differs from its snapshot")
+    inventory = [entry for entry in json.loads(inventory_path.read_text()) if entry["source"] == source]
+    if len(inventory) != len(selected) or {entry["bucket"] for entry in inventory} != selected:
+        raise ValueError("Frozen FTP original publication inventory population differs")
+    for entry in inventory:
+        provenance = root.parent / "provenance" / source / entry["bucket"] / "_PFS_PUBLICATION.json"
+        if _file_sha256(provenance) != entry["publication_sha256"]:
+            raise ValueError("Frozen FTP original publication provenance changed")
+    files = {"normalization_stats.npy", "normalization_complete.json", "reader_validation.json"}
+    for bucket in selected:
+        required = {"info.json", "action_contract.json", "source_definition.json"}
+        if record.get("training_modality") == "video_action_tactile":
+            required.add("tactile_rgb.json")
+        if any(not (root / bucket / "meta" / relative).is_file() for relative in required):
+            raise ValueError("Frozen FTP source lacks required action/tactile metadata")
+        files.update(p.relative_to(root).as_posix() for p in (root / bucket / "meta").rglob("*") if p.is_file())
+    bound = record.get("metadata_sha256", {})
+    if not isinstance(bound, dict) or files != set(bound):
+        raise ValueError("Frozen FTP bound metadata population changed")
+    for relative, fingerprint in bound.items():
+        path = root / relative
+        if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()) or _file_sha256(path) != fingerprint:
+            raise ValueError(f"Frozen FTP metadata changed: {relative}")
+    if (bound["normalization_stats.npy"] != record.get("normalization_sha256")
+            or bound["reader_validation.json"] != record.get("reader_validation_sha256")):
+        raise ValueError("Frozen FTP normalization/acceptance identity differs")
 
 
 def existing_publication_contract(root):

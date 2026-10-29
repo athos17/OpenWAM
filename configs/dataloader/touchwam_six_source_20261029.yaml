@@ -1,0 +1,82 @@
+# Frozen six-source population; media remains in the accepted PFS releases.
+# FTP's 25.914875h archive contains 17.935301h with verified robot actions.
+# Unknown action semantics never become ego V/VT training examples.
+defaults:
+  - touchwam_ftp1
+  - _self_
+
+weight_strategy: manual  # Physical-hour ratios, independent of each source native FPS.
+ftp1_root: ${oc.env:TOUCHWAM_FTP1_FROZEN_ROOT,/mnt/pfs/v89atp/workspace/dataset/ftp1_frozen25h_v1_20261029}
+datasets:
+  robocoin:
+    enabled: true
+    weight: 20.000157407407406
+  egodex:
+    weight: 300.0
+    total_hours: null  # Keep the previously accepted 300h index.
+  agibot:
+    weight: 136.1888888888889
+    total_hours: null  # Keep the previously accepted ~136.19h release.
+  sharpadex:
+    weight: 242.1365277777778
+    total_hours: null  # Keep ~242.14h train; val episodes remain excluded.
+  touchscale:
+    weight: 99.65079629629629
+    enabled: true
+    total_hours: null  # Full accepted release is 99.650796h, already below 100h.
+    episode_selection_manifest: ${oc.env:TOUCHWAM_TOUCHSCALE_SELECTION,/mnt/pfs/v89atp/workspace/dataset/_manifests/touchwam_five_source_20261029/touchscale_selection.json}
+    episode_selection_sha256: ${oc.env:TOUCHWAM_TOUCHSCALE_SELECTION_SHA256,4fb3d03113430ec399b74fe069c77d909c7d024ebad8b395fb1f12f0d40dd11d}
+  ftp_freetacman:
+    weight: 5.598185185185185
+    enabled: true
+    dataset_dir: ${dataloader.ftp1_root}/FreeTacMan
+  ftp_rdp_bimanual:
+    weight: 0.07238425925925926
+    enabled: true
+    dataset_dir: ${dataloader.ftp1_root}/RDP_Bimanual
+  ftp_vla_touch:
+    weight: 0.24597222222222223
+    enabled: true
+    dataset_dir: ${dataloader.ftp1_root}/VLA_touch
+  ftp_vitamin:
+    weight: 0.27412037037037035
+    enabled: true
+    dataset_dir: ${dataloader.ftp1_root}/ViTaMIn
+  ftp_exumi:
+    weight: 0.5846805555555555
+    enabled: true
+    dataset_dir: ${dataloader.ftp1_root}/exUMI
+  ftp_motiontrans:
+    weight: 1.6534027777777778
+    enabled: true
+    dataset_dir: ${dataloader.ftp1_root}/MotionTrans
+    expected_modalities: [video_action]
+    tactile_mode: off
+  ftp_rh20tcfg5franka:
+    weight: 3.2820833333333335
+    enabled: true
+    dataset_dir: ${dataloader.ftp1_root}/RH20TCfg5Franka
+    expected_modalities: [video_action]
+    tactile_mode: off
+  ftp_rh20tcfg6atiaxia:
+    weight: 4.0729444444444445
+    enabled: true
+    dataset_dir: ${dataloader.ftp1_root}/RH20TCfg6ATIAxia
+    expected_modalities: [video_action]
+    tactile_mode: off
+  ftp_rh20tcfg7tactile:
+    weight: 2.151527777777778
+    enabled: true
+    dataset_dir: ${dataloader.ftp1_root}/RH20TCfg7Tactile
+    expected_modalities: [video_action]
+    tactile_mode: off
+  ftp_rdp:
+    enabled: false  # No completed bucket in this snapshot.
+  ftp_unit:
+    enabled: false  # No completed bucket in this snapshot.
+  ftp_unit_bimanual:
+    enabled: false  # Archived; no verified canonical action profile.
+  ftp_visuotactile_d_wheel:
+    enabled: false  # Archived; no verified canonical action profile.
+  ftp_visuotactile_qingloong:
+    enabled: false  # Archived; no verified canonical action profile.

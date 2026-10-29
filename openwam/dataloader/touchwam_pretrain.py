@@ -20,6 +20,7 @@ import torch
 from openwam.dataloader.bases import BaseDataset
 from openwam.dataloader.bases.multi_lerobot_v3_reader import MultiLeRobotV3Reader
 from openwam.dataloader.egodex_video import EgoDexVideoDataset
+from openwam.dataloader.episode_selection import load_episode_selection
 from openwam.dataloader.sharpadex_native_tcp import SharpaDexNativeTCPDataset
 from openwam.dataloader.sharpadex_tianji_global import MultiSharpaDexTianjiGlobalDataset
 from openwam.dataloader.transforms.multiview import assemble_multiview_layout
@@ -187,7 +188,8 @@ class LeRobotVideoIntensityDataset(BaseDataset):
                  tactile_representation="intensity", tactile_rgb_manifest="meta/tactile_rgb.json",
                  tactile_rgb_map_size=128, tactile_observation_map_size=None, tactile_encoder_name=None,
                  history_times=HISTORY_TIMES, future_times=FUTURE_TIMES,
-                 color_jitter=None, seed=42, max_hours=None):
+                 color_jitter=None, seed=42, max_hours=None,
+                 episode_selection=None, episode_selection_contract=None):
         self.root = Path(dataset_dir).resolve(strict=True)
         self.info = parse_info_json(self.root)
         if self.info.get("codebase_version") != "v3.0":
@@ -237,11 +239,22 @@ class LeRobotVideoIntensityDataset(BaseDataset):
         # Compute physical shard offsets before selecting a split or budget.
         eps["_data_offset"] = compute_file_local_offsets(eps, "data/chunk_index", "data/file_index")
         eps = apply_info_splits(eps, split, self.info.get("splits", {}), source_name=self.source_id)
+        if episode_selection is not None:
+            if max_hours is not None:
+                raise ValueError("An immutable episode selection cannot be resampled by total_hours")
+            wanted = set(episode_selection["episode_indices"])
+            eps = eps.loc[eps.episode_index.isin(wanted)].reset_index(drop=True)
+            if set(eps.episode_index.astype(int)) != wanted:
+                raise ValueError("Frozen episode selection includes absent or wrong-split episodes")
+            if int(eps.length.sum()) != int(episode_selection["frames"]):
+                raise ValueError("Frozen episode selection frame count changed")
         if max_hours is not None:
             eps = subsample_episodes_by_hours(eps, float(max_hours), self.fps, self.seed)
         # No pure-video window with zero future supervision is sampled.
         last_margin = max(1, int(np.ceil(self.video_offsets_s[1] * self.fps - 1e-7)))
         eps = eps.loc[eps.length > last_margin].reset_index(drop=True)
+        if episode_selection is not None and set(eps.episode_index.astype(int)) != wanted:
+            raise ValueError("Frozen episode selection contains episodes without a future video target")
         if eps.empty:
             raise ValueError(f"No usable {split} episodes in {self.root}")
         self.episodes = eps
@@ -325,6 +338,7 @@ class LeRobotVideoIntensityDataset(BaseDataset):
                 "tactile_encoder_name": tactile_encoder_name}
                if self.touch and self.touch.observation_hw is not None else {}),
             "split": split, "selected_episodes": eps.episode_index.astype(int).tolist(),
+            "episode_selection": episode_selection_contract,
             "source_fps": self.fps, "sampling_fps": self.sampling_fps,
             "video_times_s": self.video_offsets_s.tolist(), "window_stride": window_stride,
             "height": height, "width": width, "camera_layout": list(self.camera_layout),
@@ -446,11 +460,24 @@ class LeRobotVideoIntensityDataset(BaseDataset):
                   "color_jitter", "seed") + cls.EXTRA_CONFIG_FIELDS
         kwargs = {k: get_cfg(config, k) for k in fields if get_cfg(config, k) is not None}
         total_hours = get_cfg(config, "total_hours")
+        selection_path = get_cfg(config, "episode_selection_manifest")
+        selection, selection_contract = None, None
+        if selection_path is not None:
+            if total_hours is not None or get_cfg(config, "include_buckets") is not None:
+                raise ValueError("Frozen episode selection replaces total_hours/include_buckets")
+            selection, selection_contract = load_episode_selection(
+                selection_path, root, split, get_cfg(config, "episode_selection_sha256"))
         if (root / "meta/info.json").exists():
+            if selection is not None:
+                if set(selection["buckets"]) != {"."}:
+                    raise ValueError("Single-bucket selection must use the '.' key")
+                kwargs.update(episode_selection=selection["buckets"]["."],
+                              episode_selection_contract=selection_contract)
             return cls(root, split=split, max_hours=total_hours, **kwargs)
         # Immutable published roots are inspected at construction only. Missing
         # expected entries are additionally rejected by the publication preflight.
-        paths = sorted(p.parent.parent for p in root.rglob("meta/info.json"))
+        paths = ([root / name for name in sorted(selection["buckets"])] if selection is not None else
+                 sorted(p.parent.parent for p in root.rglob("meta/info.json")))
         if not paths:
             raise FileNotFoundError(f"No published LeRobot v3 buckets in {root}")
         includes = get_cfg(config, "include_buckets")
@@ -466,7 +493,9 @@ class LeRobotVideoIntensityDataset(BaseDataset):
                      / float(parse_info_json(p)["fps"]) / 3600
                      for p in paths]
             budgets = water_fill_hours(hours, float(total_hours))
-        buckets = [cls(p, split=split, max_hours=h, **kwargs)
+        buckets = [cls(p, split=split, max_hours=h, **kwargs,
+                       **({"episode_selection": selection["buckets"][str(p.relative_to(root))],
+                           "episode_selection_contract": selection_contract} if selection is not None else {}))
                    for p, h in zip(paths, budgets) if h is None or h > 0]
         if len({b.tactile_codec for b in buckets} - {None}) > 1:
             raise ValueError("A source cannot mix RGB and intensity tactile representations")

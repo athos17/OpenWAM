@@ -33,7 +33,7 @@ def phase(args):
 
     from openwam.dataloader.mixture import MixtureDataset
     from openwam.tactile.registry import REGION_NAMES
-    from openwam.tactile.regions import INTENSITY_CODEC, RGB_CODEC
+    from openwam.tactile.regions import INTENSITY_CODEC, RGB_CODEC, collate_regions
     from openwam.train.openwam_trainer import OpenWAMTrainer
     from openwam.train.utils.checkpointing import find_latest_accel_state
     from openwam.train.utils.seeding import seed_everything
@@ -56,6 +56,19 @@ def phase(args):
     plugin.deepspeed_config["zero_optimization"].update(
         reduce_bucket_size=1000000, allgather_bucket_size=1000000, ignore_unused_parameters=True)
     accelerator = Accelerator(deepspeed_plugin=plugin, gradient_accumulation_steps=2, mixed_precision="bf16")
+    # This optional fixture is emitted by the production TouchScale reader.
+    # Scene T5/VAE are still replaced, while measured tactile values, ROI,
+    # missing-packet masks, identities and future labels stay unchanged.
+    touchscale_sample = None
+    if args.touchscale_sample:
+        touchscale_sample = torch.load(args.touchscale_sample, map_location="cpu", weights_only=False)
+        if (touchscale_sample.get("training_modality", "video_tactile") != "video_tactile"
+                or any(key in touchscale_sample for key in ("action", "proprio"))
+                or set(touchscale_sample.get("tactile_sensor_names", ())) != {"touchscale_glove"}):
+            raise ValueError("TouchScale fixture must retain its ego VT modality")
+        touchscale_sample["training_modality"] = "video_tactile"
+        if len(touchscale_sample.get("tactile_region_names", ())) != 30:
+            raise ValueError("TouchScale fixture must retain all 30 measured hand regions")
 
     class Source(torch.utils.data.Dataset):
         action_dim = 80
@@ -65,11 +78,15 @@ def phase(args):
             self.tactile_codec = codec
             self.encoder_id = encoder_id
             self.tactile_observation_shape = ((4, 6) if encoder_id == 2 else (32, 32)) if args.heterogeneous and codec else None
+            if encoder_id == 3:
+                self.tactile_observation_shape = (16, 10)
 
         def __len__(self):
             return 2
 
         def __getitem__(self, index):
+            if self.encoder_id == 3:
+                return dict(touchscale_sample, smoke_encoder_id=3)
             result = {"training_modality": self.training_modality}
             if "tactile" in self.training_modality:
                 result["tactile_region_names"] = [REGION_NAMES[i] for i in (58, 59)]
@@ -87,8 +104,11 @@ def phase(args):
         sources.extend(Source(mode, RGB_CODEC, 1) for mode in modes if "tactile" in mode)
     if args.heterogeneous:
         sources.extend(Source(mode, INTENSITY_CODEC, 2) for mode in modes if "tactile" in mode)
+    if touchscale_sample is not None:
+        sources.append(Source("video_tactile", INTENSITY_CODEC, 3))
     names = [source.training_modality + ("_rgb" if source.tactile_codec == RGB_CODEC else "")
              + ("_pressure" if source.encoder_id == 2 else "")
+             + ("_touchscale" if source.encoder_id == 3 else "")
              for source in sources]
     total_steps = 2 * len(sources)
     dataset = MixtureDataset(sources, names=names, seed=42, strict_action_dim=True,
@@ -104,6 +124,7 @@ def phase(args):
         "resume_ckpt_path": resume, "output_path": str(output / args.phase)},
         "project": {"seed": 42, "wandb": None}, "model": {}})
     observation = None
+    sensor_names = ["sharpa_real", "optical", "pressure"]
     if args.heterogeneous:
         norm = dict(mean=[0., 0., 0.], std=[1., 1., 1.], pre_scale=2, pre_bias=-1)
         observation = dict(kind="ftp1_heterogeneous_v1", initialization="random", image_size=32,
@@ -114,7 +135,12 @@ def phase(args):
                      dict(name="Pressure", kind="matrix", input_shape=[4, 6])],
             source_to_encoder={"sharpa_real":["Sharpa"], "optical":["Optical"], "pressure":["Pressure"]},
             normalizations={"sharpa_real":{"Sharpa":norm}, "optical":{"Optical":norm}})
-    model = tiny_model(torch.device("cpu"), torch.bfloat16, rgb_enabled=args.rgb, observation_encoder=observation)
+        if touchscale_sample is not None:
+            sensor_names.append("touchscale_glove")
+            observation["sensors"].append(dict(name="TouchScaleForce", kind="matrix", input_shape=[16, 10]))
+            observation["source_to_encoder"]["touchscale_glove"] = ["TouchScaleForce"]
+    model = tiny_model(torch.device("cpu"), torch.bfloat16, rgb_enabled=args.rgb,
+                       observation_encoder=observation, sensor_names=sensor_names)
     model.set_training_runtime(use_gradient_checkpointing=True, use_gradient_checkpointing_offload=False,
                                max_timestep_boundary=1.0, min_timestep_boundary=0.0)
 
@@ -131,6 +157,15 @@ def phase(args):
         if args.heterogeneous and codec is not None:
             idx = samples[0]["smoke_encoder_id"]
             seen_encoders.add(idx)
+            if idx == 3:
+                spec = self.tactile_spec
+                tactile = collate_regions(samples, map_size=spec["map_size"], history=spec["history"],
+                    future_frames=spec["future_frames"], region_names=spec["region_names"],
+                    sensor_names=spec["sensor_names"], codec=codec, observation_map_size=(16, 10),
+                    encoder_names=[item["name"] for item in spec["observation_encoder"]["sensors"]])
+                inputs.update({key: value.to(device=self.device, dtype=self.dtype if value.is_floating_point() else value.dtype)
+                               if isinstance(value, torch.Tensor) else value for key, value in tactile.items()})
+                return inputs
             shape = (4, 6) if idx == 2 else (32, 32)
             channels = 3 if idx == 1 else 1
             inputs.update(tactile_encoder_ids=torch.full((1, 2), idx, device=self.device, dtype=torch.long),
@@ -202,6 +237,7 @@ def phase(args):
                   "seen_modalities": seen, "seen_codecs_this_phase": sorted(seen_codecs),
                   "rgb_enabled": args.rgb, "elapsed_s": time.monotonic() - started,
                   "heterogeneous": args.heterogeneous, "seen_encoders_this_phase": sorted(seen_encoders),
+                  "real_touchscale_tactile": touchscale_sample is not None,
                   "peak_allocated_mib": torch.cuda.max_memory_allocated() / 1024**2,
                   "peak_reserved_mib": torch.cuda.max_memory_reserved() / 1024**2}
         if report["peak_allocated_mib"] > args.max_allocated_mib:
@@ -233,6 +269,8 @@ def run(args):
             command.append("--rgb")
         if args.heterogeneous:
             command.append("--heterogeneous")
+        if args.touchscale_sample:
+            command.extend(["--touchscale-sample", str(Path(args.touchscale_sample).resolve(strict=True))])
         with (output / f"{name}.log").open("w") as log:
             child = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
@@ -250,12 +288,13 @@ def run(args):
     for field in ("model_sha256", "optimizer_sha256", "scheduler_sha256"):
         if baseline[field] != resumed[field]:
             raise RuntimeError(f"Interrupted/resumed trainer differs from uninterrupted: {field}")
-    expected_updates = 8 if args.heterogeneous else 6 if args.rgb else 4
+    expected_updates = (8 if args.heterogeneous else 6 if args.rgb else 4) + bool(args.touchscale_sample)
     if len(baseline["seen_modalities"]) != 4 or baseline["trainer_state"]["opt_step"] != expected_updates:
         raise RuntimeError("Missing four-modality coverage or optimizer updates")
     if args.rgb and baseline["seen_codecs_this_phase"] != ["tactile_intensity_v1", "tactile_rgb_v1"]:
         raise RuntimeError("Both intensity and raw RGB sources must reach the production trainer")
-    if args.heterogeneous and baseline["seen_encoders_this_phase"] != [0, 1, 2]:
+    expected_encoders = [0, 1, 2, 3] if args.touchscale_sample else [0, 1, 2]
+    if args.heterogeneous and baseline["seen_encoders_this_phase"] != expected_encoders:
         raise RuntimeError("Sharpa, RGB and matrix observation encoders must all reach the production trainer")
     report = {"status": "passed", "validation_only": True, "world_size": 1, "communication": "nccl",
               "full_model": False, "real_t5_vae": False, "real_datasets": False,
@@ -265,6 +304,9 @@ def run(args):
                                         for name in ("baseline", "pilot", "resume")),
               "seen_modalities": baseline["seen_modalities"], "rgb_enabled": args.rgb,
               "heterogeneous": args.heterogeneous, "seen_encoders": baseline["seen_encoders_this_phase"],
+              "real_touchscale_tactile": bool(args.touchscale_sample),
+              "touchscale_sample_sha256": hashlib.sha256(Path(args.touchscale_sample).read_bytes()).hexdigest()
+                  if args.touchscale_sample else None,
               "seen_codecs": baseline["seen_codecs_this_phase"], "optimizer_updates": expected_updates}
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
@@ -276,9 +318,12 @@ if __name__ == "__main__":
     parser.add_argument("--phase", choices=("baseline", "pilot", "resume"))
     parser.add_argument("--rgb", action="store_true", help="Mix optical RGB and intensity sources with separate heads")
     parser.add_argument("--heterogeneous", action="store_true", help="Exercise tiny explicit-random image and native-matrix observation encoders")
+    parser.add_argument("--touchscale-sample", help="Trusted torch fixture from the production TouchScale reader; preserves all 30 regions")
     parser.add_argument("--max-allocated-mib", type=int, default=768)
     parser.add_argument("--phase-timeout-seconds", type=int, default=120)
     arguments = parser.parse_args()
+    if arguments.touchscale_sample:
+        arguments.heterogeneous = True
     if arguments.heterogeneous:
         arguments.rgb = True
     if not 32 <= arguments.max_allocated_mib <= 1024:

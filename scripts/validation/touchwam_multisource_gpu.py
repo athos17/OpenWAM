@@ -33,7 +33,7 @@ from openwam.train.utils.modality_optimizer import (
 )
 
 
-def tiny_model(device, dtype, *, rgb_enabled=False, observation_encoder=None):
+def tiny_model(device, dtype, *, rgb_enabled=False, observation_encoder=None, sensor_names=None):
     def init_video(self, cfg):
         dit = WanModel(dim=96, in_dim=4, out_dim=4, ffn_dim=192, text_dim=32, freq_dim=32,
                        eps=1e-6, patch_size=(1, 2, 2), num_heads=4, num_layers=2,
@@ -50,7 +50,7 @@ def tiny_model(device, dtype, *, rgb_enabled=False, observation_encoder=None):
         cfg["tactile"].update(rgb_enabled=True, rgb_map_size=128, rgb_patch_size=64)
     if observation_encoder:
         cfg["tactile"].update(observation_encoder=observation_encoder,
-                             sensor_names=["sharpa_real", "optical", "pressure"])
+                             sensor_names=sensor_names or ["sharpa_real", "optical", "pressure"])
     with patch.object(BaseWAMArchitecture, "_init_video_backbone", init_video):
         model = build_architecture("touchwam_regions", cfg)
     model.set_dtype_device(dtype, device)

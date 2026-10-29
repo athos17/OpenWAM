@@ -33,7 +33,12 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def _manifest_for(sources):
+def build_normalization_manifest(sources):
+    """Validate deployment statistics and describe them without writing files.
+
+    Preflight uses the same checks as checkpoint publication, so missing or
+    changed source statistics fail before allocating the full training model.
+    """
     entries = {}
     for name, source in sources.items():
         config = source["config"]
@@ -76,7 +81,7 @@ def read_normalization_package(output_dir):
 
 def verify_normalization_package(output_dir, sources):
     saved = read_normalization_package(output_dir)
-    expected = _manifest_for(sources)
+    expected = build_normalization_manifest(sources)
     if saved != expected:
         raise ValueError("Mixed normalization sources differ: names, transforms, modality or source configuration changed")
 
@@ -84,7 +89,7 @@ def verify_normalization_package(output_dir, sources):
 def save_normalization_package(output_dir, sources):
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    manifest = _manifest_for(sources)
+    manifest = build_normalization_manifest(sources)
     path = root / MANIFEST_NAME
     if path.exists():
         verify_normalization_package(root, sources)

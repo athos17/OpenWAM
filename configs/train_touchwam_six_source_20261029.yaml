@@ -1,0 +1,13 @@
+# Preserve full OpenWAM Alpha initialization and the pinned FTP tactile encoder.
+# This selects data only; launch resources and run length remain overrideable.
+defaults:
+  - train_touchwam_ftp1
+  - override dataloader: touchwam_six_source_20261029
+  - _self_
+
+training:
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_six_source_20261029}
+
+project:
+  name: touchwam-six-source-20261029
+  seed: 42

@@ -83,6 +83,25 @@ def validate_training_schedule(training):
             "deferred_boundary_settings": deferred}
 
 
+def validate_source_normalization(name, dataset, source):
+    """Check the exact per-source/per-robot artifacts checkpointing will save."""
+    from openwam.dataloader.utils.normalization_package import build_normalization_manifest
+
+    config = OmegaConf.to_container(source, resolve=True) if OmegaConf.is_config(source) else dict(source)
+    mode = getattr(dataset, "training_modality", "video_action")
+    expand = getattr(dataset, "normalization_sources_for_config", None)
+    sources = ({f"{name}/{key}": value for key, value in expand(config).items()}
+               if expand is not None else {name: {
+                   "config": config, "training_modality": mode,
+                   "stats_path": getattr(dataset, "normalization_stats_path", None)}})
+    manifest = build_normalization_manifest(sources)
+    return {key: {"training_modality": value["training_modality"],
+                  "action_mode": value["config"].get("action_mode"),
+                  "normalize_mode": value["config"].get("normalize_mode"),
+                  "stats_sha256": value["stats_sha256"]}
+            for key, value in manifest["sources"].items()}
+
+
 def validate_tactile_sample(sample, spec):
     """Exercise the real collator with the live model contract, without loading weights."""
     from openwam.tactile.regions import collate_regions, observation_batch_shape
@@ -320,6 +339,7 @@ def run(config, overrides, output, *, metadata_only=False, alpha_audit=None):
                 source = OmegaConf.create(OmegaConf.to_container(source, resolve=True))
                 source.seed = int(cfg.project.seed if cfg.project.seed is not None else 42)
                 dataset = build_dataset(source, split="train")
+                entry["normalization"] = validate_source_normalization(name, dataset, source)
                 mode = getattr(dataset, "training_modality", "video_action")
                 leaves = getattr(dataset, "buckets", [dataset])
                 if not len(dataset) or not leaves:
