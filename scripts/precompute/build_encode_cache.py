@@ -98,6 +98,12 @@ def build_model(cfg, device):
         raise ValueError("latent cache supports the native Wan VAE only")
     # The run's training.vae_* options, so latents come from the training VAE kernels.
     configure_input_fast_paths(cfg, arch)
+    opts = vb.vae_encode_options()
+    if opts["cudnn_benchmark"]:
+        # cuDNN autotuning picks conv algorithms per process (H20: rel 2.8e-3 between processes,
+        # bit-identical within one), so its latents could never be checked bit for bit.
+        vb.set_vae_encode_options(**{**opts, "cudnn_benchmark": False})
+        log("VAE encode: cudnn_benchmark forced off for a reproducible cache")
     return arch, vb
 
 
