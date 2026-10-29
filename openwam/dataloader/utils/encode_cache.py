@@ -94,7 +94,9 @@ def module_fingerprint(module: torch.nn.Module, extra: Optional[dict] = None) ->
     for name, tensor in items:
         t = tensor.detach().to("cpu").contiguous()
         h.update(f"{name}|{t.dtype}|{tuple(t.shape)}|".encode())
-        h.update(t.view(torch.uint8).numpy().tobytes() if t.numel() else b"")
+        # reshape(-1): a channels_last 1x1x1 conv weight counts as contiguous yet has
+        # stride(-1) != 1, which view(uint8) rejects; the flat view is in logical order.
+        h.update(t.reshape(-1).view(torch.uint8).numpy().tobytes() if t.numel() else b"")
     return h.hexdigest()
 
 
