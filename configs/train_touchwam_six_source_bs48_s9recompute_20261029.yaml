@@ -1,0 +1,19 @@
+# Optional capacity candidate: original S9 recomputation, batch 48.
+# All other optimizer, model, data and acceleration settings match the batch-8 probe.
+defaults:
+  - train_touchwam_six_source_bs8_norecompute_20261029
+  - _self_
+
+training:
+  batch_size: 48
+  use_gradient_checkpointing: true
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  gradient_checkpointing_layers_video_only: null
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_six_source_bs48_s9recompute_20261029}
+
+model:
+  architecture:
+    mot_checkpoint_mixed_attn: true
+
+project:
+  name: touchwam-six-source-bs48-s9recompute-20261029

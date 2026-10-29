@@ -73,9 +73,15 @@ def train(args):
     import torch.distributed as dist
     import torch.utils.checkpoint as checkpoint_module
     # Install before importing architecture modules that bind checkpoint aliases.
-    def forbidden_checkpoint(*a, **kw):
-        raise RuntimeError('Activation recomputation was invoked in a no-recompute capacity run')
-    checkpoint_module.checkpoint = forbidden_checkpoint
+    checkpoint_calls = 0
+    original_checkpoint = checkpoint_module.checkpoint
+    def traced_checkpoint(*a, **kw):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        if args.recompute_policy == 'forbid':
+            raise RuntimeError('Activation recomputation was invoked in a no-recompute capacity run')
+        return original_checkpoint(*a, **kw)
+    checkpoint_module.checkpoint = traced_checkpoint
     from omegaconf import OmegaConf
     from openwam.dataloader.mixture import MixtureDataset
     from openwam.train.openwam_trainer import OpenWAMTrainer
@@ -89,8 +95,10 @@ def train(args):
     t = cfg.training
     microbatch = int(t.batch_size)
     assert microbatch > 0 and t.gradient_accumulation_steps == 1
-    assert not t.use_gradient_checkpointing and not t.use_gradient_checkpointing_offload
-    assert not cfg.model.architecture.mot_checkpoint_mixed_attn
+    assert not t.use_gradient_checkpointing_offload
+    if args.recompute_policy == 'forbid':
+        assert not t.use_gradient_checkpointing
+        assert not cfg.model.architecture.mot_checkpoint_mixed_attn
     names = args.sources.split(',') if args.sources else [k for k,v in cfg.dataloader.datasets.items() if v.get('enabled', True)]
     if len(names) != len(set(names)):
         raise ValueError('Duplicate source')
@@ -182,14 +190,19 @@ def train(args):
     trainer.train()
     if [r['source'] for r in records] != names * args.cycles or [r['opt_step'] for r in records] != list(range(1, stop+1)):
         raise ValueError('Source coverage or real optimizer updates incomplete')
-    write(output/f'rank-{rank}.json', dict(status='passed', records=records))
+    if args.recompute_policy == 'config' and t.use_gradient_checkpointing and checkpoint_calls == 0:
+        raise ValueError('Configured activation checkpointing was never observed')
+    write(output/f'rank-{rank}.json', dict(status='passed', records=records,
+          explicit_activation_checkpoint_calls=checkpoint_calls))
     accelerator.wait_for_everyone()
     if rank == 0:
         ranks = [json.loads((output/f'rank-{i}.json').read_text()) for i in range(world)]
         device = torch.cuda.get_device_properties(torch.cuda.current_device())
         write(output/'report.json', dict(status='passed', ranks=ranks, per_gpu_batch=microbatch,
               gpu_name=device.name, gpu_total_memory_gib=device.total_memory/1024**3,
-              world_size=world, explicit_activation_checkpoint_calls=0, sources=names,
+              world_size=world, recompute_policy=args.recompute_policy,
+              explicit_activation_checkpoint_calls=sum(r['explicit_activation_checkpoint_calls'] for r in ranks),
+              sources=names,
               steps=stop, real_reader_windows_per_source=microbatch, repeated_across_ranks=True,
               full_population_io_benchmarked=False, checkpoint_io=False,
               validation_scope='full_model_capacity_and_optimizer_updates'))
@@ -205,6 +218,8 @@ def main():
     p.add_argument('--output')
     p.add_argument('--sources')
     p.add_argument('--cycles', type=int, default=4)
+    p.add_argument('--recompute-policy', choices=['forbid', 'config'], default='forbid',
+                   help='Forbid checkpoint calls, or exercise the configured recomputation policy')
     args = p.parse_args()
     logging.basicConfig(level=logging.INFO)
     if args.prepare_source: prepare(args)
