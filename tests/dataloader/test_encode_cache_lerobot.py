@@ -88,7 +88,7 @@ def test_window_table_matches_getitem(caches):
     assert table.shape == (len(ds), 2)
     for idx in [0, 1, len(ds) // 2, len(ds) - 1]:
         ep = int(np.searchsorted(ds._cum_n_starts, idx, side="right") - 1)
-        offset = int(ds._ep_valid_start[ep]) + (idx - int(ds._cum_n_starts[ep])) * ds._window_stride
+        offset = (idx - int(ds._cum_n_starts[ep])) * ds._window_stride
         assert tuple(table[idx]) == (ep, offset)
     assert ds[5]["window_index"] == 5
 
