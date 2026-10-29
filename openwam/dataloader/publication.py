@@ -14,7 +14,44 @@ def source_publication_contract(config):
             raise ValueError("External tactile publication and reused source populations differ")
         tactile["binding"] = external_sharpa_binding(get_cfg(config, "dataset_dir"), tactile_root, record, tactile)
         record["tactile"] = tactile
+    observation_root = get_cfg(config, "tactile_observation_root")
+    if observation_root:
+        if not tactile_root:
+            raise ValueError("Sharpa video history requires its bound tactile label publication")
+        record["tactile_observation"] = sharpa_observation_contract(
+            observation_root, get_cfg(config, "dataset_dir"), tactile_root, record)
     return record
+
+
+def sharpa_observation_contract(observation_root, source_root, tactile_root, source):
+    """Bind native video history to exactly the existing source and label cache."""
+    from openwam.tactile.sharpa_video_history import SCHEMA
+
+    root = Path(observation_root).resolve(strict=True)
+    path = root / "publication.json"
+    record = json.loads(path.read_text())
+    if (record.get("schema") != SCHEMA or record.get("status") != "complete"
+            or record.get("training_ready") is not True
+            or record.get("source_manifest_sha256") != source["sha256"]
+            or record.get("tactile_catalog_sha256") != source["tactile"]["binding"]["catalog_sha256"]
+            or any(record.get(k) != source[k] for k in ("episodes", "frames"))
+            or record.get("validation_sha256") != _file_sha256(root / "validation.json")):
+        raise ValueError("Sharpa native history publication is incomplete or belongs to different data")
+    entries = record.get("buckets", {})
+    if set(entries) != set(source["buckets"]):
+        raise ValueError("Sharpa native history publication bucket population differs")
+    for name, entry in entries.items():
+        bucket = (Path(source_root) / name).resolve(strict=True)
+        relative = Path("partitions") / bucket.parent.name / bucket.name
+        manifest = root / relative / "observation.json"
+        if not manifest.resolve(strict=True).is_relative_to(root) or _file_sha256(manifest) != entry.get("sha256"):
+            raise ValueError(f"Sharpa native history manifest changed: {name}")
+        doc = json.loads(manifest.read_text())
+        if (doc.get("dataset_info_sha256") != _file_sha256(bucket / "meta/info.json")
+                or doc.get("tactile_manifest_sha256") != _file_sha256(Path(tactile_root) / relative / "tactile/manifest.json")):
+            raise ValueError(f"Sharpa native history metadata binding changed: {name}")
+    return {"path": str(path), "sha256": _file_sha256(path), "buckets_verified": len(entries),
+            "storage": SCHEMA, "observation_shape": [224, 224]}
 
 
 def _file_sha256(path):

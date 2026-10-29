@@ -41,7 +41,7 @@ class IntensityStore:
 
     def __init__(self, manifest_path, dataset_dir, *, size=32,
                  history_times=HISTORY_TIMES, future_times=FUTURE_TIMES,
-                 observation_size=None, encoder_name=None):
+                 observation_size=None, encoder_name=None, observation_manifest=None):
         self.path = Path(manifest_path).resolve(strict=True)
         self.root = self.path.parent
         self.digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
@@ -90,6 +90,13 @@ class IntensityStore:
         self.episodes = self.meta["episodes"]
         if not isinstance(self.episodes, dict):
             raise ValueError("Manifest episodes must be an index mapping")
+        self.video_history = None
+        if observation_manifest is not None:
+            if self.observation_hw is None or self.encoder_names != ["SharpaWave"] * 10:
+                raise ValueError("Native Sharpa video history requires the SharpaWave observation encoder")
+            from .sharpa_video_history import SharpaVideoHistory
+            self.video_history = SharpaVideoHistory(
+                observation_manifest, dataset_dir, self.path, self.meta, self.observation_hw)
 
     def _path(self, entry, key):
         p = (self.root / entry[key]).resolve(strict=True)
@@ -111,7 +118,7 @@ class IntensityStore:
                 or (np.diff(times) <= 0).any() or present.dtype != np.bool_
                 or present.shape != (n,) or (valid & ~present).any()):
             raise ValueError(f"Invalid intensity arrays for episode {episode}")
-        if self.observation_hw is not None and any(
+        if self.video_history is None and self.observation_hw is not None and any(
             target > native for target, native in zip(self.observation_hw, maps.shape[-2:])
         ):
             raise ValueError(
@@ -125,6 +132,8 @@ class IntensityStore:
             spatial = np.load(self._path({"spatial_valid": spatial_path}, "spatial_valid"), allow_pickle=False)
             if spatial.dtype != np.bool_ or spatial.shape != (n, *maps.shape[-2:]):
                 raise ValueError("Invalid spatial ROI")
+        if self.video_history is not None and not spatial.all():
+            raise ValueError("Native Sharpa video history requires independently published native ROI for masked caches")
         return maps, valid, times, present, spatial
 
     def window(self, episode, reference_time, *, segment_start_s=None, segment_end_s=None):
@@ -190,12 +199,18 @@ class IntensityStore:
             "tactile_native_fps": self.fps,
         }
         if self.observation_hw is not None:
+            if self.video_history is not None:
+                observations, observation_roi = self.video_history.gather(
+                    episode, hc, history_valid.numpy(), times)
+            else:
+                observations = gather(hc, hv, self.observation_hw)[0]
+                observation_roi = F.interpolate(
+                    torch.from_numpy(spatial.copy()).float()[:, None], self.observation_hw, mode="area"
+                ) > 0
             result.update(
                 tactile_observation_shape=self.observation_hw,
-                tactile_observation_maps=gather(hc, hv, self.observation_hw)[0],
-                tactile_observation_spatial_valid=F.interpolate(
-                    torch.from_numpy(spatial.copy()).float()[:, None], self.observation_hw, mode="area"
-                ) > 0,
+                tactile_observation_maps=observations,
+                tactile_observation_spatial_valid=observation_roi,
                 tactile_encoder_names=list(self.encoder_names),
             )
         return result

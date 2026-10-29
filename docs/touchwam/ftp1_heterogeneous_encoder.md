@@ -87,7 +87,11 @@ manifests can use `encoder_names`. Conflicting global/per-region definitions fai
 The readers construct history and future labels independently from native data.
 An existing 32-square deform cache cannot be upsampled as a substitute for
 224-square original observations; this fails with a clear publication request.
-No native dataset is reconverted by this code change.
+Sharpa can instead use the separately published native-video history index via
+`tactile_observation_root`: crop its existing 240-square fingertips to obtain
+224-square history online, while retaining the existing 32-square future labels.
+See [native Sharpa history](../data/sharpa_native_history.md) for the metadata-only
+PFS release and its required source directories. No native media are reconverted.
 
 RGB is pixel appearance, not pressure. The data contract stays [0,1]; the encoder
 performs `2*x-1` followed by the exact source-specific pretrained mean/std.

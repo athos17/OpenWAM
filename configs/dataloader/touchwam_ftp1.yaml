@@ -7,7 +7,8 @@
   "datasets": {
     "sharpadex": {
       "tactile_observation_map_size": 224,
-      "tactile_encoder_name": "SharpaWave"
+      "tactile_encoder_name": "SharpaWave",
+      "tactile_observation_root": "${oc.env:TOUCHWAM_SHARPA_HISTORY_ROOT,/mnt/pfs/v89atp/workspace/dataset/sharpadex_deform_history_v1_20261029}"
     },
     "ftp_freetacman": {
       "tactile_observation_map_size": 224,

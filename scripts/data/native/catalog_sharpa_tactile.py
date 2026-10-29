@@ -9,7 +9,10 @@ import argparse,hashlib,json,os,time
 from pathlib import Path
 import numpy as np
 import pyarrow.parquet as pq
-from extract_sharpa_deform import REGIONS,KEY
+try:
+    from .extract_sharpa_deform import REGIONS,KEY
+except ImportError:  # Direct script entry.
+    from extract_sharpa_deform import REGIONS,KEY
 
 
 def read(p):return json.loads(Path(p).read_text())

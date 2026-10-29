@@ -494,18 +494,24 @@ class SharpaNativeIntensityDataset(SharpaDexNativeTCPDataset):
     tactile_codec = "tactile_intensity_v1"
     NEEDED_COLS = (*SharpaDexNativeTCPDataset.NEEDED_COLS, "timestamp")
     CONFIG_KEYS = (*SharpaDexNativeTCPDataset.CONFIG_KEYS, "tactile_map_size", "history_times", "future_times", "tactile_root",
-                   "tactile_observation_map_size", "tactile_encoder_name")
+                   "tactile_observation_map_size", "tactile_encoder_name", "tactile_observation_root")
 
     def __init__(self, *args, tactile_map_size=32, history_times=HISTORY_TIMES, future_times=FUTURE_TIMES,
-                 tactile_root=None, tactile_observation_map_size=None, tactile_encoder_name=None, **kwargs):
+                 tactile_root=None, tactile_observation_map_size=None, tactile_encoder_name=None,
+                 tactile_observation_root=None, **kwargs):
         super().__init__(*args, **kwargs)
         manifest = self._dataset_dir / "tactile/manifest.json"
         if tactile_root is not None:
             partition = self._dataset_dir.resolve(strict=True)
             manifest = Path(tactile_root) / "partitions" / partition.parent.name / partition.name / "tactile/manifest.json"
+        observation_manifest = None
+        if tactile_observation_root is not None:
+            partition = self._dataset_dir.resolve(strict=True)
+            observation_manifest = Path(tactile_observation_root) / "partitions" / partition.parent.name / partition.name / "observation.json"
         self.touch = IntensityStore(manifest, self._dataset_dir,
                                    size=tactile_map_size, history_times=history_times, future_times=future_times,
-                                   observation_size=tactile_observation_map_size, encoder_name=tactile_encoder_name)
+                                   observation_size=tactile_observation_map_size, encoder_name=tactile_encoder_name,
+                                   observation_manifest=observation_manifest)
         self.tactile_observation_shape = self.touch.observation_hw
         if any(str(int(e)) not in self.touch.episodes for e in self._eps_df.episode_index):
             raise ValueError("Tactile manifest does not cover every selected Sharpa episode")
@@ -516,6 +522,9 @@ class SharpaNativeIntensityDataset(SharpaDexNativeTCPDataset):
             **({"tactile_observation_map_size": list(self.touch.observation_hw),
                 "tactile_encoder_name": tactile_encoder_name}
                if self.touch.observation_hw is not None else {})}
+        if self.touch.video_history is not None:
+            self.training_data_contract["tactile_observation_manifest_sha256"] = self.touch.video_history.digest
+            self.training_data_contract["tactile_observation_storage"] = "sharpa_deform_video_history_v1"
 
     def _observation_extras(self, idx, row, offset, valid_start, valid_end, win):
         # The accepted native release and its sidecar share an episode-relative
