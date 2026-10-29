@@ -140,3 +140,25 @@ The bounded GPU validation uses seven real reader fixtures (including two
 optical encoders), full Alpha/T5/VAE, and eight GPU ranks. It repeats one window
 per source across ranks to exercise the real training path with a small,
 explicit budget; this does not measure long-run stability or model quality.
+
+### Final acceptance
+
+- Combined preflight passed all 14 reader sources and 120 decoded windows;
+  action statistics, tactile collation and the full Alpha audit matched.
+- Resource-pool job `job-n5qi0sd67s89` succeeded on 8 A800 80GB GPUs, using
+  frozen code commit `055db8394943d2fe828e15cfcbb00d9750993fce`.
+- All seven real optimizer updates completed, with finite losses and gradient
+  norms. All ranks followed the same modality/codec/observation-size schedule;
+  each of the seven fixture sources appeared eight times globally.
+- Full Alpha initialization and pretrained FTP encoder assertions passed.
+  Peak PyTorch allocated memory was 38.54–38.69 GiB per GPU; reserved memory
+  was 39.77–42.70 GiB. These are bounded-smoke measurements, not an upper bound
+  for other data windows or a complete training run.
+- `full_gpu_smoke/report.json`, `full_gpu_smoke/initialization.json`,
+  `gpu_status.json` and `code_manifest.json` retain the evidence. The smoke
+  disabled checkpoint writes; exact interrupted/resumed optimizer behavior
+  was separately checked by the existing tiny production-trainer validation.
+
+The later launcher-only fix makes explicit `PYTHON_BIN` apply to torchrun as
+well as preflight. It does not change the validated model or training loop.
+No long training job was started.
