@@ -10,7 +10,10 @@ ftp1_root: ${oc.env:TOUCHWAM_FTP1_FROZEN_ROOT,/mnt/pfs/v89atp/workspace/dataset/
 datasets:
   robocoin:
     enabled: true
-    weight: 20.000157407407406
+    weight: 200.0
+    dataset_dir: /mnt/pfs/v89atp/workspace/dataset/robocoin_200h_v1_20261029
+    trim_csv: /mnt/pfs/v89atp/workspace/dataset/robocoin_200h_v1_20261029/selection_trim.csv
+    total_hours: null  # This frozen release already selects exactly 200 physical hours.
   egodex:
     weight: 300.0
     total_hours: null  # Keep the previously accepted 300h index.

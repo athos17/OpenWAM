@@ -8,13 +8,13 @@ regional TouchWAM model. Earlier recipes are unchanged.
 
 | Dataset | Selected hours | Training modalities | Sampling share |
 | --- | ---: | --- | ---: |
-| EgoDex | 300.000000 | V | 36.769% |
-| TouchScale | 99.650796 | VT | 12.213% |
-| Native SharpaDex | 242.136528 | VAT | 29.677% |
-| AgiBot | 136.188889 | VA | 16.692% |
-| RoboCOIN | 20.000157 | VA | 2.451% |
-| FTP-1 with verified actions | 17.935301 | VA and VAT | 2.198% |
-| **Total** | **815.911671** | | **100%** |
+| EgoDex | 300.000000 | V | 30.123% |
+| TouchScale | 99.650796 | VT | 10.006% |
+| Native SharpaDex | 242.136528 | VAT | 24.313% |
+| AgiBot | 136.188889 | VA | 13.675% |
+| RoboCOIN | 200.000000 | VA | 20.082% |
+| FTP-1 with verified actions | 17.935301 | VA and VAT | 1.801% |
+| **Total** | **995.911514** | | **100%** |
 
 The manual mixture weights are physical hours, not native frame counts.
 FTP recordings have different FPS; proportional window-count sampling would
@@ -24,7 +24,11 @@ and integer rounding can slightly change finite-run realized percentages.
 
 EgoDex retains the previous 300h index, AgiBot its accepted release, and Sharpa
 its accepted train split. Sharpa validation episodes remain excluded. RoboCOIN
-retains all 15 robot types and their separate normalization statistics.
+now uses `robocoin_200h_v1_20261029`: all original 20h tasks plus approximately
+180h of new complete tasks. It retains all 15 robot types, with normalization
+statistics recomputed separately for each type over the new 200h population.
+See `docs/data/robocoin_200h_20261029.md`. The standalone older 20h recipe and
+published data remain available.
 
 FTP's frozen archive contains 25.914875 nominal hours. Only 17.935301h with
 verified action profiles enters this recipe: FreeTacMan, RDP_Bimanual,
@@ -141,7 +145,7 @@ optical encoders), full Alpha/T5/VAE, and eight GPU ranks. It repeats one window
 per source across ranks to exercise the real training path with a small,
 explicit budget; this does not measure long-run stability or model quality.
 
-### Final acceptance
+### Original acceptance (20h RoboCOIN recipe)
 
 - Combined preflight passed all 14 reader sources and 120 decoded windows;
   action statistics, tactile collation and the full Alpha audit matched.
@@ -169,3 +173,16 @@ explicit budget; this does not measure long-run stability or model quality.
 The later launcher-only fix makes explicit `PYTHON_BIN` apply to torchrun as
 well as preflight. It does not change the validated model or training loop.
 No long training job was started.
+
+### RoboCOIN expansion to 200h
+
+On 2026-10-29 the user increased RoboCOIN to 200h. The inherited S9 recipe
+uses the same expanded data configuration. Model settings are unchanged; the
+new source selection and statistics intentionally change the training-data
+contract. Existing 20h-run full optimizer states cannot be strictly resumed
+against this changed population.
+
+The current 399-task release, refreshed source preflight, and new 200h
+normalization checks are recorded under
+`/mnt/pfs/v89atp/workspace/setup/robocoin_200h_20261029`. The original GPU report
+above used the earlier 20h selection; it is not a new GPU run on all 200h.
