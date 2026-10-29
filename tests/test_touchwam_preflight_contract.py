@@ -2,6 +2,7 @@
 
 from contextlib import nullcontext
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from omegaconf import OmegaConf
@@ -11,6 +12,26 @@ import torch
 
 from scripts import preflight_touchwam as preflight
 from openwam.tactile.registry import REGION_NAMES
+
+
+def test_six_source_recipe_preserves_ftp_action_only_mode_after_yaml_composition():
+    from hydra import compose, initialize_config_dir
+
+    with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[1] / "configs"), version_base=None):
+        config = compose(config_name="train_touchwam_six_source_20261029")
+    sources = OmegaConf.to_container(config.dataloader.datasets, resolve=True)
+    enabled = {name: source for name, source in sources.items() if source.get("enabled", True)}
+    assert len(enabled) == 14
+    assert enabled["robocoin"]["weight"] > 0
+    action_only_ftp = {name: source for name, source in enabled.items()
+                       if name.startswith("ftp_") and source["expected_modalities"] == ["video_action"]}
+    assert len(action_only_ftp) == 4
+    for name, source in action_only_ftp.items():
+        # YAML 1.1 silently parses an unquoted `off` as False. Check the actual
+        # inherited Hydra configuration that reaches the production reader.
+        assert source["tactile_mode"] == "off", name
+        assert source["source_kind"] == "robot", name
+        preflight.validate_source_contract(name, source)
 
 
 def test_preflight_normalization_rejects_missing_robot_statistics_but_accepts_ego():

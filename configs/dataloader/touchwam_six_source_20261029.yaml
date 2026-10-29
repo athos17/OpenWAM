@@ -51,25 +51,25 @@ datasets:
     enabled: true
     dataset_dir: ${dataloader.ftp1_root}/MotionTrans
     expected_modalities: [video_action]
-    tactile_mode: off
+    tactile_mode: "off"
   ftp_rh20tcfg5franka:
     weight: 3.2820833333333335
     enabled: true
     dataset_dir: ${dataloader.ftp1_root}/RH20TCfg5Franka
     expected_modalities: [video_action]
-    tactile_mode: off
+    tactile_mode: "off"
   ftp_rh20tcfg6atiaxia:
     weight: 4.0729444444444445
     enabled: true
     dataset_dir: ${dataloader.ftp1_root}/RH20TCfg6ATIAxia
     expected_modalities: [video_action]
-    tactile_mode: off
+    tactile_mode: "off"
   ftp_rh20tcfg7tactile:
     weight: 2.151527777777778
     enabled: true
     dataset_dir: ${dataloader.ftp1_root}/RH20TCfg7Tactile
     expected_modalities: [video_action]
-    tactile_mode: off
+    tactile_mode: "off"
   ftp_rdp:
     enabled: false  # No completed bucket in this snapshot.
   ftp_unit:
