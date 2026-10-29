@@ -177,9 +177,21 @@ def _train_openwam(cfg: DictConfig) -> None:
     trainer.train()
 
 
+def _raise_nofile_limit() -> None:
+    """DataLoader workers hand every sample tensor to the main process through a file
+    descriptor; with offline encode caches (latent + text rows per sample) a batch of
+    48 x prefetch x workers exceeds the common 1024 soft limit."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft < hard:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+
+
 @hydra.main(version_base=None, config_path=str(PROJECT_ROOT / "configs"), config_name="train")
 def main(cfg: DictConfig) -> None:
     _install_startup_noise_filter()
+    _raise_nofile_limit()
 
     # Only print on rank 0
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
