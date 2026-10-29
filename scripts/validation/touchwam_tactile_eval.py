@@ -195,6 +195,18 @@ def evaluate_sample(model, sample, *, schedule, output_dir=None, seed=42, cfg_sc
     )
     if getattr(model, "model_version", None) == "touchwam_regions_v1":
         kwargs["tactile_codec"] = generation_codec
+    if spec.get("observation_encoder"):
+        for key in ("tactile_observation_maps", "tactile_observation_spatial_valid"):
+            if key not in sample:
+                raise ValueError(f"Heterogeneous held-out evaluation requires {key}")
+            kwargs[key] = sample[key]
+        encoder_names = [x["name"] for x in spec["observation_encoder"]["sensors"]]
+        if "tactile_encoder_names" in sample:
+            kwargs["tactile_encoder_ids"] = np.array([encoder_names.index(x) for x in sample["tactile_encoder_names"]], dtype=np.int64)
+        elif "tactile_encoder_ids" in sample:
+            kwargs["tactile_encoder_ids"] = sample["tactile_encoder_ids"]
+        else:
+            raise ValueError("Heterogeneous held-out evaluation requires explicit encoder identity")
     if "tactile_query_mask" in sample:
         kwargs["tactile_query_mask"] = sample["tactile_query_mask"]
     if modality == "video_action_tactile":
@@ -278,7 +290,7 @@ def load_sample(root, entry):
         sample = {key: values[key] for key in values.files}
     sample.update(prompt=entry["prompt"], training_modality=entry["training_modality"],
                   tactile_codec=entry["tactile_codec"], num_frames=entry.get("num_frames", 9))
-    for key in ("tactile_region_names", "tactile_sensor_names"):
+    for key in ("tactile_region_names", "tactile_sensor_names", "tactile_encoder_names"):
         if key in sample:
             sample[key] = sample[key].tolist()
     with Image.open(root / entry["first_frame_image"]) as image:

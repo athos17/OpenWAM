@@ -14,6 +14,7 @@ import torch
 from torch.nn import functional as F
 
 from .registry import REGION_NAMES
+from .regions import observation_shape
 
 
 INTENSITY_CODEC = "tactile_intensity_v1"
@@ -39,7 +40,8 @@ class IntensityStore:
     """
 
     def __init__(self, manifest_path, dataset_dir, *, size=32,
-                 history_times=HISTORY_TIMES, future_times=FUTURE_TIMES):
+                 history_times=HISTORY_TIMES, future_times=FUTURE_TIMES,
+                 observation_size=None, encoder_name=None):
         self.path = Path(manifest_path).resolve(strict=True)
         self.root = self.path.parent
         self.digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
@@ -49,6 +51,10 @@ class IntensityStore:
         if type(size) is not int or size < 1:
             raise ValueError("Map size must be a positive integer")
         self.size = size
+        self.observation_hw = observation_shape(observation_size) if observation_size is not None else None
+        if self.observation_hw is None and encoder_name is not None:
+            raise ValueError("encoder_name requires observation_size")
+        self.encoder_name = encoder_name
         digest = hashlib.sha256((Path(dataset_dir) / "meta/info.json").read_bytes()).hexdigest()
         if (self.meta.get("schema") not in ("tactile_regions_v1", INTENSITY_CODEC)
                 or self.meta.get("codec") not in (INTENSITY_CODEC, "sharpa_deform_gray_v1")
@@ -66,6 +72,15 @@ class IntensityStore:
         if (not isinstance(self.sensor_names, list) or len(self.sensor_names) != len(self.names)
                 or any(not isinstance(n, str) or not n.strip() for n in self.sensor_names)):
             raise ValueError("Intensity sidecars require explicit sensor_names")
+        declared_encoders = self.meta.get("encoder_names")
+        if encoder_name is not None and declared_encoders is not None and declared_encoders != [encoder_name] * len(self.names):
+            raise ValueError("Dataset encoder_name conflicts with intensity region encoder_names")
+        self.encoder_names = [encoder_name] * len(self.names) if encoder_name is not None else declared_encoders
+        if self.observation_hw is not None and (
+            not isinstance(self.encoder_names, list) or len(self.encoder_names) != len(self.names)
+            or any(not isinstance(name, str) or not name.strip() for name in self.encoder_names)
+        ):
+            raise ValueError("Heterogeneous intensity observations require explicit per-region encoder_name(s)")
         self.fps = float(self.meta["fps"])
         self.max_age = float(self.meta.get("history_max_age_s", 1.5 / self.fps)) if self.fps > 0 else -1
         self.future_tolerance = float(self.meta.get("future_tolerance_s", .51 / self.fps)) if self.fps > 0 else -1
@@ -96,6 +111,13 @@ class IntensityStore:
                 or (np.diff(times) <= 0).any() or present.dtype != np.bool_
                 or present.shape != (n,) or (valid & ~present).any()):
             raise ValueError(f"Invalid intensity arrays for episode {episode}")
+        if self.observation_hw is not None and any(
+            target > native for target, native in zip(self.observation_hw, maps.shape[-2:])
+        ):
+            raise ValueError(
+                f"Intensity sidecar contains only {tuple(maps.shape[-2:])}, but observation encoder requests "
+                f"{self.observation_hw}; supply native-resolution deform/matrix storage, not upsampled labels"
+            )
         spatial_path = entry.get("spatial_valid", self.meta.get("spatial_valid"))
         if spatial_path is None:
             spatial = np.ones((n, *maps.shape[-2:]), dtype=bool)
@@ -126,7 +148,7 @@ class IntensityStore:
               & (np.abs(times[fi] - ft) <= self.future_tolerance + 1e-8)
               & (ft <= end + 1e-8))
 
-        def gather(rows, time_valid):
+        def gather(rows, time_valid, target_hw):
             values = np.array(maps[rows], copy=True)
             enabled = np.array(valid[rows] & time_valid[:, None] & present[None], copy=True)
             px = enabled[..., None, None] & spatial[None]
@@ -138,22 +160,22 @@ class IntensityStore:
             if values.dtype == np.uint8:
                 value /= 255
             h, n = value.shape[:2]
-            value = F.interpolate(value.flatten(0, 1)[:, None], (self.size, self.size), mode="area")
+            value = F.interpolate(value.flatten(0, 1)[:, None], target_hw, mode="area")
             # Unmeasured ROI pixels are absent, not zero-valued contact. Divide
             # by their measured area so a partially covered output cell keeps
             # the source scale. A genuinely measured zero still contributes.
             support = F.interpolate(torch.from_numpy(spatial.copy()).float()[:, None],
-                                    (self.size, self.size), mode="area")
-            value = value.reshape(h, n, 1, self.size, self.size)
+                                    target_hw, mode="area")
+            value = value.reshape(h, n, 1, *target_hw)
             value = torch.where(support[None] > 0, value / support[None].clamp_min(1e-12), 0)
             return value, torch.from_numpy(enabled)
 
-        history, history_valid = gather(hc, hv)
-        future, future_valid = gather(fi, fv)
+        history, history_valid = gather(hc, hv, (self.size, self.size))
+        future, future_valid = gather(fi, fv, (self.size, self.size))
         # Any-support keeps small measured cells; never treat unmeasured holes as labels.
         roi = F.interpolate(torch.from_numpy(spatial.copy()).float()[:, None],
                             (self.size, self.size), mode="area") > 0
-        return {
+        result = {
             "tactile_maps": history, "tactile_valid": history_valid,
             "future_tactile_maps": future, "future_tactile_valid": future_valid,
             "tactile_region_names": self.names, "tactile_sensor_names": self.sensor_names,
@@ -167,3 +189,13 @@ class IntensityStore:
             "future_tactile_source_times_s": torch.tensor(np.where(fv, times[fi] - reference_time, np.nan)),
             "tactile_native_fps": self.fps,
         }
+        if self.observation_hw is not None:
+            result.update(
+                tactile_observation_shape=self.observation_hw,
+                tactile_observation_maps=gather(hc, hv, self.observation_hw)[0],
+                tactile_observation_spatial_valid=F.interpolate(
+                    torch.from_numpy(spatial.copy()).float()[:, None], self.observation_hw, mode="area"
+                ) > 0,
+                tactile_encoder_names=list(self.encoder_names),
+            )
+        return result

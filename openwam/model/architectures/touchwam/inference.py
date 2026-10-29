@@ -87,6 +87,9 @@ def generate_three_stream(
     tactile_sensor_ids=None,
     tactile_palm_mode=None,
     tactile_codec=None,
+    tactile_observation_maps=None,
+    tactile_observation_spatial_valid=None,
+    tactile_encoder_ids=None,
     vace_video=None,
     first_frame_image=None,
     num_frames=9,
@@ -118,7 +121,8 @@ def generate_three_stream(
     """
     model.eval()
     tactile_options = (tactile_maps, tactile_valid, tactile_region_ids, tactile_layout_present,
-                       tactile_query_mask, tactile_spatial_valid, tactile_sensor_ids)
+                       tactile_query_mask, tactile_spatial_valid, tactile_sensor_ids,
+                       tactile_observation_maps, tactile_observation_spatial_valid, tactile_encoder_ids)
     has_touch_input = any(value is not None for value in tactile_options) or tactile_codec is not None
     explicit_modality = generation_modality is not None
     if generation_modality is None:
@@ -191,6 +195,10 @@ def generate_three_stream(
             raise ValueError("use_proprioception=True requires proprio")
         shared["proprio"] = torch.as_tensor(proprio, device=device, dtype=dtype)
     codec_options = {"tactile_codec": tactile_codec} if tactile_codec is not None else {}
+    if any(x is not None for x in (tactile_observation_maps, tactile_observation_spatial_valid, tactile_encoder_ids)):
+        codec_options.update(observation_maps=tactile_observation_maps,
+                             observation_spatial_valid=tactile_observation_spatial_valid,
+                             encoder_ids=tactile_encoder_ids)
     history, future_valid, token_valid = model.prepare_tactile_generation(
         tactile_maps, tactile_valid, region_ids=tactile_region_ids,
         layout_present=tactile_layout_present, query_mask=tactile_query_mask,

@@ -483,14 +483,17 @@ class OpenWAMTrainer:
             )
             accelerator = getattr(self, "accelerator", None)
             world_size = accelerator.num_processes if accelerator is not None else 1
-            source_graphs = list(zip(self.dataset.source_modalities, self.dataset.source_tactile_codecs))
+            observation_shapes = getattr(self.dataset, "source_tactile_observation_shapes", [None] * len(self.dataset.source_modalities))
+            observation_batching = any(shape is not None for shape in observation_shapes)
+            source_graphs = list(zip(self.dataset.source_modalities, self.dataset.source_tactile_codecs, observation_shapes))
             mixed_modalities = len(set(source_graphs)) > 1
             tactile_codecs = {codec for codec in self.dataset.source_tactile_codecs if codec is not None}
             codec_batching = "tactile_rgb_v1" in tactile_codecs or len(tactile_codecs) > 1
             self.dataset.training_layout = {
                 "world_size": world_size, "microbatch": batch_size,
                 "gradient_accumulation": int(getattr(t, "gradient_accumulation_steps", 1)),
-                "batching": ("global_modality_codec_v3" if codec_batching else
+                "batching": ("global_modality_codec_observation_v4" if observation_batching else
+                             "global_modality_codec_v3" if codec_batching else
                              "global_modality_v2" if any("tactile" in m for m in self.dataset.source_modalities)
                              else "global_modality_v1") if mixed_modalities else "shuffled_windows",
             }
@@ -697,7 +700,18 @@ class OpenWAMTrainer:
         if active_modality is not None:
             from openwam.dataloader.modality_sampler import batch_tactile_codec
 
-            self._modality_optimizer.activate(active_modality, batch_tactile_codec(batch))
+            observation = getattr(self.architecture, "tactile_spec", {}).get("observation_encoder") or {}
+            encoder_ids = ()
+            if observation.get("kind") == "ftp1_heterogeneous_v1":
+                from openwam.train.utils.modality_optimizer import global_observation_encoder_ids
+
+                encoder_ids = global_observation_encoder_ids(
+                    inputs, len(observation["sensors"]), self.accelerator.device,
+                    actual_ids=result.get("observation_encoder_active_ids"),
+                )
+            self._modality_optimizer.activate(
+                active_modality, batch_tactile_codec(batch), observation_encoder_ids=encoder_ids
+            )
 
         losses = {
             "total": result["loss"],

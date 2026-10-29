@@ -57,12 +57,18 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             rgb_enabled=False,
             rgb_map_size=128,
             rgb_patch_size=64,
+            observation_encoder=None,
         )
         provided = dict(cfg.get("tactile", {}))
         if set(provided) - set(defaults):
             raise ValueError(f"Unknown regional tactile settings: {sorted(set(provided) - set(defaults))}")
         defaults.update(provided)
         s = self.tactile_spec = defaults
+        if s["observation_encoder"] is None:
+            s.pop("observation_encoder")
+        else:
+            from .heterogeneous import normalize_encoder_spec
+            s["observation_encoder"] = normalize_encoder_spec(s["observation_encoder"], list(s["sensor_names"]))
         for key in (
             "history",
             "map_size",
@@ -122,6 +128,19 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             raise ValueError("bridge_layers must be ordered, unique and inside the V/A depth")
         s["bridge_layers"] = layers
         self.touch_v2 = RegionalTactileFlowStream(s, self.video_backbone.dim, self.action_backbone.dim)
+
+    def _apply_training_policy(self):
+        super()._apply_training_policy()
+        if hasattr(self.touch_v2, "observation_encoder"):
+            self.touch_v2.observation_encoder.apply_freeze_policy()
+
+    def load_openwam_checkpoint(self, path):
+        super().load_openwam_checkpoint(path)
+        if hasattr(self.touch_v2, "observation_encoder"):
+            self.ftp1_initialization_provenance = self.touch_v2.observation_encoder.load_pretrained()
+            self.initialization_provenance = dict(openwam_checkpoint=str(path),
+                openwam_tensors_preserved=True, tactile_observation_encoder=self.ftp1_initialization_provenance)
+        self._apply_training_policy()
 
     def _codec_name(self, name=None):
         name = self.tactile_spec["codec"] if name is None else name
@@ -187,6 +206,11 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                                    units="image channel values [0,1], not force or deformation",
                                    tokens_per_region=self.touch_v2.rgb_codec.patches_per_site,
                                    routing="one codec per microbatch; independent image encoder/output head")
+        if s.get("observation_encoder"):
+            contract["observation_encoder"] = s["observation_encoder"]
+            contract["observation_input"] = "tactile_observation_maps + tactile_observation_spatial_valid + tactile_encoder_ids"
+            contract["observation_tokens_per_region"] = 4
+            contract["history_and_prediction_resolution"] = "independent; original history never upsampled from prediction cache"
         return contract
 
     def _condition(
@@ -202,6 +226,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         palm_mode=None,
         augment=False,
         tactile_codec=None,
+        observation_maps=None,
+        observation_spatial_valid=None,
+        encoder_ids=None,
     ):
         s, device = self.tactile_spec, self.device
         codec_name = self._codec_name(tactile_codec)
@@ -287,7 +314,33 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         if augment and s["history_dropout"]:
             # Drop entire region histories, so completely stale sensors occur in training.
             valid &= ~(torch.rand(batch_size, 1, n, device=device) < s["history_dropout"])
-        history, mask, available = self.touch_v2.encode_history(maps, valid, ids, sensors, spatial, codec_name)
+        observation_kwargs = {}
+        if s.get("observation_encoder") and n:
+            if observation_maps is None or observation_spatial_valid is None or encoder_ids is None:
+                raise ValueError("Heterogeneous input requires observation maps, ROI and explicit encoder IDs")
+            encoder_ids = tensor(encoder_ids, 2, torch.long, "encoder IDs")
+            if encoder_ids.shape != ids.shape:
+                raise ValueError("Encoder IDs differ from regional layout")
+            observation_maps = torch.as_tensor(observation_maps, device=device)
+            if observation_maps.dtype == torch.uint8:
+                observation_maps = observation_maps.to(self.dtype) / 255
+            elif observation_maps.is_floating_point():
+                observation_maps = observation_maps.to(self.dtype)
+            else:
+                raise ValueError("Observation maps must be uint8 or float [0,1]")
+            if observation_maps.ndim == 5 and batch_size == 1:
+                observation_maps = observation_maps.unsqueeze(0)
+            if observation_maps.ndim != 6 or observation_maps.shape[:4] != maps.shape[:4]:
+                raise ValueError("Observation history layout/channels differ from future codec")
+            observation_spatial = tensor(observation_spatial_valid, 5, torch.bool, "observation spatial ROI")
+            observation_spatial = observation_spatial & active[..., None, None, None]
+            observation_kwargs = dict(observation_maps=observation_maps, observation_spatial=observation_spatial, encoder_ids=encoder_ids)
+        elif not s.get("observation_encoder") and any(x is not None for x in (observation_maps, observation_spatial_valid, encoder_ids)):
+            raise ValueError("Observation encoder inputs require an enabled heterogeneous encoder")
+        history, mask, available = self.touch_v2.encode_history(maps, valid, ids, sensors, spatial, codec_name, **observation_kwargs)
+        if s.get("observation_encoder"):
+            self._observed_encoder_ids = (encoder_ids[available].unique().detach() if n
+                                          else ids.new_empty(0))
         condition = (history, mask, ids, active, spatial, sensors, available)
         return (*condition, codec_name) if s.get("rgb_enabled", False) else condition
 
@@ -318,6 +371,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         tactile_sensor_ids=None,
         tactile_palm_mode=None,
         tactile_codec=None,
+        tactile_observation_maps=None,
+        tactile_observation_spatial_valid=None,
+        tactile_encoder_ids=None,
         tactile_query_mask=None,
         touch_condition=None,
         **kwargs,
@@ -337,6 +393,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                 sensor_ids=tactile_sensor_ids,
                 palm_mode=tactile_palm_mode,
                 tactile_codec=tactile_codec,
+                observation_maps=tactile_observation_maps,
+                observation_spatial_valid=tactile_observation_spatial_valid,
+                encoder_ids=tactile_encoder_ids,
             )
         elif any(
             x is not None
@@ -349,6 +408,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                 tactile_sensor_ids,
                 tactile_palm_mode,
                 tactile_codec,
+                tactile_observation_maps,
+                tactile_observation_spatial_valid,
+                tactile_encoder_ids,
             )
         ):
             raise ValueError("Pass raw history/layout OR touch_condition")
@@ -456,9 +518,15 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
                 base.pop("action", None)
                 base.pop("proprio", None)
             base_samples.append(base)
+        observation_options = {}
+        if s.get("observation_encoder"):
+            from openwam.tactile.regions import observation_batch_shape
+            observation_options = dict(observation_map_size=observation_batch_shape(samples, s["observation_encoder"]),
+                                       encoder_names=self.touch_v2.observation_encoder.encoder_names)
         tactile = collate_regions(
             samples, map_size=codec.map_size, history=s["history"], future_frames=s["future_frames"],
             region_names=s["region_names"], sensor_names=s["sensor_names"], codec=codec_name,
+            **observation_options,
         )
         result = DualSystemSelfAttnArchitecture.prepare_inputs(self, base_samples)
         result.update(tactile)
@@ -498,6 +566,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             sensor_ids=inputs.pop("tactile_sensor_ids", None),
             palm_mode=inputs.pop("tactile_palm_mode", None), augment=self.training,
             tactile_codec=inputs.pop("tactile_codec", None),
+            observation_maps=inputs.pop("tactile_observation_maps", None),
+            observation_spatial_valid=inputs.pop("tactile_observation_spatial_valid", None),
+            encoder_ids=inputs.pop("tactile_encoder_ids", None),
         )
         query, query_pixels = self._query(condition, requested)
         codec_name = self._condition_codec(condition)
@@ -580,6 +651,8 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             loss_tactile_intensity=(loss_t * (codec_name != RGB_CODEC)).detach(),
             loss_tactile_rgb=(loss_t * (codec_name == RGB_CODEC)).detach(),
             tactile_labeled_regions=labels.any(1).sum().detach(), tactile_labeled_frames=labels.sum().detach(),
+            **({"observation_encoder_active_ids": self._observed_encoder_ids}
+               if s.get("observation_encoder") else {}),
         )
 
     def _compute_video_loss(self, prediction, target, indices, inputs, device):

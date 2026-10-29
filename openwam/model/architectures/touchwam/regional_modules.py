@@ -114,6 +114,11 @@ class RegionalTactileFlowStream(nn.Module):
             )
             self.rgb_spatial_projection = nn.Linear(self.rgb_codec.patch_size**2, width, bias=False)
             self.rgb_output = nn.Sequential(nn.LayerNorm(width), nn.Linear(width, self.rgb_codec.patch_dim))
+        if spec.get("observation_encoder"):
+            from .heterogeneous import HeterogeneousObservationEncoder
+            if self.codec.patches_per_site != 4:
+                raise ValueError("FTP spatial adapter currently requires exactly four tokens per region")
+            self.observation_encoder = HeterogeneousObservationEncoder(spec["observation_encoder"], width, spec["sensor_names"])
 
     def get_codec(self, name=None):
         if name in (None, self.spec["codec"]):
@@ -126,7 +131,7 @@ class RegionalTactileFlowStream(nn.Module):
         self.get_codec(codec_name)  # fail closed on invalid representation
         return (self.rgb_output if codec_name == RGB_CODEC else self.output)(future)
 
-    def embed(self, tokens, ids, sensors, spatial, times, codec_name=None):
+    def identity_features(self, tokens, ids, sensors, spatial, times, codec_name=None):
         b, n = ids.shape
         codec = self.get_codec(codec_name)
         p = codec.patches_per_site
@@ -140,14 +145,19 @@ class RegionalTactileFlowStream(nn.Module):
         identity = (self.region_embedding(ids.clamp_min(0)) + self.sensor_embedding(sensors))[:, None, :, None]
         spatial_tokens = codec.patchify(spatial[:, None]).to(tokens.dtype)
         spatial_projection = self.rgb_spatial_projection if codec_name == RGB_CODEC else self.spatial_projection
-        input_projection = self.rgb_input_projection if codec_name == RGB_CODEC else self.input_projection
         spatial_features = spatial_projection(spatial_tokens).reshape(b, 1, n, p, -1)
-        return input_projection(tokens) + (positional + identity + spatial_features).reshape(
-            b, -1, self.spec["width"]
-        )
+        return (positional + identity + spatial_features).reshape(b, -1, self.spec["width"])
 
-    def encode_history(self, maps, valid, ids, sensors, spatial, codec_name=None):
+    def embed(self, tokens, ids, sensors, spatial, times, codec_name=None):
+        input_projection = self.rgb_input_projection if codec_name == RGB_CODEC else self.input_projection
+        return input_projection(tokens) + self.identity_features(tokens, ids, sensors, spatial, times, codec_name)
+
+    def encode_history(self, maps, valid, ids, sensors, spatial, codec_name=None, *,
+                       observation_maps=None, observation_spatial=None, encoder_ids=None):
         codec = self.get_codec(codec_name)
+        if hasattr(self, "observation_encoder"):
+            return self._encode_heterogeneous_history(valid, ids, sensors, spatial, codec_name,
+                                                       observation_maps, observation_spatial, encoder_ids)
         tokens, observed = codec.encode(maps, valid, spatial)
         if ids.shape[1] == 0:
             return tokens.new_zeros(maps.shape[0], 0, self.spec["width"]), valid.new_zeros(maps.shape[0], 0), observed.any(1)
@@ -167,6 +177,22 @@ class RegionalTactileFlowStream(nn.Module):
         )
         result = self.history_encoder(tokens, mask=frames[None] > frames[:, None], src_key_padding_mask=~keys)[:, 1:]
         return result.masked_fill(~mask[..., None], 0), mask, observed.any(1)
+
+    def _encode_heterogeneous_history(self, valid, ids, sensors, spatial, codec_name,
+                                      observation_maps, observation_spatial, encoder_ids):
+        if ids.shape[1] == 0:
+            return spatial.new_zeros(ids.shape[0], 0, self.spec["width"], dtype=self.region_embedding.weight.dtype), valid.new_zeros(ids.shape[0], 0), valid.any(1)
+        if observation_maps is None or observation_spatial is None or encoder_ids is None:
+            raise ValueError("Heterogeneous history requires original-resolution observation maps, ROI and encoder IDs")
+        tokens, mask, available = self.observation_encoder(observation_maps, valid, observation_spatial, encoder_ids, sensors)
+        times = torch.arange(1 - self.spec["history"], 1, device=tokens.device, dtype=tokens.dtype) / self.spec["fps"]
+        tokens = (tokens + self.identity_features(tokens, ids, sensors, spatial, times, codec_name)).masked_fill(~mask[..., None], 0)
+        tokens = torch.cat((tokens.new_zeros(tokens.shape[0], 1, tokens.shape[-1]), tokens), dim=1)
+        keys = torch.cat((torch.ones(mask.shape[0], 1, dtype=torch.bool, device=mask.device), mask), 1)
+        frames = torch.cat((torch.tensor([-1], device=mask.device),
+                            torch.arange(len(times), device=mask.device).repeat_interleave(ids.shape[1] * 4)))
+        result = self.history_encoder(tokens, mask=frames[None] > frames[:, None], src_key_padding_mask=~keys)[:, 1:]
+        return result.masked_fill(~mask[..., None], 0), mask, available
 
     def prepare_future(self, noisy, timestep, ids, sensors, spatial, codec_name=None):
         width = self.spec["width"]

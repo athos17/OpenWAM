@@ -1,0 +1,370 @@
+# FTP-1/T3 history encoders; future targets remain RGB128 / intensity32.
+{
+  "defaults": [
+    "touchwam_pretrain",
+    "_self_"
+  ],
+  "architecture": {
+    "tactile": {
+      "sensor_names": [
+        "sharpa_real",
+        "bench2dex_sim",
+        "freetacman",
+        "motiontrans",
+        "rdp",
+        "rdp_bimanual",
+        "rh20t_franka",
+        "rh20t_ati",
+        "rh20t_uskin",
+        "unit",
+        "unit_bimanual",
+        "vla_touch",
+        "vitamin",
+        "visuotactile_dwheel",
+        "visuotactile_qingloong",
+        "exumi",
+        "normalized_pressure"
+      ],
+      "observation_encoder": {
+        "kind": "ftp1_heterogeneous_v1",
+        "initialization": "pretrained",
+        "weights_root": "${oc.env:TOUCHWAM_FTP1_ENCODER_ROOT,/mnt/pfs/v89atp/workspace/models/FTP-1-Tactile-Encoder/d6e5b73e473d3e70fb5f53132a2b1c35b5031156}",
+        "weights": {
+          "SharpaWave": {
+            "file": "hpt_tokenizer/SharpaWave_image_224_224_3.safetensors",
+            "sha256": "1c3affb58d33e159ae77fc56b108eabf001ee76db9e27d987202243b2708aa96"
+          },
+          "FreeTacMan": {
+            "file": "hpt_tokenizer/FreeTacMan_image_224_224_3.safetensors",
+            "sha256": "12f622da89f2ef74612bc62b2436ec6158f46eebdb9a440b65e5cdbc4377b2ef"
+          },
+          "GelSightMini": {
+            "file": "hpt_tokenizer/GelSightMini_image_224_224_3.safetensors",
+            "sha256": "28d3bee8106e7cb6542baec9332d8648d7501ebf173738abc019fe75bf96b27f"
+          },
+          "MCTac": {
+            "file": "hpt_tokenizer/MCTac_image_224_224_3.safetensors",
+            "sha256": "163356a81b93ac44831ba98e8048a52a1e8e6b4b637ec2792cb1459fded44316"
+          },
+          "OpenLoongVTouch": {
+            "file": "hpt_tokenizer/OpenLoongVTouch_image_224_224_3.safetensors",
+            "sha256": "454fc274e8ad34a872f78b6169b5da6e8993b09fc161148bb373a38af10a6487"
+          },
+          "ViTaMIn": {
+            "file": "hpt_tokenizer/ViTaMIn_image_224_224_3.safetensors",
+            "sha256": "1f2272ea7b9966586cff5913e4a421815dc276df89ece1de31fec9a8c5fc4d97"
+          },
+          "exUMI": {
+            "file": "hpt_tokenizer/exUMI_image_224_224_3.safetensors",
+            "sha256": "26dcc9b788adc0d72782c75d443a46d5ecca05a04c0c79b09822bd23a89979bb"
+          },
+          "shared": {
+            "file": "hpt_tokenizer/shared_image_chunk_encoder.safetensors",
+            "sha256": "9f157a11969644ce374171aa0cce7d94e6904a14faa357eb014771309f32c0ff"
+          }
+        },
+        "image_size": 224,
+        "image_patch_size": 16,
+        "image_width": 768,
+        "image_front_layers": 3,
+        "image_shared_layers": 9,
+        "image_heads": 12,
+        "matrix_width": 1024,
+        "matrix_fourier_dim": 8,
+        "freeze_pretrained": true,
+        "sensors": [
+          {
+            "name": "SharpaWave",
+            "kind": "image",
+            "input_representation": "deform"
+          },
+          {
+            "name": "FreeTacMan",
+            "kind": "image",
+            "input_representation": "rgb"
+          },
+          {
+            "name": "GelSightMini",
+            "kind": "image",
+            "input_representation": "rgb"
+          },
+          {
+            "name": "MCTac",
+            "kind": "image",
+            "input_representation": "rgb"
+          },
+          {
+            "name": "OpenLoongVTouch",
+            "kind": "image",
+            "input_representation": "rgb"
+          },
+          {
+            "name": "ViTaMIn",
+            "kind": "image",
+            "input_representation": "rgb"
+          },
+          {
+            "name": "exUMI",
+            "kind": "image",
+            "input_representation": "rgb"
+          },
+          {
+            "name": "NormalizedPressure",
+            "kind": "matrix",
+            "input_shape": [
+              4,
+              4
+            ],
+            "initialization": "random"
+          }
+        ],
+        "source_to_encoder": {
+          "sharpa_real": [
+            "SharpaWave"
+          ],
+          "freetacman": [
+            "FreeTacMan"
+          ],
+          "rdp": [
+            "GelSightMini",
+            "MCTac"
+          ],
+          "rdp_bimanual": [
+            "GelSightMini",
+            "MCTac"
+          ],
+          "unit": [
+            "GelSightMini"
+          ],
+          "unit_bimanual": [
+            "GelSightMini"
+          ],
+          "vla_touch": [
+            "GelSightMini"
+          ],
+          "vitamin": [
+            "ViTaMIn"
+          ],
+          "visuotactile_dwheel": [
+            "OpenLoongVTouch"
+          ],
+          "visuotactile_qingloong": [
+            "OpenLoongVTouch"
+          ],
+          "exumi": [
+            "exUMI"
+          ],
+          "normalized_pressure": [
+            "NormalizedPressure"
+          ]
+        },
+        "normalizations": {
+          "sharpa_real": {
+            "SharpaWave": {
+              "mean": [
+                -0.8676983714103699,
+                -0.8676983714103699,
+                -0.8676983714103699
+              ],
+              "std": [
+                0.19994118809700012,
+                0.19994118809700012,
+                0.19994118809700012
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "freetacman": {
+            "FreeTacMan": {
+              "mean": [
+                -0.003485041670501232,
+                -0.2888089418411255,
+                0.003777457168325782
+              ],
+              "std": [
+                0.3682798445224762,
+                0.32694220542907715,
+                0.32035142183303833
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "rdp": {
+            "GelSightMini": {
+              "mean": [
+                -0.5679953098297119,
+                -0.30798274278640747,
+                -0.2874935269355774
+              ],
+              "std": [
+                0.21023328602313995,
+                0.1388872116804123,
+                0.21195214986801147
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            },
+            "MCTac": {
+              "mean": [
+                0.03922659531235695,
+                0.052511464804410934,
+                0.12323086708784103
+              ],
+              "std": [
+                0.25223150849342346,
+                0.25236842036247253,
+                0.25190040469169617
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "rdp_bimanual": {
+            "GelSightMini": {
+              "mean": [
+                -0.848930835723877,
+                -0.7411393523216248,
+                -0.7262607216835022
+              ],
+              "std": [
+                0.2337844967842102,
+                0.3469162583351135,
+                0.3809429407119751
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            },
+            "MCTac": {
+              "mean": [
+                -0.6178981065750122,
+                -0.6183426380157471,
+                -0.5894244313240051
+              ],
+              "std": [
+                0.516094982624054,
+                0.514926552772522,
+                0.550841748714447
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "unit": {
+            "GelSightMini": {
+              "mean": [
+                -0.175475612282753,
+                -0.26255732774734497,
+                -0.5395694375038147
+              ],
+              "std": [
+                0.24771293997764587,
+                0.17880277335643768,
+                0.2114611566066742
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "unit_bimanual": {
+            "GelSightMini": {
+              "mean": [
+                -0.15138810873031616,
+                -0.2818707525730133,
+                -0.48092716932296753
+              ],
+              "std": [
+                0.2725882828235626,
+                0.1835368424654007,
+                0.24006454646587372
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "vla_touch": {
+            "GelSightMini": {
+              "mean": [
+                -0.39773064851760864,
+                -0.23520663380622864,
+                -0.14535512030124664
+              ],
+              "std": [
+                0.2519499361515045,
+                0.17635874450206757,
+                0.2752437889575958
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "vitamin": {
+            "ViTaMIn": {
+              "mean": [
+                -0.0034360752906650305,
+                0.015400790609419346,
+                -0.0750105082988739
+              ],
+              "std": [
+                0.44379696249961853,
+                0.45113182067871094,
+                0.4737507104873657
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "visuotactile_dwheel": {
+            "OpenLoongVTouch": {
+              "mean": [
+                -0.4102535545825958,
+                -0.2009730041027069,
+                -0.21863269805908203
+              ],
+              "std": [
+                0.24695047736167908,
+                0.21036051213741302,
+                0.23206967115402222
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "visuotactile_qingloong": {
+            "OpenLoongVTouch": {
+              "mean": [
+                -0.4792361855506897,
+                -0.25294098258018494,
+                -0.32694417238235474
+              ],
+              "std": [
+                0.2837757170200348,
+                0.22193709015846252,
+                0.25098180770874023
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          },
+          "exumi": {
+            "exUMI": {
+              "mean": [
+                -0.9744381904602051,
+                -0.9779523015022278,
+                0.22491513192653656
+              ],
+              "std": [
+                0.071598581969738,
+                0.0586242601275444,
+                0.1794508844614029
+              ],
+              "pre_scale": 2,
+              "pre_bias": -1
+            }
+          }
+        }
+      }
+    }
+  }
+}

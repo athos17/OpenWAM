@@ -1,0 +1,12 @@
+# Full OpenWAM Alpha + pinned FTP-1 observation weights.
+defaults:
+  - train_touchwam_pretrain
+  - override model: touchwam_ftp1
+  - override dataloader: touchwam_ftp1
+  - _self_
+
+training:
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_ftp1_v1}
+
+project:
+  name: touchwam-ftp1-heterogeneous-pretrain

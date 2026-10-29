@@ -1,0 +1,54 @@
+# Requires original-resolution history; RDP encoders must be specified per region.
+{
+  "defaults": [
+    "touchwam_pretrain",
+    "_self_"
+  ],
+  "datasets": {
+    "sharpadex": {
+      "tactile_observation_map_size": 224,
+      "tactile_encoder_name": "SharpaWave"
+    },
+    "ftp_freetacman": {
+      "tactile_observation_map_size": 224,
+      "tactile_encoder_name": "FreeTacMan"
+    },
+    "ftp_rdp": {
+      "tactile_observation_map_size": 224
+    },
+    "ftp_rdp_bimanual": {
+      "tactile_observation_map_size": 224
+    },
+    "ftp_unit": {
+      "tactile_observation_map_size": 224,
+      "tactile_encoder_name": "GelSightMini"
+    },
+    "ftp_unit_bimanual": {
+      "tactile_observation_map_size": 224,
+      "tactile_encoder_name": "GelSightMini"
+    },
+    "ftp_vla_touch": {
+      "tactile_observation_map_size": 224,
+      "tactile_encoder_name": "GelSightMini"
+    },
+    "ftp_vitamin": {
+      "tactile_observation_map_size": 224,
+      "tactile_encoder_name": "ViTaMIn"
+    },
+    "ftp_visuotactile_qingloong": {
+      "tactile_observation_map_size": 224,
+      "tactile_encoder_name": "OpenLoongVTouch"
+    },
+    "ftp_exumi": {
+      "tactile_observation_map_size": 224,
+      "tactile_encoder_name": "exUMI"
+    },
+    "ftp_visuotactile_d_wheel": {
+      "tactile_observation_map_size": 224,
+      "tactile_encoder_name": "OpenLoongVTouch"
+    },
+    "ftp_rh20tcfg7tactile": {
+      "enabled": false
+    }
+  }
+}

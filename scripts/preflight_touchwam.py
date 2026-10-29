@@ -85,7 +85,7 @@ def validate_training_schedule(training):
 
 def validate_tactile_sample(sample, spec):
     """Exercise the real collator with the live model contract, without loading weights."""
-    from openwam.tactile.regions import collate_regions
+    from openwam.tactile.regions import collate_regions, observation_batch_shape
 
     if spec is None:
         raise ValueError("Tactile preflight requires the resolved model tactile specification")
@@ -117,9 +117,16 @@ def validate_tactile_sample(sample, spec):
         times = torch.as_tensor(sample[key], dtype=torch.float64).cpu()
         if times.shape != grid.shape or not torch.allclose(times, grid, atol=1e-6, rtol=0):
             raise ValueError(f"Dataset/model {key} differ; resample to the configured model grid")
+    observation = spec.get("observation_encoder") or {}
+    observation_kwargs = {}
+    if observation.get("kind") == "ftp1_heterogeneous_v1":
+        observation_kwargs = dict(
+            observation_map_size=observation_batch_shape([sample], observation),
+            encoder_names=[item["name"] for item in observation["sensors"]],
+        )
     batch = collate_regions(
         [sample], map_size=size, history=spec["history"], future_frames=spec["future_frames"],
-        region_names=list(spec["region_names"]), sensor_names=sensors, codec=codec,
+        region_names=list(spec["region_names"]), sensor_names=sensors, codec=codec, **observation_kwargs,
     )
     present = batch["tactile_layout_present"]
     spatial = batch["tactile_spatial_valid"]
@@ -137,6 +144,28 @@ def validate_tactile_sample(sample, spec):
         if not torch.isfinite(observed).all() or (observed < 0).any() or (observed > 1).any():
             raise ValueError(f"Observed tactile {meaning} values outside [0,1]")
         counts[validity] = int(valid.sum())
+    if observation_kwargs:
+        obs = batch["tactile_observation_maps"]
+        obs_roi = batch["tactile_observation_spatial_valid"]
+        measured = batch["tactile_valid"]
+        if (measured & ~(present & obs_roi.flatten(2).any(-1))[:, None]).any():
+            raise ValueError("Observed history requires a present region with nonempty observation ROI")
+        pixels = measured[..., None, None, None] & obs_roi[:, None]
+        values = obs[pixels.expand_as(obs)]
+        if not torch.isfinite(values).all() or (values < 0).any() or (values > 1).any():
+            raise ValueError("Observed heterogeneous tactile values must be finite and in [0,1]")
+        source_mapping = observation.get("source_to_encoder", {})
+        encoder_specs = list(observation["sensors"])
+        for source_id, encoder_id in zip(batch["tactile_sensor_ids"][0], batch["tactile_encoder_ids"][0]):
+            source = sensors[int(source_id)]
+            encoder = encoder_specs[int(encoder_id)]
+            allowed = source_mapping.get(source, ())
+            allowed = [allowed] if isinstance(allowed, str) else list(allowed)
+            if encoder["name"] not in allowed:
+                raise ValueError(f"Observation source {source} is not mapped to encoder {encoder['name']}")
+            representation = encoder.get("input_representation", "pressure" if encoder["kind"] == "matrix" else None)
+            if (codec == RGB_CODEC) != (representation == "rgb"):
+                raise ValueError("Observation encoder input representation differs from the tactile codec")
     for key, validity, grid_key in (
         ("tactile_history_source_times_s", "tactile_valid", "tactile_history_times_s"),
         ("future_tactile_source_times_s", "future_tactile_valid", "future_tactile_times_s"),
@@ -162,7 +191,10 @@ def validate_tactile_sample(sample, spec):
             "supervised_future_regions": int(effective.sum()),
             "history_shape": list(batch["tactile_maps"].shape),
             "future_shape": list(batch["future_tactile_maps"].shape),
-            "collator_validated": True}, bool(effective.any())
+            "collator_validated": True,
+            **({"observation_shape": list(batch["tactile_observation_maps"].shape),
+                "observation_encoder_names": list(observation_kwargs["encoder_names"])}
+               if observation_kwargs else {})}, bool(effective.any())
 
 
 def atomic_json(path, obj):

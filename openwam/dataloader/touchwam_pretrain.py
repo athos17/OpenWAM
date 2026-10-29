@@ -77,6 +77,10 @@ class HomogeneousPublishedBuckets(MultiLeRobotV3Reader):
         if len(codecs) > 1:
             raise ValueError("A source must use one tactile representation; split RGB and intensity sources explicitly")
         self.tactile_codec = next(iter(codecs), None)
+        shapes = {getattr(b, "tactile_observation_shape", None) for b in buckets}
+        if len(shapes) != 1:
+            raise ValueError("A source must use one tactile observation shape; split native shapes into separate sources")
+        self.tactile_observation_shape = shapes.pop()
         self.normalization_stats_path = None
         paths = [getattr(b, "normalization_stats_path", None) for b in buckets]
         if any(paths):
@@ -181,7 +185,7 @@ class LeRobotVideoIntensityDataset(BaseDataset):
                  video_stride=4, window_stride=1, height=384, width=320,
                  camera_layout=None, tactile_mode="auto", tactile_map_size=32,
                  tactile_representation="intensity", tactile_rgb_manifest="meta/tactile_rgb.json",
-                 tactile_rgb_map_size=128,
+                 tactile_rgb_map_size=128, tactile_observation_map_size=None, tactile_encoder_name=None,
                  history_times=HISTORY_TIMES, future_times=FUTURE_TIMES,
                  color_jitter=None, seed=42, max_hours=None):
         self.root = Path(dataset_dir).resolve(strict=True)
@@ -294,9 +298,11 @@ class LeRobotVideoIntensityDataset(BaseDataset):
             raise FileNotFoundError(f"Required tactile publication missing: {manifest}")
         store = RGBTactileStore if tactile_representation == "rgb" else IntensityStore
         map_size = tactile_rgb_map_size if tactile_representation == "rgb" else tactile_map_size
-        self.touch = store(manifest, self.root, size=map_size, history_times=history_times, future_times=future_times) \
+        self.touch = store(manifest, self.root, size=map_size, history_times=history_times, future_times=future_times,
+                           observation_size=tactile_observation_map_size, encoder_name=tactile_encoder_name) \
             if tactile_mode != "off" and manifest.exists() else None
         self.tactile_codec = (RGB_CODEC if tactile_representation == "rgb" else "tactile_intensity_v1") if self.touch else None
+        self.tactile_observation_shape = self.touch.observation_hw if self.touch else None
         if self.touch and any(str(int(e)) not in self.touch.episodes for e in eps.episode_index):
             raise ValueError("Tactile manifest does not cover every selected episode")
         self.training_modality = "video_tactile" if self.touch else "video_only"
@@ -312,6 +318,9 @@ class LeRobotVideoIntensityDataset(BaseDataset):
             "tactile_manifest_sha256": self.touch.digest if self.touch else None,
             "tactile_codec": self.tactile_codec, "tactile_representation": tactile_representation,
             "tactile_map_size": map_size if self.touch else None,
+            **({"tactile_observation_map_size": list(self.touch.observation_hw),
+                "tactile_encoder_name": tactile_encoder_name}
+               if self.touch and self.touch.observation_hw is not None else {}),
             "split": split, "selected_episodes": eps.episode_index.astype(int).tolist(),
             "source_fps": self.fps, "sampling_fps": self.sampling_fps,
             "video_times_s": self.video_offsets_s.tolist(), "window_stride": window_stride,
@@ -430,6 +439,7 @@ class LeRobotVideoIntensityDataset(BaseDataset):
         fields = ("sampling_fps", "num_frames", "video_stride", "window_stride", "height", "width",
                   "camera_layout", "tactile_mode", "tactile_map_size", "history_times", "future_times",
                   "tactile_representation", "tactile_rgb_manifest", "tactile_rgb_map_size",
+                  "tactile_observation_map_size", "tactile_encoder_name",
                   "color_jitter", "seed") + cls.EXTRA_CONFIG_FIELDS
         kwargs = {k: get_cfg(config, k) for k in fields if get_cfg(config, k) is not None}
         total_hours = get_cfg(config, "total_hours")
@@ -466,6 +476,13 @@ class MultiSharpaIntensityDataset(MultiSharpaDexTianjiGlobalDataset):
     training_modality = "video_action_tactile"
     tactile_codec = "tactile_intensity_v1"
 
+    def __init__(self, buckets):
+        super().__init__(buckets)
+        shapes = {getattr(b, "tactile_observation_shape", None) for b in buckets}
+        if len(shapes) != 1:
+            raise ValueError("Sharpa buckets must use one tactile observation shape")
+        self.tactile_observation_shape = shapes.pop()
+
     @property
     def training_data_contract(self):
         return {"schema": "sharpadex_native_intensity_v1",
@@ -476,23 +493,29 @@ class SharpaNativeIntensityDataset(SharpaDexNativeTCPDataset):
     training_modality = "video_action_tactile"
     tactile_codec = "tactile_intensity_v1"
     NEEDED_COLS = (*SharpaDexNativeTCPDataset.NEEDED_COLS, "timestamp")
-    CONFIG_KEYS = (*SharpaDexNativeTCPDataset.CONFIG_KEYS, "tactile_map_size", "history_times", "future_times", "tactile_root")
+    CONFIG_KEYS = (*SharpaDexNativeTCPDataset.CONFIG_KEYS, "tactile_map_size", "history_times", "future_times", "tactile_root",
+                   "tactile_observation_map_size", "tactile_encoder_name")
 
     def __init__(self, *args, tactile_map_size=32, history_times=HISTORY_TIMES, future_times=FUTURE_TIMES,
-                 tactile_root=None, **kwargs):
+                 tactile_root=None, tactile_observation_map_size=None, tactile_encoder_name=None, **kwargs):
         super().__init__(*args, **kwargs)
         manifest = self._dataset_dir / "tactile/manifest.json"
         if tactile_root is not None:
             partition = self._dataset_dir.resolve(strict=True)
             manifest = Path(tactile_root) / "partitions" / partition.parent.name / partition.name / "tactile/manifest.json"
         self.touch = IntensityStore(manifest, self._dataset_dir,
-                                   size=tactile_map_size, history_times=history_times, future_times=future_times)
+                                   size=tactile_map_size, history_times=history_times, future_times=future_times,
+                                   observation_size=tactile_observation_map_size, encoder_name=tactile_encoder_name)
+        self.tactile_observation_shape = self.touch.observation_hw
         if any(str(int(e)) not in self.touch.episodes for e in self._eps_df.episode_index):
             raise ValueError("Tactile manifest does not cover every selected Sharpa episode")
         self.training_data_contract = {**self.training_data_contract,
             "tactile_manifest_sha256": self.touch.digest, "tactile_history_times_s": list(history_times),
             "future_tactile_times_s": list(future_times), "tactile_map_size": tactile_map_size,
-            "selected_episodes": self._eps_df.episode_index.astype(int).tolist()}
+            "selected_episodes": self._eps_df.episode_index.astype(int).tolist(),
+            **({"tactile_observation_map_size": list(self.touch.observation_hw),
+                "tactile_encoder_name": tactile_encoder_name}
+               if self.touch.observation_hw is not None else {})}
 
     def _observation_extras(self, idx, row, offset, valid_start, valid_end, win):
         # The accepted native release and its sidecar share an episode-relative

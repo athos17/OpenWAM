@@ -19,6 +19,17 @@ def build_modality_groups(architecture, *, action_lr=None, video_lr=None):
     separate_representations = bool(getattr(architecture, "tactile_spec", {}).get("rgb_enabled", False))
     if separate_representations:
         groups.update(tactile_intensity=[], tactile_rgb=[])
+    observation = getattr(architecture, "tactile_spec", {}).get("observation_encoder") or {}
+    encoder_specs = list(observation.get("sensors", ())) if observation.get("kind") == "ftp1_heterogeneous_v1" else []
+    encoder_groups = {}
+    image_ids = [i for i, item in enumerate(encoder_specs) if item["kind"] == "image"]
+    if encoder_specs:
+        groups["tactile_observation_image_shared"] = []
+        encoder_groups["tactile_observation_image_shared"] = image_ids
+        for i, item in enumerate(encoder_specs):
+            group = "tactile_observation_" + item["kind"] + ":" + item["name"]
+            groups[group] = []
+            encoder_groups[group] = [i]
     owners = {"video_backbone": "video", "action_backbone": "action", "proprio_encoder": "proprio",
               "touch_v2": "tactile"}
     for name, module in architecture.get_trainable_modules().items():
@@ -34,6 +45,20 @@ def build_modality_groups(architecture, *, action_lr=None, video_lr=None):
                     owner = "tactile_intensity"
                 elif head in ("rgb_input_projection", "rgb_spatial_projection", "rgb_output"):
                     owner = "tactile_rgb"
+            if name == "touch_v2" and parameter_name.startswith("observation_encoder."):
+                parts = parameter_name.split(".")
+                if not encoder_specs:
+                    raise ValueError("Observation encoder parameters require an explicit heterogeneous specification")
+                if parts[1] == "image_frontends":
+                    owner = "tactile_observation_image:" + parts[2]
+                elif parts[1] == "matrix_encoders":
+                    owner = "tactile_observation_matrix:" + parts[2]
+                elif parts[1] in ("image_trunk", "image_projection"):
+                    owner = "tactile_observation_image_shared"
+                else:
+                    raise ValueError(f"Unclassified observation encoder parameter: {parameter_name}")
+                if owner not in groups:
+                    raise ValueError(f"Observation encoder absent from specification: {owner}")
             groups[owner].append(parameter)
     actual = [p for values in groups.values() for p in values]
     if len({id(p) for p in actual}) != len(actual) or {id(p) for p in actual} != {
@@ -45,6 +70,8 @@ def build_modality_groups(architecture, *, action_lr=None, video_lr=None):
         if not params:
             continue
         group = {"params": params, "touchwam_stream": stream, "touchwam_active_in_window": False}
+        if stream in encoder_groups:
+            group["touchwam_observation_encoder_ids"] = encoder_groups[stream]
         lr = video_lr if stream == "video" else action_lr if stream == "action" else None
         if lr is not None:
             group["lr"] = lr
@@ -62,7 +89,7 @@ to cover an overflow-skipped engine step. CPU optimizer replacement is not
 supported: Accelerate must retain this optimizer instance.
 """
 
-    def activate(self, modality, tactile_codec=None):
+    def activate(self, modality, tactile_codec=None, *, observation_encoder_ids=()):
         if modality not in MODALITY_CODES:
             raise ValueError(f"Unknown training modality: {modality}")
         active = {"video"}
@@ -74,8 +101,11 @@ supported: Accelerate must retain this optimizer instance.
             if codec not in TACTILE_CODEC_CODES:
                 raise ValueError(f"Unsupported tactile codec: {codec}")
             active.add("tactile_rgb" if codec == "tactile_rgb_v1" else "tactile_intensity")
+        observed = set(observation_encoder_ids) if "tactile" in modality else set()
         for group in self.param_groups:
-            group["touchwam_active_in_window"] |= group["touchwam_stream"] in active
+            enabled = (bool(observed.intersection(group["touchwam_observation_encoder_ids"]))
+                       if "touchwam_observation_encoder_ids" in group else group["touchwam_stream"] in active)
+            group["touchwam_active_in_window"] |= enabled
 
     def reset_activation(self):
         for group in self.param_groups:
@@ -114,17 +144,58 @@ True N=0 belongs to V/VA microbatches. Do not manufacture a tactile layout.
         codec = TACTILE_CODEC_CODES[batch_tactile_codec(samples)]
     except ValueError:
         codec, valid = -1, False
-    state = torch.tensor([code, int(valid), codec], device=device, dtype=torch.int64)
+    from openwam.dataloader.modality_sampler import batch_tactile_observation_shape
+    try:
+        shape = batch_tactile_observation_shape(samples) or (0, 0)
+    except ValueError:
+        shape, valid = (-1, -1), False
+    state = torch.tensor([code, int(valid), codec, *shape], device=device, dtype=torch.int64)
     if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
         states = [torch.empty_like(state) for _ in range(dist.get_world_size())]
         dist.all_gather(states, state)
     else:
         states = [state]
     values = [s.tolist() for s in states]
-    if not all(v[1] for v in values) or len({(v[0], v[2]) for v in values}) != 1:
+    if not all(v[1] for v in values) or len({(v[0], *v[2:]) for v in values}) != 1:
         raise ValueError(
-            f"TouchWAM distributed microbatches require one global modality, tactile codec and matching layout presence; "
-            f"got [modality_code, valid_layout, tactile_codec] per rank: {values}. Use GlobalModalitySampler; "
+            f"TouchWAM distributed microbatches require one global modality, tactile codec, observation shape and matching layout presence; "
+            f"got [modality_code, valid_layout, tactile_codec, observation_h, observation_w] per rank: {values}. Use GlobalModalitySampler; "
             "T samples keep their real regional layout and mark missing data with masks; V/VA use N=0."
         )
     return next(name for name, value in MODALITY_CODES.items() if value == code)
+
+
+def global_observation_encoder_ids(inputs, encoder_count, device, *, actual_ids=None):
+    """Union actual observed frontends across ranks before a ZeRO optimizer step.
+
+    Region availability and future labels alone never activate observation
+    parameters. Missing history leaves moments/decay untouched, including when
+    a different rank is the only one with an observed sensor.
+    """
+    active = torch.zeros(encoder_count, dtype=torch.int64, device=device)
+    ids = inputs.get("tactile_encoder_ids")
+    valid = inputs.get("tactile_valid")
+    if actual_ids is not None:
+        selected = torch.as_tensor(actual_ids, device=device, dtype=torch.long)
+        if ((selected < 0) | (selected >= encoder_count)).any():
+            raise ValueError("Observed encoder ID is outside the configured registry")
+        active[selected] = 1
+    elif ids is not None and valid is not None:
+        ids = torch.as_tensor(ids, device=device)
+        valid = torch.as_tensor(valid, device=device)
+        if valid.dtype != torch.bool or ids.dtype != torch.long or valid.ndim != 3 or ids.shape != valid.shape[::2]:
+            raise ValueError("Observation activation requires [B,N] encoder IDs and [B,T,N] validity")
+        observed = valid.any(1)
+        present = inputs.get("tactile_layout_present")
+        if present is not None:
+            observed &= torch.as_tensor(present, device=device)
+        spatial = inputs.get("tactile_observation_spatial_valid")
+        if spatial is not None:
+            observed &= torch.as_tensor(spatial, device=device).flatten(2).any(-1)
+        selected = ids[observed]
+        if ((selected < 0) | (selected >= encoder_count)).any():
+            raise ValueError("Observed encoder ID is outside the configured registry")
+        active[selected] = 1
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        dist.all_reduce(active, op=dist.ReduceOp.MAX)
+    return active.nonzero(as_tuple=False).flatten().tolist()

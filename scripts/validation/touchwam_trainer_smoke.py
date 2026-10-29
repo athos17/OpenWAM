@@ -60,9 +60,11 @@ def phase(args):
     class Source(torch.utils.data.Dataset):
         action_dim = 80
 
-        def __init__(self, mode, codec=None):
+        def __init__(self, mode, codec=None, encoder_id=0):
             self.training_modality = mode
             self.tactile_codec = codec
+            self.encoder_id = encoder_id
+            self.tactile_observation_shape = ((4, 6) if encoder_id == 2 else (32, 32)) if args.heterogeneous and codec else None
 
         def __len__(self):
             return 2
@@ -72,13 +74,21 @@ def phase(args):
             if "tactile" in self.training_modality:
                 result["tactile_region_names"] = [REGION_NAMES[i] for i in (58, 59)]
                 result["tactile_codec"] = self.tactile_codec
+                result["smoke_encoder_id"] = self.encoder_id
+                if self.tactile_observation_shape is not None:
+                    result["tactile_observation_maps"] = torch.zeros(1, 2, 3 if self.encoder_id == 1 else 1,
+                                                                     *self.tactile_observation_shape)
+                    result["tactile_observation_shape"] = self.tactile_observation_shape
             return result
 
     modes = ["video_only", "video_action", "video_tactile", "video_action_tactile"]
     sources = [Source(mode, INTENSITY_CODEC if "tactile" in mode else None) for mode in modes]
     if args.rgb:
-        sources.extend(Source(mode, RGB_CODEC) for mode in modes if "tactile" in mode)
+        sources.extend(Source(mode, RGB_CODEC, 1) for mode in modes if "tactile" in mode)
+    if args.heterogeneous:
+        sources.extend(Source(mode, INTENSITY_CODEC, 2) for mode in modes if "tactile" in mode)
     names = [source.training_modality + ("_rgb" if source.tactile_codec == RGB_CODEC else "")
+             + ("_pressure" if source.encoder_id == 2 else "")
              for source in sources]
     total_steps = 2 * len(sources)
     dataset = MixtureDataset(sources, names=names, seed=42, strict_action_dim=True,
@@ -93,11 +103,23 @@ def phase(args):
         "save_steps": 3, "save_full_states_for_resume": True, "keep_last_k_ckpts": -1,
         "resume_ckpt_path": resume, "output_path": str(output / args.phase)},
         "project": {"seed": 42, "wandb": None}, "model": {}})
-    model = tiny_model(torch.device("cpu"), torch.bfloat16, rgb_enabled=args.rgb)
+    observation = None
+    if args.heterogeneous:
+        norm = dict(mean=[0., 0., 0.], std=[1., 1., 1.], pre_scale=2, pre_bias=-1)
+        observation = dict(kind="ftp1_heterogeneous_v1", initialization="random", image_size=32,
+            image_patch_size=8, image_width=32, image_front_layers=1, image_shared_layers=1,
+            image_heads=4, matrix_width=16, freeze_pretrained=False,
+            sensors=[dict(name="Sharpa", kind="image", input_representation="deform"),
+                     dict(name="Optical", kind="image", input_representation="rgb"),
+                     dict(name="Pressure", kind="matrix", input_shape=[4, 6])],
+            source_to_encoder={"sharpa_real":["Sharpa"], "optical":["Optical"], "pressure":["Pressure"]},
+            normalizations={"sharpa_real":{"Sharpa":norm}, "optical":{"Optical":norm}})
+    model = tiny_model(torch.device("cpu"), torch.bfloat16, rgb_enabled=args.rgb, observation_encoder=observation)
     model.set_training_runtime(use_gradient_checkpointing=True, use_gradient_checkpointing_offload=False,
                                max_timestep_boundary=1.0, min_timestep_boundary=0.0)
 
     seen_codecs = set()
+    seen_encoders = set()
 
     def prepare_latents(self, samples):
         if len(samples) != 1:
@@ -105,7 +127,17 @@ def phase(args):
         codec = samples[0].get("tactile_codec")
         if codec is not None:
             seen_codecs.add(codec)
-        return make_inputs(samples[0]["training_modality"], self.device, self.dtype, tactile_codec=codec)
+        inputs = make_inputs(samples[0]["training_modality"], self.device, self.dtype, tactile_codec=codec)
+        if args.heterogeneous and codec is not None:
+            idx = samples[0]["smoke_encoder_id"]
+            seen_encoders.add(idx)
+            shape = (4, 6) if idx == 2 else (32, 32)
+            channels = 3 if idx == 1 else 1
+            inputs.update(tactile_encoder_ids=torch.full((1, 2), idx, device=self.device, dtype=torch.long),
+                tactile_sensor_ids=torch.full((1, 2), idx, device=self.device, dtype=torch.long),
+                tactile_observation_maps=torch.rand(1, 4, 2, channels, *shape, device=self.device, dtype=self.dtype),
+                tactile_observation_spatial_valid=torch.ones(1, 2, 1, *shape, device=self.device, dtype=torch.bool))
+        return inputs
 
     model.prepare_inputs = MethodType(prepare_latents, model)
     model.save_assets_for_deployment = MethodType(lambda self, path, cfg: None, model)
@@ -169,6 +201,7 @@ def phase(args):
                   "scheduler_sha256": tree_hash(accelerator._schedulers[0].state_dict()),
                   "seen_modalities": seen, "seen_codecs_this_phase": sorted(seen_codecs),
                   "rgb_enabled": args.rgb, "elapsed_s": time.monotonic() - started,
+                  "heterogeneous": args.heterogeneous, "seen_encoders_this_phase": sorted(seen_encoders),
                   "peak_allocated_mib": torch.cuda.max_memory_allocated() / 1024**2,
                   "peak_reserved_mib": torch.cuda.max_memory_reserved() / 1024**2}
         if report["peak_allocated_mib"] > args.max_allocated_mib:
@@ -198,6 +231,8 @@ def run(args):
                    "--output", str(output), "--max-allocated-mib", str(args.max_allocated_mib)]
         if args.rgb:
             command.append("--rgb")
+        if args.heterogeneous:
+            command.append("--heterogeneous")
         with (output / f"{name}.log").open("w") as log:
             child = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             try:
@@ -215,11 +250,13 @@ def run(args):
     for field in ("model_sha256", "optimizer_sha256", "scheduler_sha256"):
         if baseline[field] != resumed[field]:
             raise RuntimeError(f"Interrupted/resumed trainer differs from uninterrupted: {field}")
-    expected_updates = 6 if args.rgb else 4
+    expected_updates = 8 if args.heterogeneous else 6 if args.rgb else 4
     if len(baseline["seen_modalities"]) != 4 or baseline["trainer_state"]["opt_step"] != expected_updates:
         raise RuntimeError("Missing four-modality coverage or optimizer updates")
     if args.rgb and baseline["seen_codecs_this_phase"] != ["tactile_intensity_v1", "tactile_rgb_v1"]:
         raise RuntimeError("Both intensity and raw RGB sources must reach the production trainer")
+    if args.heterogeneous and baseline["seen_encoders_this_phase"] != [0, 1, 2]:
+        raise RuntimeError("Sharpa, RGB and matrix observation encoders must all reach the production trainer")
     report = {"status": "passed", "validation_only": True, "world_size": 1, "communication": "nccl",
               "full_model": False, "real_t5_vae": False, "real_datasets": False,
               "production_trainer_loop": True, "gradient_accumulation_steps": 2,
@@ -227,6 +264,7 @@ def run(args):
               "peak_allocated_mib": max(json.loads((output / f"{name}.json").read_text())["peak_allocated_mib"]
                                         for name in ("baseline", "pilot", "resume")),
               "seen_modalities": baseline["seen_modalities"], "rgb_enabled": args.rgb,
+              "heterogeneous": args.heterogeneous, "seen_encoders": baseline["seen_encoders_this_phase"],
               "seen_codecs": baseline["seen_codecs_this_phase"], "optimizer_updates": expected_updates}
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
@@ -237,9 +275,12 @@ if __name__ == "__main__":
     parser.add_argument("--output", required=True)
     parser.add_argument("--phase", choices=("baseline", "pilot", "resume"))
     parser.add_argument("--rgb", action="store_true", help="Mix optical RGB and intensity sources with separate heads")
+    parser.add_argument("--heterogeneous", action="store_true", help="Exercise tiny explicit-random image and native-matrix observation encoders")
     parser.add_argument("--max-allocated-mib", type=int, default=768)
     parser.add_argument("--phase-timeout-seconds", type=int, default=120)
     arguments = parser.parse_args()
+    if arguments.heterogeneous:
+        arguments.rgb = True
     if not 32 <= arguments.max_allocated_mib <= 1024:
         parser.error("The smoke allocation must stay between 32 and 1024 MiB")
     phase(arguments) if arguments.phase else run(arguments)

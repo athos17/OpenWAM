@@ -14,11 +14,16 @@ import pyarrow.parquet as pq
 import torch
 from torch.nn import functional as F
 
-from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, parse_info_json
-from openwam.dataloader.utils.video_io import decode_video_frames
 from .intensity_store import FUTURE_TIMES, HISTORY_TIMES, _time_grid
 from .registry import REGION_NAMES
-from .regions import RGB_CODEC
+from .regions import RGB_CODEC, observation_shape
+
+
+def decode_video_frames(*args, **kwargs):
+    # Import lazily: the dataloader registry also imports this store.
+    from openwam.dataloader.utils.video_io import decode_video_frames as decode
+
+    return decode(*args, **kwargs)
 
 
 @lru_cache(maxsize=4)
@@ -53,7 +58,10 @@ class RGBTactileStore:
     """
 
     def __init__(self, manifest_path, dataset_dir, *, size=128,
-                 history_times=HISTORY_TIMES, future_times=FUTURE_TIMES):
+                 history_times=HISTORY_TIMES, future_times=FUTURE_TIMES,
+                 observation_size=None, encoder_name=None):
+        from openwam.dataloader.utils.lerobotv3 import compute_file_local_offsets, parse_info_json
+
         self.root = Path(dataset_dir).resolve(strict=True)
         self.path = Path(manifest_path).resolve(strict=True)
         if not self.path.is_relative_to(self.root):
@@ -66,6 +74,10 @@ class RGBTactileStore:
         if type(size) is not int or size < 1:
             raise ValueError("RGB map size must be a positive integer")
         self.size = size
+        self.observation_hw = observation_shape(observation_size) if observation_size is not None else None
+        if self.observation_hw is None and encoder_name is not None:
+            raise ValueError("encoder_name requires observation_size")
+        self.encoder_name = encoder_name
         info_hash = hashlib.sha256((self.root / "meta/info.json").read_bytes()).hexdigest()
         if (self.meta.get("schema") != RGB_CODEC or self.meta.get("codec") != RGB_CODEC
                 or self.meta.get("representation") != "optical_rgb"
@@ -98,7 +110,17 @@ class RGBTactileStore:
             raise ValueError("RGB regions must be unique members of the public registry")
         if any("surface_id" in entry or "surface_ids" in entry for entry in self.regions):
             raise ValueError("Compose native sensors into one image per region; surface_id is unsupported")
+        if encoder_name is not None and any(
+            entry.get("encoder_name", encoder_name) != encoder_name for entry in self.regions
+        ):
+            raise ValueError("Dataset encoder_name conflicts with a region-specific RGB encoder mapping")
+        self.encoder_names = [encoder_name or entry.get("encoder_name") for entry in self.regions]
+        if self.observation_hw is not None and any(
+            not isinstance(name, str) or not name.strip() for name in self.encoder_names
+        ):
+            raise ValueError("Heterogeneous RGB observations require explicit per-region encoder_name")
         self._native_roi, self._support, self._spatial = [], [], []
+        self._observation_support = []
         for entry in self.regions:
             video = _text(entry, "video_key")
             validity = _text(entry, "validity_column")
@@ -144,6 +166,10 @@ class RGBTactileStore:
             support = F.interpolate(self._native_roi[-1][None].float(), (size, size), mode="area")[0]
             self._support.append(support)
             self._spatial.append(support > 0)
+            if self.observation_hw is not None:
+                self._observation_support.append(F.interpolate(
+                    self._native_roi[-1][None].float(), self.observation_hw, mode="area"
+                )[0])
         self.spatial = torch.stack(self._spatial)
         metadata = sorted((self.root / "meta/episodes").rglob("*.parquet"))
         required = {"episode_index", "length", "dataset_from_index", "data/chunk_index", "data/file_index"}
@@ -248,6 +274,8 @@ class RGBTactileStore:
         present = np.asarray(self.episodes[key]["layout_present"], dtype=bool)
         valid = np.zeros((len(indices), len(self.names)), dtype=bool)
         values = torch.zeros(len(indices), len(self.names), 3, self.size, self.size)
+        observations = (torch.zeros(len(hc), len(self.names), 3, *self.observation_hw)
+                        if self.observation_hw is not None else None)
         for n, entry in enumerate(self.regions):
             measured = np.asarray(table[entry["validity_column"]].fill_null(False), dtype=bool)
             if not present[n] and measured.any():
@@ -260,7 +288,7 @@ class RGBTactileStore:
             shape = self.info["features"][entry["video_key"]]["shape"]
             first = round(float(row[f"videos/{entry['video_key']}/from_timestamp"]) * self.fps)
             frames = decode_video_frames(str(self._video_path(row, entry)), [first + i for i in wanted], *shape[:2])
-            converted = {}
+            converted, observation_converted = {}, {}
             for frame_index, image in zip(wanted, frames):
                 raw = np.asarray(image)
                 if raw.dtype != np.uint8 or raw.shape != tuple(shape):
@@ -270,10 +298,18 @@ class RGBTactileStore:
                 support = self._support[n]
                 resized = F.interpolate((tensor * mask)[None], (self.size, self.size), mode="area")[0]
                 converted[frame_index] = torch.where(support > 0, resized / support.clamp_min(1e-12), 0)
+                if self.observation_hw is not None and frame_index in hc[enabled[:len(hc)]]:
+                    obs_support = self._observation_support[n]
+                    resized_obs = F.interpolate((tensor * mask)[None], self.observation_hw, mode="area")[0]
+                    observation_converted[frame_index] = torch.where(
+                        obs_support > 0, resized_obs / obs_support.clamp_min(1e-12), 0
+                    )
             for i in np.flatnonzero(enabled):
                 values[i, n] = converted[int(indices[i])]
+                if observations is not None and i < len(hc):
+                    observations[i, n] = observation_converted[int(indices[i])]
         h = len(hc)
-        return dict(
+        result = dict(
             tactile_maps=values[:h], tactile_valid=torch.from_numpy(valid[:h].copy()),
             future_tactile_maps=values[h:], future_tactile_valid=torch.from_numpy(valid[h:].copy()),
             tactile_region_names=self.names, tactile_sensor_names=self.sensor_names,
@@ -285,3 +321,11 @@ class RGBTactileStore:
             future_tactile_source_times_s=torch.tensor(np.where(fv, times[fi] - reference_time, np.nan)),
             tactile_native_fps=self.fps,
         )
+        if observations is not None:
+            result.update(
+                tactile_observation_shape=self.observation_hw,
+                tactile_observation_maps=observations,
+                tactile_observation_spatial_valid=torch.stack(self._observation_support) > 0,
+                tactile_encoder_names=self.encoder_names,
+            )
+        return result

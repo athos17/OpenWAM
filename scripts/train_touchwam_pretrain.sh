@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 MODE="${1:-check}"
 if [[ $# -gt 0 ]]; then shift; fi
 PYTHON_BIN="${PYTHON_BIN:-python}"
+TOUCHWAM_CONFIG="${TOUCHWAM_CONFIG:-train_touchwam_pretrain}"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export TOKENIZERS_PARALLELISM=false
@@ -25,6 +26,7 @@ case "$MODE" in
   *) echo "Usage: $0 {check|train|resume} [Hydra overrides...]" >&2; exit 2 ;;
 esac
 PREFLIGHT=("$PYTHON_BIN" scripts/preflight_touchwam.py
+  --config "$TOUCHWAM_CONFIG"
   --output "$TOUCHWAM_LAUNCH_DIR/preflight-node${NODE_ID}.json")
 if [[ "$MODE" != resume ]]; then
   : "${TOUCHWAM_ALPHA_AUDIT:?Set TOUCHWAM_ALPHA_AUDIT to the passed full OpenWAM tensor audit JSON}"
@@ -32,4 +34,4 @@ if [[ "$MODE" != resume ]]; then
 fi
 "${PREFLIGHT[@]}" "${OVERRIDES[@]}"
 if [[ "$MODE" == check ]]; then exit 0; fi
-exec bash scripts/train.sh --config-name train_touchwam_pretrain "${OVERRIDES[@]}"
+exec bash scripts/train.sh --config-name "$TOUCHWAM_CONFIG" "${OVERRIDES[@]}"

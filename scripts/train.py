@@ -82,6 +82,10 @@ def _build_accelerator(cfg: DictConfig):
         gradient_clipping=float(max_grad_norm) if max_grad_norm else 0.0,
         offload_optimizer_device=str(t.offload_optimizer_device),
     )
+    if OmegaConf.select(cfg, "model.architecture.tactile.observation_encoder.kind") == "ftp1_heterogeneous_v1":
+        # Sensor routes and absent packets legitimately leave frontend parameters
+        # unused on a rank. ZeRO groups/activation restore inactive Adam semantics.
+        plugin.deepspeed_config["zero_optimization"]["ignore_unused_parameters"] = True
 
     return accelerate.Accelerator(
         gradient_accumulation_steps=grad_accum,

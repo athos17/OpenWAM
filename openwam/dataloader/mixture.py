@@ -89,6 +89,14 @@ class MixtureDataset(BaseDataset):
         self.source_tactile_codecs = [
             (getattr(d, "tactile_codec", None) or "tactile_intensity_v1") if "tactile" in mode else None
             for d, mode in zip(self._datasets, self.source_modalities)]
+        from openwam.tactile.regions import observation_shape
+
+        self.source_tactile_observation_shapes = [
+            observation_shape(shape) if (shape := getattr(d, "tactile_observation_shape", None)) is not None else None
+            for d in self._datasets]
+        if any(shape is not None and "tactile" not in mode
+               for shape, mode in zip(self.source_tactile_observation_shapes, self.source_modalities)):
+            raise ValueError("Sources without tactile cannot declare an observation shape")
         if any(m not in ("video_only", "video_action", "video_tactile", "video_action_tactile")
                for m in self.source_modalities):
             raise ValueError(f"Unsupported mixture modalities: {self.source_modalities}")
@@ -228,6 +236,12 @@ class MixtureDataset(BaseDataset):
         di, si = self._index_map[idx]
         di, si = int(di), int(si)
         sample = self._datasets[di][si]
+        expected_shape = self.source_tactile_observation_shapes[di]
+        if expected_shape is not None or "tactile_observation_maps" in sample:
+            from openwam.dataloader.modality_sampler import batch_tactile_observation_shape
+
+            if batch_tactile_observation_shape([sample]) != expected_shape:
+                raise ValueError("Source observation shape changed after sampler construction; split sources explicitly")
 
         if not self._strict_action_dim:
             action_traj = sample.get("action")
@@ -280,6 +294,9 @@ class MixtureDataset(BaseDataset):
                              "contract": copy.deepcopy(getattr(dataset, "training_data_contract", None)),
                              "dataset_manifest_sha256": file_sha256(manifest) if manifest else None,
                              "normalization_sha256": file_sha256(stats) if stats else None}
+            observation_shape = getattr(dataset, "tactile_observation_shape", None)
+            if observation_shape is not None:
+                sources[name]["tactile_observation_shape"] = list(observation_shape)
             if getattr(dataset, "tactile_codec", None) == "tactile_rgb_v1":
                 sources[name]["tactile_codec"] = "tactile_rgb_v1"
         return {"schema_version": 1, "dataset_type": "mixture", "seed": self._base_seed,

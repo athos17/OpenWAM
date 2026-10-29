@@ -15,6 +15,54 @@ RGB_CODEC = "tactile_rgb_v1"
 SUPPORTED_CODECS = (CODEC, INTENSITY_CODEC, RGB_CODEC)
 
 
+def observation_shape(size):
+    """Normalize an explicit observation shape without inventing native resolution."""
+    try:
+        shape = (size, size) if type(size) is int else tuple(size)
+    except TypeError as exc:
+        raise ValueError("Observation map size must be a positive integer or [height, width]") from exc
+    if len(shape) != 2 or any(type(v) is not int or v < 1 for v in shape):
+        raise ValueError("Observation map size must be a positive integer or [height, width]")
+    return shape
+
+
+def observation_batch_shape(samples, specification):
+    """Resolve the explicit frontend shape for a homogeneous observation batch."""
+    sensors = list(specification.get("sensors", ()))
+    names = [item["name"] for item in sensors]
+    if not names or len(set(names)) != len(names):
+        raise ValueError("Heterogeneous observation encoders must have unique names")
+    shapes = set()
+    for sample in samples:
+        count = len(sample.get("tactile_region_names", ()))
+        if not count:
+            continue
+        if "tactile_encoder_names" in sample:
+            selected = list(sample["tactile_encoder_names"])
+            if "tactile_encoder_ids" in sample or len(selected) != count or set(selected) - set(names):
+                raise ValueError("Ambiguous or unregistered tactile encoder names")
+            indices = [names.index(name) for name in selected]
+        else:
+            ids = torch.as_tensor(sample.get("tactile_encoder_ids", []))
+            if ids.dtype != torch.long or ids.shape != (count,) or ((ids < 0) | (ids >= len(names))).any():
+                raise ValueError("Heterogeneous observations require explicit registered encoder IDs/names")
+            indices = ids.tolist()
+        for i in indices:
+            sensor = sensors[i]
+            if sensor["kind"] == "image":
+                shape = observation_shape(specification.get("image_size", 224))
+            elif sensor["kind"] == "matrix":
+                if "input_shape" not in sensor:
+                    raise ValueError("Matrix encoders require explicit native input_shape")
+                shape = observation_shape(sensor["input_shape"])
+            else:
+                raise ValueError("Observation encoder kind must be image or matrix")
+            shapes.add(shape)
+    if len(shapes) > 1:
+        raise ValueError("A microbatch must use one observation spatial shape; bucket native matrix shapes separately")
+    return next(iter(shapes), observation_shape(specification.get("image_size", 224)))
+
+
 def resize_deform(image, size):
     """uint8 SDK grayscale -> float [0,1], area resize without per-frame scaling."""
     value = torch.as_tensor(np.asarray(image))
@@ -34,6 +82,8 @@ def collate_regions(
     region_names=REGION_NAMES,
     sensor_names=("sharpa_real", "bench2dex_sim"),
     codec=CODEC,
+    observation_map_size=None,
+    encoder_names=None,
 ):
     """Collate one regional tactile representation per microbatch.
 
@@ -51,6 +101,13 @@ def collate_regions(
         raise ValueError(f"Unsupported tactile_codec: {codec}")
     accepted = (CODEC, INTENSITY_CODEC) if codec == INTENSITY_CODEC else (codec,)
     channels = 3 if codec == RGB_CODEC else 1
+    observation_hw = observation_shape(observation_map_size) if observation_map_size is not None else None
+    if observation_hw is not None:
+        encoder_names = tuple(encoder_names or ())
+        if not encoder_names or len(set(encoder_names)) != len(encoder_names) or any(
+            not isinstance(name, str) or not name.strip() for name in encoder_names
+        ):
+            raise ValueError("Heterogeneous observations require registered encoder_names")
     ns = []
     for sample in samples:
         names = list(sample.get("tactile_region_names", ()))
@@ -66,7 +123,8 @@ def collate_regions(
             if codec in (INTENSITY_CODEC, RGB_CODEC) and not any(k in sample for k in ("tactile_sensor_ids", "tactile_sensor_names")):
                 raise ValueError("Intensity/RGB maps require explicit tactile sensor/source identity")
         elif any(torch.as_tensor(sample[k]).numel() for k in (
-            "tactile_maps", "tactile_valid", "future_tactile_maps", "future_tactile_valid"
+            "tactile_maps", "tactile_valid", "future_tactile_maps", "future_tactile_valid",
+            "tactile_observation_maps", "tactile_observation_spatial_valid", "tactile_encoder_ids"
         ) if k in sample):
             raise ValueError("Nonempty tactile tensors require named regional layout")
         ns.append(len(names))
@@ -82,6 +140,12 @@ def collate_regions(
         "tactile_sensor_ids": ((n,), torch.long, 0),
         "tactile_region_ids": ((n,), torch.long, -1),
     }
+    if observation_hw is not None:
+        specs.update({
+            "tactile_observation_maps": ((history, n, channels, *observation_hw), torch.float32, 0),
+            "tactile_observation_spatial_valid": ((n, 1, *observation_hw), torch.bool, False),
+            "tactile_encoder_ids": ((n,), torch.long, -1),
+        })
     device = next((torch.as_tensor(s["tactile_maps"]).device for s in samples if "tactile_maps" in s), "cpu")
     out = {key: torch.full((len(samples), *shape), fill, dtype=dtype, device=device)
            for key, (shape, dtype, fill) in specs.items()}
@@ -104,11 +168,17 @@ def collate_regions(
             if key == "tactile_region_ids":
                 continue
             axis = 1 if key in (
-                "tactile_maps", "tactile_valid", "future_tactile_maps", "future_tactile_valid", "tactile_query_mask"
+                "tactile_maps", "tactile_valid", "future_tactile_maps", "future_tactile_valid", "tactile_query_mask",
+                "tactile_observation_maps"
             ) else 0
             expected = list(shape)
             expected[axis] = count
-            if key == "tactile_sensor_ids" and "tactile_sensor_names" in sample:
+            if key == "tactile_encoder_ids" and "tactile_encoder_names" in sample:
+                names = list(sample["tactile_encoder_names"])
+                if "tactile_encoder_ids" in sample or len(names) != count or set(names) - set(encoder_names):
+                    raise ValueError("Ambiguous or unregistered tactile encoder names")
+                value = torch.tensor([encoder_names.index(name) for name in names], device=device, dtype=torch.long)
+            elif key == "tactile_sensor_ids" and "tactile_sensor_names" in sample:
                 names = list(sample["tactile_sensor_names"])
                 if "tactile_sensor_ids" in sample or len(names) != count or set(names) - set(sensor_names):
                     raise ValueError("Ambiguous or unregistered tactile sensor names")
@@ -123,6 +193,8 @@ def collate_regions(
                 raise ValueError(f"{key} requires {dtype}")
             if key == "tactile_sensor_ids" and ((value < 0) | (value >= len(sensor_names))).any():
                 raise ValueError("Unregistered tactile sensor IDs")
+            if key == "tactile_encoder_ids" and ((value < 0) | (value >= len(encoder_names))).any():
+                raise ValueError("Unregistered tactile encoder IDs")
             if key.endswith("maps"):
                 if value.dtype == torch.uint8:
                     value = value.float() / 255
