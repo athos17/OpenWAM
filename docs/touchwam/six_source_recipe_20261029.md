@@ -112,11 +112,27 @@ bash scripts/train_touchwam_six_source.sh check
 The wrapper selects this frozen recipe and the corresponding full Alpha audit.
 It performs real source reads, tactile collation, deployment normalization checks
 and the current-model/Alpha binding check. `check` does not start training.
+`PYTHON_BIN` also selects the distributed training interpreter, so preflight
+and training use the same environment.
 For a deliberately budgeted training run, use the same wrapper with `train`
 and the desired Hydra schedule overrides, e.g. `training.max_steps=<microsteps>`.
 Resources and `NNODES`/`NPROC_PER_NODE`/`NODE_RANK` follow `scripts/train.sh`.
 The retained default is one virtual epoch; choose a run budget before submitting
 a long job. This change prepares the recipe; it does not submit formal training.
+
+Existing manifests and normalization statistics refer to both PFS aliases,
+`/mnt/pfs/v89atp` and `/mnt/pfs/ls3r34`. A new compute container that only mounts
+the former must expose the latter as the same directory before launching:
+
+```bash
+if [[ ! -e /mnt/pfs/ls3r34 ]]; then
+  ln -s /mnt/pfs/v89atp /mnt/pfs/ls3r34
+fi
+[[ /mnt/pfs/ls3r34 -ef /mnt/pfs/v89atp ]] || exit 1
+```
+
+This does not copy data or replace an existing mount. The bounded validation
+bootstrap also checks this alias before reading any fixture or model file.
 
 All six-source readiness evidence is collected under
 `/mnt/pfs/v89atp/workspace/setup/touchwam_six_source_ready_20261029`.

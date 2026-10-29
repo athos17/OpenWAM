@@ -46,7 +46,13 @@ echo "║  Nodes: ${NNODES}  GPUs/node: ${NPROC_PER_NODE}  Rank: ${NODE_RANK}   
 echo "║  Master: ${MASTER_ADDR}:${MASTER_PORT}                   ║"
 echo "╚══════════════════════════════════════════════════════╝"
 
-exec torchrun \
+# Keep launch and preflight in the same environment when the wrapper selects
+# an explicit interpreter. Otherwise preserve the activated torchrun command.
+TORCHRUN=(torchrun)
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+    TORCHRUN=("$PYTHON_BIN" -m torch.distributed.run)
+fi
+exec "${TORCHRUN[@]}" \
     --nnodes "${NNODES}" \
     --nproc_per_node "${NPROC_PER_NODE}" \
     --node_rank "${NODE_RANK}" \
