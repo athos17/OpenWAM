@@ -1,0 +1,19 @@
+# Production: 8 nodes x 8 A800 GPUs, global batch 768, no recomputation.
+# The model/data and acceleration settings match the measured batch-12 probe.
+defaults:
+  - train_touchwam_six_source_bs12_norecompute_20261029
+  - _self_
+
+training:
+  learning_rate: 0.00005
+  stop_after_steps: null
+  num_epochs: 1
+  max_steps: null
+  dataset_num_workers: 4
+  save_steps: 2000
+  save_full_states_for_resume: true
+  keep_last_k_ckpts: 3
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_six_source_64gpu_bs12_20261029}
+
+project:
+  name: touchwam-six-source-64gpu-bs12-20261029
