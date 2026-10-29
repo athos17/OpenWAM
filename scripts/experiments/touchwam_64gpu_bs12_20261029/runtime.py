@@ -3,7 +3,11 @@ import hashlib
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+# dev-cpu resolves v89atp to its historical ls3r34 alias, but a new GPU pod
+# initially mounts only v89atp. The scheduler command must use the public mount
+# before bootstrap has a chance to create the historical compatibility alias.
+ROOT = Path(str(Path(__file__).absolute().parents[1]).replace(
+    '/mnt/pfs/ls3r34/', '/mnt/pfs/v89atp/', 1))
 CONFIG_NAME = 'train_touchwam_six_source_64gpu_bs12_20261029'
 
 

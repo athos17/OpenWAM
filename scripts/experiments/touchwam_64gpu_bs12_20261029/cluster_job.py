@@ -20,7 +20,7 @@ def main():
     if args.operation == 'create':
         require_preflight()
         request = dict(resourcePoolId=POOL, queueID=QUEUE,
-            name='touchwam-six-source-64gpu-bs12-lr5e5-20261029', jobType='PyTorchJob',
+            name=ROOT.name.replace('_','-'), jobType='PyTorchJob',
             command=f'bash {ROOT}/pipeline/cluster_bootstrap.sh',
             jobSpec=dict(replicas=8,image='registry.baidubce.com/inference/aibox-ubuntu:v2.0-22.04',
                 resources=[dict(name='baidu.com/a800_80g_cgpu',quantity=8),dict(name='cpu',quantity=116),
