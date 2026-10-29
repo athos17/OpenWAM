@@ -467,7 +467,7 @@ class LeRobotV3Reader(BaseDataset):
         n_starts = np.diff(self._cum_n_starts)
         ep = np.repeat(np.arange(len(n_starts), dtype=np.int64), n_starts)
         pos = np.arange(self._n_total, dtype=np.int64) - self._cum_n_starts[ep]
-        offset = self._ep_valid_start[ep] + pos * self._window_stride
+        offset = pos * self._window_stride
         return np.stack([ep, offset], axis=1).astype(np.int32)
 
     def encode_cache_latent_signature(self) -> dict:
@@ -498,7 +498,7 @@ class LeRobotV3Reader(BaseDataset):
 
     def encode_cache_prompts(self) -> list:
         """Every prompt ``_resolve_prompt`` can return for this bucket, sorted."""
-        if self.PROMPT_SOURCE == "episode_annotated":
+        if type(self)._resolve_prompt is not LeRobotV3Reader._resolve_prompt:
             raise NotImplementedError(f"{self.DATASET_NAME}: text cache supports task_index prompts only")
         return sorted({t.strip() for t in self._task_idx_to_text.values() if t.strip()})
 
@@ -509,7 +509,7 @@ class LeRobotV3Reader(BaseDataset):
             "dataset": type(self).__name__,
             "dataset_id": self._dataset_id,
             "split": self._split,
-            "prompt_source": self.PROMPT_SOURCE,
+            "prompt_source": "task_index",
             "prompts_sha256": digest(self.encode_cache_prompts()),
             "max_length": TEXT_MAX_LENGTH,
         }
