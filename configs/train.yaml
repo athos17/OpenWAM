@@ -16,6 +16,7 @@ training:
   # --- Schedule ---
   num_epochs: 5                   # Total training epochs (null = step-only, driven solely by max_steps)
   max_steps: null                 # Microstep budget; completes the current optimizer update (null = epoch limit)
+  stop_after_steps: null          # Stop at the next update boundary, keeping the full LR horizon
   batch_size: 16                   # Per-GPU batch size
   gradient_accumulation_steps: 1  # Accumulate N micro-batches before optimizer step
 
@@ -31,11 +32,60 @@ training:
   # --- DeepSpeed / precision ---
   mixed_precision: bf16           # bf16 / fp16 / no — training + deploy compute dtype
   zero_stage: 2                   # DeepSpeed ZeRO stage: 1 or 2 (CLI override: training.zero_stage=1)
+  deepspeed_zero:                 # merged into DeepSpeed zero_optimization; null = DeepSpeed default
+    overlap_comm: null            # true: overlap gradient reduce-scatter with backward (ZeRO-2 default false)
+    contiguous_gradients: null
+    reduce_bucket_size: null      # elements per gradient reduce bucket (DeepSpeed default 5e8)
+    allgather_bucket_size: null   # elements per post-step parameter all-gather bucket (default 5e8)
+  step_timing:
+    enabled: false                # per-stage CPU / CUDA-event timing; STEP_TIMING summary every N steps
+    summary_every: 50
+    mfu: false                    # count the step's FLOPs once (first step) and report MFU in STEP_TIMING
+    peak_tflops: null             # dense bf16 peak per GPU; null = by device name (H20 148, A800/A100 312, H100/H800 989)
+  torch_profile:                  # torch.profiler window -> <run dir>/torch_profile/rank<r>.json.gz (needs step_timing)
+    enabled: false
+    wait: 5                       # steps skipped before warmup
+    warmup: 2
+    active: 3                     # profiled steps
+    ranks: [0]
+    record_shapes: false
+    with_stack: false
+  max_gpu_memory_gib: null        # cap the CUDA allocator per process (e.g. 79 to emulate an 80 GB A800 on a 96 GB H20)
+  loss_log_csv: false             # write <run dir>/debug_loss_history.csv every step (rank 0) outside debug mode
+  log_flush_every: 1              # loss_log_csv rows per file append (also flushed before checkpoints / at the end)
+  video_uint8_in_workers: false   # DataLoader workers stack the frames to uint8 and the loader pins them; the
+                                  # training process only uploads (bitwise-identical input, Wan backbone)
+
+  # --- Frozen-encoder input options (all default to the reference path) ---
+  text_padding: max_length        # UMT5: max_length = pad to 512; longest = pad to the batch's longest prompt
+                                  # (also shortens DiT/ActionDiT cross-attention K/V; masked, so equivalent)
+  text_dedup: false               # UMT5: encode each distinct prompt in the batch once
+  vae_cudnn_benchmark: false      # cuDNN autotune for the frozen VAE encode only (training stays as configured)
+  vae_channels_last: false        # channels_last_3d VAE Conv3d weights + input (bf16-level rounding change)
+  vae_fused_norm: false           # VAE encode: each RMS_norm + SiLU and down-block shortcut add as one compiled
+                                  # kernel (torch.compile; bf16-level rounding change)
+  rope_impl: fp64                 # Wan RoPE: fp64 = reference complex128; fp32 = float32 cos/sin, fused by
+                                  # torch.compile (bf16 output; rounding-level change)
+  frame_time_modulation: false    # Wan TI2V AdaLN modulation kept per latent frame (B, F, 1, 6, dim) and broadcast
+                                  # in the blocks instead of materialized per token; same values, less activation
+                                  # memory (dual_system joint_self_attn only)
+  dit_block_fusion: false         # Wan blocks: the elementwise stretches around the attentions (norms, modulate,
+                                  # RMSNorm, RoPE, gates, residuals) as compiled regions, forward and backward;
+                                  # GEMMs stay on cuBLAS (bf16-level rounding change)
+  overlap_param_allgather: false  # DeepSpeed ZeRO-1/2: launch the post-step parameter all-gather async and wait
+                                  # before the next DiT forward, so the next batch's VAE/T5 encode overlaps it
 
   # --- Memory optimization ---
   use_gradient_checkpointing: true       # Recompute activations in backward instead of storing them: saves memory
                                          # costs ~1 extra forward (standard term; cf. PyTorch/HF)
   use_gradient_checkpointing_offload: false  # Offload checkpointed activations to CPU
+  gradient_checkpointing_layers: null    # dual_system/joint_self_attn: layers with full-layer recompute when
+                                         # use_gradient_checkpointing=true. null/"all" = every layer; int n = every
+                                         # n-th layer; list = layer ids. Other layers keep only the mixed-attention
+                                         # recompute (model.architecture.mot_checkpoint_mixed_attn). Also applies
+                                         # to video-only batches (whole Wan blocks).
+  gradient_checkpointing_layers_video_only: null  # override for video-only batches (no action tokens, less
+                                         # activation memory); null = gradient_checkpointing_layers
   initialize_model_on_cpu: false         # Load model on CPU, let DeepSpeed move to GPU
   offload_optimizer_device: none         # DeepSpeed ZeRO optimizer-state offload: none / cpu
 

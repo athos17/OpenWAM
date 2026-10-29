@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from types import SimpleNamespace
 from typing import Any
 
@@ -213,6 +214,59 @@ def torch_compile_kwargs(compile_cfg: Any, *, default_mode: str | None = None) -
     return kwargs
 
 
+def raise_recompile_limit(limit: int) -> None:
+    """Let each compiled function keep at least ``limit`` shape specializations.
+
+    Train-time fusions compile one small function per call site and see one shape per
+    stage / data source; past Dynamo's default of 8 the rest would silently run eager.
+    """
+    import torch._dynamo.config as dynamo_config
+
+    for name in ("recompile_limit", "cache_size_limit"):
+        if getattr(dynamo_config, name, limit) < limit:
+            setattr(dynamo_config, name, limit)
+
+
+_eager_regions = 0
+
+
+@contextlib.contextmanager
+def eager_compiled_regions():
+    """Run every :func:`compile_outside_dispatch_modes` function eagerly inside the block.
+
+    The trainer wraps its FLOP-counted first step (forward *and* backward) in this: the
+    forward runs under ``FlopCounterMode`` and must stay eager, and activation-checkpoint
+    recompute in the backward has to take the same path or it saves different tensors.
+    """
+    global _eager_regions
+    _eager_regions += 1
+    try:
+        yield
+    finally:
+        _eager_regions -= 1
+
+
+def compile_outside_dispatch_modes(fn, **compile_kwargs):
+    """``torch.compile(fn)`` that runs ``fn`` eagerly inside :func:`eager_compiled_regions`
+    or while a TorchDispatchMode is active.
+
+    A compiled function first called under a dispatch mode (the trainer's step-1
+    ``FlopCounterMode``) is never compiled afterwards (Dynamo keeps running it eagerly),
+    so those calls take the eager function instead. Same math and FLOPs.
+    """
+    import torch
+    from torch.utils._python_dispatch import is_in_torch_dispatch_mode
+
+    compiled = torch.compile(fn, **compile_kwargs)
+
+    def call(*args, **kwargs):
+        if _eager_regions or is_in_torch_dispatch_mode():
+            return fn(*args, **kwargs)
+        return compiled(*args, **kwargs)
+
+    return call
+
+
 __all__ = [
     "as_bool",
     "compile_enabled",
@@ -220,8 +274,11 @@ __all__ = [
     "cross_attn_compile_cfg",
     "cfg_get",
     "cfg_namespace",
+    "compile_outside_dispatch_modes",
+    "eager_compiled_regions",
     "idm_compile_cfg",
     "normalize_compile_enabled",
+    "raise_recompile_limit",
     "section_enabled",
     "self_attn_compile_cfg",
     "torch_compile_kwargs",

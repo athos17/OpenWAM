@@ -27,16 +27,31 @@ def build_time_modulation(
     num_clean_prefix_frames: int,
     zero_clean_prefix_t_mod: bool,
     has_first_frame_latents: bool,
+    per_frame: bool = False,
 ) -> Tuple[Tensor, Tensor]:
     """Build ``(time_embed, time_modulation)`` for ``prepare``. TI2V uses
     per-token t=0 on the clean prefix; ``force_per_token_t_mod`` broadcasts a
     single (B,) embedding to (B, L, dim); else the plain (B,) path.
+
+    ``per_frame`` (TI2V / ``force_per_token_t_mod`` paths): the timestep only varies
+    by latent frame, so the embedding is computed once per frame and kept as
+    ``time_embed`` (B, F, 1, dim) / ``time_modulation`` (B, F, 1, 6, dim), broadcast
+    over each frame's tokens by the blocks instead of materialized per token.
     """
     if dit.seperated_timestep and fuse_vae_embedding_in_latents:
         batch_size = latents.shape[0]
         num_clean = max(num_clean_prefix_frames, 1)
         f_lat = latents.shape[2]
         tokens_per_frame = latents.shape[3] * latents.shape[4] // (patch_size[1] * patch_size[2])
+        if per_frame:
+            frame_timesteps = torch.ones(batch_size, f_lat, dtype=latents.dtype, device=latents.device) * timestep.view(
+                batch_size, 1
+            )
+            frame_timesteps[:, :num_clean] = 0
+            time_sinusoid = sinusoidal_embedding_1d(dit.freq_dim, frame_timesteps.reshape(-1))
+            time_embed = dit.time_embedding(time_sinusoid.to(latents.dtype)).reshape(batch_size, f_lat, 1, dit.dim)
+            time_modulation = dit.time_projection(time_embed).unflatten(3, (6, dit.dim))
+            return time_embed, time_modulation
         token_timesteps = torch.ones(
             batch_size, f_lat, tokens_per_frame, dtype=latents.dtype, device=latents.device
         ) * timestep.view(batch_size, 1, 1)
@@ -56,7 +71,10 @@ def build_time_modulation(
         time_embed_base = dit.time_embedding(
             sinusoidal_embedding_1d(dit.freq_dim, timestep).to(latents.dtype)
         )  # (B, dim)
-        time_embed = time_embed_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
+        if per_frame:
+            time_embed = time_embed_base.view(batch_size, 1, 1, -1).expand(batch_size, f_lat, 1, -1).contiguous()
+        else:
+            time_embed = time_embed_base.unsqueeze(1).expand(batch_size, L, -1).contiguous()
 
         # Optional clean-prefix alignment: when opted in AND a clean prefix
         # is present, overwrite the first ``num_clean`` frames' time embedding
@@ -69,10 +87,15 @@ def build_time_modulation(
             time_embed_zero = dit.time_embedding(
                 sinusoidal_embedding_1d(dit.freq_dim, zero_ts).to(latents.dtype)
             )  # (B, dim)
-            time_embed = time_embed.view(batch_size, f_lat, tokens_per_frame, -1)
-            time_embed[:, :num_clean] = time_embed_zero.view(batch_size, 1, 1, -1)
-            time_embed = time_embed.reshape(batch_size, L, -1)
+            if per_frame:
+                time_embed[:, :num_clean] = time_embed_zero.view(batch_size, 1, 1, -1)
+            else:
+                time_embed = time_embed.view(batch_size, f_lat, tokens_per_frame, -1)
+                time_embed[:, :num_clean] = time_embed_zero.view(batch_size, 1, 1, -1)
+                time_embed = time_embed.reshape(batch_size, L, -1)
 
+        if per_frame:
+            return time_embed, dit.time_projection(time_embed).unflatten(3, (6, dit.dim))
         time_modulation = dit.time_projection(time_embed).unflatten(2, (6, dit.dim))
     else:
         time_embed = dit.time_embedding(sinusoidal_embedding_1d(dit.freq_dim, timestep))

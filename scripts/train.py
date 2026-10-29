@@ -87,6 +87,22 @@ def _build_accelerator(cfg: DictConfig):
         # unused on a rank. ZeRO groups/activation restore inactive Adam semantics.
         plugin.deepspeed_config["zero_optimization"]["ignore_unused_parameters"] = True
 
+    # training.deepspeed_zero: non-null keys override DeepSpeed's zero_optimization
+    # defaults (e.g. overlap_comm / reduce_bucket_size); the plugin's config dict is the
+    # one handed to deepspeed.initialize at prepare().
+    zero_overrides = {k: v for k, v in (t.get("deepspeed_zero") or {}).items() if v is not None}
+    if zero_overrides:
+        plugin.deepspeed_config["zero_optimization"].update(zero_overrides)
+        if os.environ.get("LOCAL_RANK", "0") == "0":
+            logger.info("DeepSpeed zero_optimization = %s", plugin.deepspeed_config["zero_optimization"])
+    # training.overlap_param_allgather: DeepSpeed's throughput timer runs a device-wide
+    # synchronize at the end of every engine.step, which would hold the host until the
+    # async parameter all-gather finishes; keep the timer, drop its synchronize.
+    if t.get("overlap_param_allgather", False):
+        if plugin.deepspeed_config["zero_optimization"]["stage"] not in (1, 2):
+            raise ValueError("overlap_param_allgather requires DeepSpeed ZeRO stage 1 or 2")
+        plugin.deepspeed_config["timers"] = {"throughput": {"enabled": True, "synchronized": False}}
+
     return accelerate.Accelerator(
         gradient_accumulation_steps=grad_accum,
         deepspeed_plugin=plugin,
@@ -117,6 +133,28 @@ def _train(cfg: DictConfig) -> None:
     _train_openwam(cfg)
 
 
+def _apply_gpu_memory_cap(cfg: DictConfig) -> None:
+    """``training.max_gpu_memory_gib``: cap this process's CUDA caching allocator.
+
+    Lets memory-bound choices (batch size, recompute strategy) made on larger GPUs
+    (e.g. 96 GB H20) hold on the target GPU (e.g. 80 GB A800). Allocations beyond
+    the cap raise OOM exactly as they would on the smaller card.
+    """
+    cap_gib = OmegaConf.select(cfg, "training.max_gpu_memory_gib", default=None)
+    if cap_gib is None:
+        return
+    import torch
+
+    device = int(os.environ.get("LOCAL_RANK", 0))
+    total = torch.cuda.get_device_properties(device).total_memory
+    fraction = float(cap_gib) * (1 << 30) / total
+    if not 0 < fraction <= 1:
+        raise ValueError(f"training.max_gpu_memory_gib={cap_gib} must be in (0, {total / (1 << 30):.1f}]")
+    torch.cuda.set_per_process_memory_fraction(fraction, device=device)
+    if device == 0:
+        logger.info("GPU memory capped at %.1f GiB (fraction %.4f of %.1f GiB)", float(cap_gib), fraction, total / (1 << 30))
+
+
 def _train_openwam(cfg: DictConfig) -> None:
     """Original OpenWAM training path."""
     from openwam.dataloader.registry import build_dataset
@@ -134,6 +172,7 @@ def _train_openwam(cfg: DictConfig) -> None:
         rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
         seed_everything(int(project_seed), rank=rank)
 
+    _apply_gpu_memory_cap(cfg)
     accelerator = _build_accelerator(cfg)
 
     # Build dataset via registry
@@ -170,21 +209,24 @@ def main(cfg: DictConfig) -> None:
     try:
         _train(cfg)
     except BaseException:
-        # destroy_process_group below is a collective. If only this rank
-        # raised, the other ranks are still in mid-training collectives
-        # (e.g. accelerate's RNG-state broadcast inside dataloader.__iter__),
-        # and destroy will block forever waiting for them — masking the
-        # actual rank-0 exception. Mirror the alternate path's pre-destroy
-        # traceback print so the real error survives the deadlock.
+        # A failed rank cannot safely participate in NCCL teardown while peers
+        # are still in training collectives. Flush the error, then let torchrun
+        # observe a failed worker and terminate the remaining ranks.
         import traceback as _tb
 
         rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "?"))
         sys.stderr.write(f"\n===== RANK {rank} EXCEPTION (pre-destroy) =====\n")
-        _tb.print_exc(file=sys.stderr)
+        # format_exc + write, not print_exc: print_exc goes through builtins.print,
+        # which is silenced on non-main ranks above (the traceback would vanish).
+        sys.stderr.write(_tb.format_exc())
         sys.stderr.flush()
         sys.stdout.flush()
+        if "TORCHELASTIC_RUN_ID" in os.environ:
+            # Bypass Python/CUDA destructors too: they can wait on outstanding
+            # collectives even when explicit destroy_process_group is skipped.
+            os._exit(1)
         raise
-    finally:
+    else:
         # Avoid `destroy_process_group() was not called before program exit`
         # warning on shutdown by tearing down the NCCL process group cleanly.
         import torch.distributed as dist

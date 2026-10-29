@@ -1,0 +1,38 @@
+# OpenWAM-accel b326236 S9, adapted to TouchWAM's V/VA/VT/VAT bridges.
+# Data, full Alpha/FTP initialization, optimizer and training horizon are inherited.
+defaults:
+  - train_touchwam_six_source_20261029
+  - _self_
+
+training:
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_six_source_20261029_s9}
+  deepspeed_zero:
+    overlap_comm: true
+    contiguous_gradients: true
+    reduce_bucket_size: 200000000
+    allgather_bucket_size: 500000000
+  text_padding: longest
+  text_dedup: true
+  video_uint8_in_workers: true
+  vae_cudnn_benchmark: true
+  vae_channels_last: true
+  vae_fused_norm: true
+  frame_time_modulation: true
+  dit_block_fusion: true
+  rope_impl: fp64
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  overlap_param_allgather: true
+  loss_log_csv: true
+  log_flush_every: 50
+  step_timing:
+    enabled: true
+    summary_every: 50
+    # One first-batch FLOP estimate is not representative of six changing graphs.
+    mfu: false
+
+model:
+  architecture:
+    mot_split_attention: true
+
+project:
+  name: touchwam-six-source-20261029-s9

@@ -13,24 +13,53 @@ import torch
 from torch import Tensor
 
 from openwam.model.video_backbone.wan.preprocess import preprocess_video as _preprocess_video_native
+from openwam.model.video_backbone.wan.preprocess import preprocess_video_batch as _preprocess_video_batch_native
 from openwam.model.video_backbone.wan.preprocess import vae_output_to_video
 
 
-def encode_text(prompts: list, *, tokenizer, text_encoder, device) -> Tuple[Tensor, Tensor]:
+TEXT_PADDING_MODES = ("max_length", "longest")
+
+
+def encode_text(
+    prompts: list, *, tokenizer, text_encoder, device, padding: str = "max_length", dedup: bool = False
+) -> Tuple[Tensor, Tensor]:
+    """UMT5-encode ``prompts`` -> ``(context [B, L, D], seq_lens [B])``, zero past each length.
+
+    ``padding="max_length"`` pads every prompt to 512 tokens (the reference path);
+    ``"longest"`` pads to the longest prompt in the batch, so ``L`` shrinks. Padded
+    keys are masked in UMT5 and in every downstream cross-attention (``seq_lens`` ->
+    context mask), so both give the same result up to bf16 kernel rounding.
+    ``dedup`` encodes each distinct prompt once and gathers the rows back.
+    """
+    if padding not in TEXT_PADDING_MODES:
+        raise ValueError(f"text padding must be one of {TEXT_PADDING_MODES}, got {padding!r}")
+    if dedup:
+        rows = {p: i for i, p in enumerate(dict.fromkeys(prompts))}
+        if len(rows) < len(prompts):
+            context, seq_lens = encode_text(
+                list(rows), tokenizer=tokenizer, text_encoder=text_encoder, device=device, padding=padding
+            )
+            index = torch.tensor([rows[p] for p in prompts], dtype=torch.long).to(device)
+            return context.index_select(0, index), seq_lens.index_select(0, index)
     ids, mask = tokenizer(
         prompts,
         return_mask=True,
         add_special_tokens=True,
         max_length=512,
-        padding="max_length",
+        padding=padding,
         truncation=True,
     )
+    # Lengths and the zero-fill mask come from the CPU-side tokenizer mask: slicing
+    # ``context[i, v:]`` with a device scalar ``v`` would block the host until the
+    # encoder finishes, serializing the CPU video preprocessing behind it.
+    seq_lens = mask.gt(0).sum(dim=1).long()
+    pad = torch.arange(mask.shape[1]).unsqueeze(0) >= seq_lens.unsqueeze(1)
     ids = ids.to(device)
     mask = mask.to(device)
-    seq_lens = mask.gt(0).sum(dim=1).long()
+    pad = pad.to(device)
+    seq_lens = seq_lens.to(device)
     context = text_encoder(ids, mask)
-    for i, v in enumerate(seq_lens):
-        context[i, v:] = 0
+    context.masked_fill_(pad.unsqueeze(-1), 0)
     return context, seq_lens
 
 
@@ -52,6 +81,14 @@ def preprocess_video(frames, *, encoder=None, dtype, device) -> Tensor:
     if encoder is not None:
         return encoder.preprocess_video(frames)
     return _preprocess_video_native(frames, dtype=dtype, device=device)
+
+
+def preprocess_video_batch(clips, *, encoder=None, dtype, device, uint8_clips=None) -> Tensor:
+    """Batch of clips -> stacked ``[B, C, T, H, W]`` pixels (one uint8 upload on the native path;
+    ``uint8_clips`` = the clips pre-stacked in the DataLoader workers)."""
+    if encoder is not None:
+        return torch.cat([encoder.preprocess_video(c) for c in clips], dim=0)
+    return _preprocess_video_batch_native(clips, dtype=dtype, device=device, uint8_clips=uint8_clips)
 
 
 def encode_video(video_tensor: Tensor, *, vae, encoder=None) -> Tensor:

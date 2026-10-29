@@ -31,6 +31,9 @@ from .regional_modules import RegionalTactileFlowStream, globally_normalized_sum
 class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
     model_version = "touchwam_regions_v1"
     supports_video_only_training = True
+    # prepare_inputs only collates touch packets and runs the frozen visual/text
+    # encoders. Trainable tactile frontends run in compute_loss after the wait.
+    supports_frozen_input_overlap = True
 
     def _init_tactile(self, cfg):
         defaults = dict(

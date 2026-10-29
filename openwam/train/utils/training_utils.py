@@ -41,6 +41,28 @@ def append_training_metrics(output_path, *, metrics, global_step, opt_step, epoc
         handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+class TrainingMetricsLog:
+    """Buffer the existing per-source/per-modality JSONL without changing its schema."""
+
+    def __init__(self, output_path, flush_every=1):
+        self.path = os.path.join(output_path, "training_metrics.jsonl")
+        self.flush_every = max(1, int(flush_every))
+        self.rows = []
+
+    def add(self, *, metrics, global_step, opt_step, epoch, lr, steps_per_sec):
+        row = {"step": int(global_step), "opt_step": int(opt_step), "epoch": int(epoch),
+               "lr": float(lr), "steps_per_sec": float(steps_per_sec), **metrics}
+        self.rows.append(json.dumps(row, ensure_ascii=False) + "\n")
+        if len(self.rows) >= self.flush_every:
+            self.flush()
+
+    def flush(self):
+        if self.rows:
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.writelines(self.rows)
+            self.rows.clear()
+
+
 def cfg_get(cfg, key: str, default=None):
     """Read ``key`` from a dict or attr-style config, with default."""
     if cfg is None:
@@ -199,14 +221,62 @@ def write_debug_loss_row(
 
     Loss columns follow ``labels`` = ``[(display_name, metrics_key)]``.
     """
-    loss_log_path = os.path.join(output_path, "debug_loss_history.csv")
-    write_header = not os.path.exists(loss_log_path)
-    label_cols = ",".join(f"loss_{name}" for name, _ in labels)
-    label_vals = ",".join(f"{metrics[key]:.10g}" for _, key in labels)
-    with open(loss_log_path, "a", encoding="utf-8") as f:
-        if write_header:
-            f.write(f"step,opt_step,epoch,loss,loss_video,{label_cols},grad_norm,lr,steps_per_sec\n")
-        f.write(
+    log = LossCsvLog(output_path, labels=labels, flush_every=1)
+    log.add(metrics=metrics, global_step=global_step, opt_step=opt_step, epoch=epoch, lr=lr,
+            steps_per_sec=steps_per_sec)
+
+
+class LossCsvLog:
+    """debug_loss_history.csv rows, written ``flush_every`` rows at a time.
+
+    One open/append per flush instead of per step (on a shared filesystem each
+    open/stat is a metadata round trip). Call :meth:`flush` before checkpoints and at
+    the end so the file covers every finished step; a crash loses at most
+    ``flush_every - 1`` rows.
+    """
+
+    def __init__(self, output_path, *, labels, flush_every: int = 1):
+        self.path = os.path.join(output_path, "debug_loss_history.csv")
+        self.labels = labels
+        self.flush_every = max(1, int(flush_every))
+        self._rows: list = []
+
+    def add(self, *, metrics, global_step, opt_step, epoch, lr, steps_per_sec) -> None:
+        label_vals = ",".join(f"{metrics.get(key, 0.0):.10g}" for _, key in self.labels)
+        self._rows.append(
             f"{global_step},{opt_step},{epoch},{metrics['loss_total']:.10g},{metrics['loss_video']:.10g},{label_vals},"
             f"{metrics['grad_norm']:.10g},{lr:.10g},{steps_per_sec:.10g}\n"
         )
+        if len(self._rows) >= self.flush_every:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._rows:
+            return
+        write_header = not os.path.exists(self.path)
+        label_cols = ",".join(f"loss_{name}" for name, _ in self.labels)
+        with open(self.path, "a", encoding="utf-8") as f:
+            if write_header:
+                f.write(f"step,opt_step,epoch,loss,loss_video,{label_cols},grad_norm,lr,steps_per_sec\n")
+            f.writelines(self._rows)
+        self._rows.clear()
+
+
+def collate_samples_with_video_uint8(samples: list) -> list:
+    """DataLoader collate (runs in the workers, ``training.video_uint8_in_workers``).
+
+    Returns the sample list like ``collate_fn=list`` and adds ``video_uint8``, each
+    sample's ``video`` frames stacked as a uint8 ``[T, H, W, C]`` tensor; the
+    DataLoader's pin-memory thread pins it, so the training process skips the
+    PIL -> numpy -> stack -> pin copies. Samples whose frames are not uniform RGB
+    uint8 are left without it (the backbone then stacks the PIL frames itself).
+    """
+    from openwam.model.video_backbone.wan.preprocess import clip_to_uint8
+
+    for sample in samples:
+        video = sample.get("video") if isinstance(sample, dict) else None
+        if isinstance(video, (list, tuple)):
+            stacked = clip_to_uint8(video)
+            if stacked is not None:
+                sample["video_uint8"] = stacked
+    return list(samples)

@@ -227,3 +227,28 @@ def test_resume_rejects_partial_window_before_loading_state(tmp_path):
 def test_stop_alignment_handles_epoch_tail(requested, expected):
     assert align_stop_step(requested, 10, 4) == expected
     assert optimizer_steps_through(20, 10, 4) == 6
+
+
+def test_s9_short_run_preserves_full_lr_horizon_and_resumes_at_update_boundary(tmp_path):
+    def scheduled(root, *, stop=None, resume=None):
+        trainer = make_trainer(root, resume=resume)
+        trainer.cfg.training.update(lr_scheduler="cosine", warmup_ratio=0.34,
+                                    lr_min_ratio=0.01, stop_after_steps=stop,
+                                    log_flush_every=50, loss_log_csv=True)
+        return trainer
+
+    complete = scheduled(tmp_path / "complete")
+    complete.train()
+    expected = complete.architecture.video_backbone.weight.detach().clone()
+    pilot = scheduled(tmp_path / "split", stop=2)
+    pilot.train()
+    run = run_dir(tmp_path / "split")
+    first = [json.loads(line) for line in (run / "training_metrics.jsonl").read_text().splitlines()]
+    full = [json.loads(line) for line in (run_dir(tmp_path / "complete") / "training_metrics.jsonl").read_text().splitlines()]
+    assert len(first) == 4 and first[-1]["opt_step"] == 1
+    assert [r["lr"] for r in first] == [r["lr"] for r in full[:4]]
+    assert state_meta(run, 4)["optimizer_boundary"] is True
+    resumed = scheduled(tmp_path / "unused", resume=str(run))
+    resumed.train()
+    assert torch.equal(resumed.architecture.video_backbone.weight, expected)
+    assert len((run / "debug_loss_history.csv").read_text().splitlines()) == 11

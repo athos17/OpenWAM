@@ -1,3 +1,4 @@
+import logging
 import math
 from typing import Optional, Tuple
 
@@ -50,6 +51,15 @@ def flash_attention(
     compatibility_mode=False,
     attn_mask: Optional[torch.Tensor] = None,
 ):
+    if isinstance(attn_mask, tuple):
+        # The same exact mask decomposition as the VA MoT driver, also used
+        # by TouchWAM's V/VT path through native Wan blocks. Force SDPA here
+        # so installing an approximate inference backend cannot change it.
+        return torch.cat([
+            flash_attention(q[:, q0:q1], k[:, k0:k1], v[:, k0:k1], num_heads,
+                            compatibility_mode=True)
+            for q0, q1, k0, k1 in attn_mask
+        ], dim=1)
     # FA2/FA3/sage are CUDA half-precision kernels; they raise on anything else.
     fused_ok = q.is_cuda and q.dtype in (torch.float16, torch.bfloat16)
     if compatibility_mode or attn_mask is not None or not fused_ok:
@@ -87,8 +97,28 @@ def flash_attention(
     return x
 
 
+def _per_frame(x: torch.Tensor, m: torch.Tensor) -> bool:
+    """``m`` is a per-latent-frame modulation ``(B, F, 1, dim)`` over ``x`` ``(B, F*T, dim)``."""
+    return m.dim() == 4 and x.dim() == 3
+
+
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):
+    if _per_frame(x, shift):
+        b, l, d = x.shape
+        return (x.reshape(b, shift.shape[1], -1, d) * (1 + scale) + shift).view(b, l, d)
     return x * (1 + scale) + shift
+
+
+def split_time_modulation(modulation: torch.Tensor, t_mod: torch.Tensor):
+    """A block's six AdaLN terms (shift/scale/gate for msa, then mlp) from its
+    ``modulation`` and ``t_mod``: ``(B, 6, dim)`` global, ``(B, L, 6, dim)`` per token, or
+    ``(B, F, 1, 6, dim)`` per latent frame (each term ``(B, F, 1, dim)``, broadcast over the
+    frame's tokens by :func:`modulate` / :class:`GateModule`)."""
+    chunk_dim = t_mod.dim() - 2
+    chunks = (modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=chunk_dim)
+    if t_mod.dim() >= 4:
+        chunks = tuple(c.squeeze(chunk_dim) for c in chunks)
+    return chunks
 
 
 def sinusoidal_embedding_1d(dim, position):
@@ -116,7 +146,47 @@ def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0):
     return freqs_cis
 
 
+# "fp64": reference complex128 rotation. "fp32": the same rotation in float32 on real
+# cos/sin, one fused kernel (torch.compile) per direction; set by training.rope_impl.
+_ROPE_IMPL = "fp64"
+_rope_fp32_compiled = None
+
+
+def set_rope_impl(impl: str) -> None:
+    global _ROPE_IMPL
+    if impl not in ("fp64", "fp32"):
+        raise ValueError(f"rope impl must be 'fp64' or 'fp32', got {impl!r}")
+    _ROPE_IMPL = impl
+
+
+def _rope_fp32(x, cos, sin, num_heads: int):
+    b, s, _ = x.shape
+    xr = x.float().reshape(b, s, num_heads, -1, 2)
+    x1, x2 = xr[..., 0], xr[..., 1]
+    out = torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    return out.flatten(2).to(x.dtype)
+
+
+def _rope_apply_fp32(x, freqs, num_heads):
+    global _rope_fp32_compiled
+    cos = freqs.real.to(torch.float32)
+    sin = freqs.imag.to(torch.float32)
+    if _rope_fp32_compiled is None:
+        from openwam.model.compile_options import compile_outside_dispatch_modes
+
+        _rope_fp32_compiled = compile_outside_dispatch_modes(_rope_fp32, dynamic=False)
+    if _rope_fp32_compiled is not False:
+        try:
+            return _rope_fp32_compiled(x, cos, sin, num_heads)
+        except Exception as exc:  # pragma: no cover - compiler/toolchain specific
+            _rope_fp32_compiled = False
+            logging.getLogger(__name__).warning("fp32 RoPE torch.compile failed; running eager: %s", exc)
+    return _rope_fp32(x, cos, sin, num_heads)
+
+
 def rope_apply(x, freqs, num_heads):
+    if _ROPE_IMPL == "fp32":
+        return _rope_apply_fp32(x, freqs, num_heads)
     x = rearrange(x, "b s (n d) -> b s n d", n=num_heads)
     x_out = torch.view_as_complex(x.to(torch.float64).reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2))
     x_out = torch.view_as_real(x_out * freqs).flatten(2)
@@ -221,6 +291,9 @@ class GateModule(nn.Module):
         super().__init__()
 
     def forward(self, x, gate, residual):
+        if _per_frame(residual, gate):
+            b, l, d = residual.shape
+            return x + (gate * residual.reshape(b, gate.shape[1], -1, d)).view(b, l, d)
         return x + gate * residual
 
 
@@ -251,21 +324,10 @@ class DiTBlock(nn.Module):
     ):
         if context_mask is not None and context_mask.dim() == 3:
             context_mask = context_mask.unsqueeze(1)
-        has_seq = len(t_mod.shape) == 4
-        chunk_dim = 2 if has_seq else 1
         # msa: multi-head self-attention  mlp: multi-layer perceptron
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
-        ).chunk(6, dim=chunk_dim)
-        if has_seq:
-            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-                shift_msa.squeeze(2),
-                scale_msa.squeeze(2),
-                gate_msa.squeeze(2),
-                shift_mlp.squeeze(2),
-                scale_mlp.squeeze(2),
-                gate_mlp.squeeze(2),
-            )
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = split_time_modulation(
+            self.modulation, t_mod
+        )
         input_x = modulate(self.norm1(x), shift_msa, scale_msa)
         x = self.gate(x, gate_msa, self.self_attn(input_x, freqs, attn_mask=self_attn_mask))
         x = x + self.cross_attn(self.norm3(x), context, ctx_mask=context_mask)
@@ -304,7 +366,12 @@ class Head(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
     def forward(self, x, t_mod):
-        if len(t_mod.shape) == 3:
+        if t_mod.dim() == 4:  # per latent frame: (B, F, 1, dim)
+            shift, scale = (
+                self.modulation.unsqueeze(0).to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
+            ).chunk(2, dim=2)
+            x = self.head(modulate(self.norm(x), shift, scale))
+        elif len(t_mod.shape) == 3:
             shift, scale = (
                 self.modulation.unsqueeze(0).to(dtype=t_mod.dtype, device=t_mod.device) + t_mod.unsqueeze(2)
             ).chunk(2, dim=2)

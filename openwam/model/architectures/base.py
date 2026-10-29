@@ -673,6 +673,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if state_dict is None:
             state_dict = self.state_dict()
         state_dict = _exclude_vlm_from_state_dict(state_dict)
+        # safetensors rejects non-contiguous tensors, e.g. the frozen VAE Conv3d weights
+        # under training.vae_channels_last (channels_last_3d); save them in the default layout.
+        state_dict = {k: v if v.is_contiguous() else v.contiguous() for k, v in state_dict.items()}
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         save_file(state_dict, path, metadata=getattr(self, "checkpoint_metadata", None))
 
@@ -852,17 +855,31 @@ class BaseWAMArchitecture(ABC, nn.Module):
         use_gradient_checkpointing_offload: bool = False,
         max_timestep_boundary: float = 1.0,
         min_timestep_boundary: float = 0.0,
+        gradient_checkpointing_layers=None,
+        gradient_checkpointing_layers_video_only=None,
     ) -> None:
         """Set forward-time training flags consumed by ``prepare_inputs``.
 
         Trainers call this once during construction. Keeping these on the
         architecture keeps ``prepare_inputs(batch)`` self-contained — the
         trainer no longer needs to thread these flags through every loss call.
+        ``gradient_checkpointing_layers`` selects which layers take full-layer
+        recompute (architectures with a per-layer driver honor it; see
+        ``mot_driver.resolve_checkpoint_layers``);
+        ``gradient_checkpointing_layers_video_only`` overrides it for video-only
+        batches (None = same layers).
         """
+        self._gradient_checkpointing_layers = gradient_checkpointing_layers
+        self._gradient_checkpointing_layers_video_only = gradient_checkpointing_layers_video_only
         self._use_gradient_checkpointing = bool(use_gradient_checkpointing)
         self._use_gradient_checkpointing_offload = bool(use_gradient_checkpointing_offload)
         self._max_timestep_boundary = float(max_timestep_boundary)
         self._min_timestep_boundary = float(min_timestep_boundary)
+
+    def video_only_checkpoint_spec(self):
+        """Checkpoint-layer spec for video-only batches (see ``set_training_runtime``)."""
+        spec = getattr(self, "_gradient_checkpointing_layers_video_only", None)
+        return spec if spec is not None else getattr(self, "_gradient_checkpointing_layers", None)
 
     @torch.no_grad()
     def prepare_inputs(self, batch: list[dict]) -> dict:
@@ -893,6 +910,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         _device = self.device
 
         all_frames: list = []
+        all_frames_uint8: list = []
         all_prompts: list = []
         all_vace_videos: list = []
         all_ref_images: list = []
@@ -915,6 +933,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
                         raise ValueError(f"video_only requires an all-False {mask_name}")
             video_only_flags.append(video_only)
             all_frames.append(sample["video"])
+            all_frames_uint8.append(sample.get("video_uint8"))
             all_prompts.append(sample["prompt"])
             all_vace_videos.append(sample.get("vace_video"))
             all_ref_images.append(sample.get("first_frame_image"))
@@ -974,11 +993,14 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if any(ref_flags) and not all(ref_flags):
             raise ValueError("Mixed reference images in batch: all samples must be consistent.")
 
+        # video_uint8: the frames pre-stacked in the DataLoader workers (collate_samples).
+        extra = {"frames_uint8": all_frames_uint8} if all(f is not None for f in all_frames_uint8) else {}
         preprocessed = self.preprocess(
             frames=all_frames,
             text=all_prompts,
             vace_videos=all_vace_videos,
             ref_images=all_ref_images if ref_flags[0] else None,
+            **extra,
         )
 
         action_data = torch.cat(all_actions, dim=0) if all_actions[0] is not None else None

@@ -14,6 +14,7 @@ from torch.utils.checkpoint import checkpoint
 
 from openwam.model.action_backbone.scheduler import ActionScheduler
 from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
+from openwam.model.architectures.dual_system.mot_driver import resolve_checkpoint_layers
 from openwam.model.architectures.registry import register_architecture
 
 from .modules import TactileFlowStream, tactile_flow_loss
@@ -29,6 +30,7 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
     model_version = "touchwam_v2"
     new_weight_prefixes = ("touch_v2.",)
     supports_video_only_training = False
+    supports_frozen_input_overlap = True
     preprocess_modules = (
         "video_backbone.text_encoder",
         "video_backbone.reason1",
@@ -273,21 +275,30 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
         s = self.tactile_spec
         driver = self.mot_driver
         per_frame = driver._video_tokens_per_frame(vstate)
-        mask = driver._build_attention_mask(
-            vstate.hidden_states.shape[1],
-            0 if astate is None else astate.payload.x_action.shape[1],
-            per_frame,
-            device=vstate.hidden_states.device,
-        )
         bridges = {layer: i for i, layer in enumerate(s["bridge_layers"])}
         clean_tokens = per_frame * max(1, int(pipeline_inputs.get("num_clean_prefix_frames", 0) or 0))
+        checkpoint_spec = (self.video_only_checkpoint_spec() if astate is None else
+                           getattr(self, "_gradient_checkpointing_layers", None))
+        driver.checkpoint_layers = resolve_checkpoint_layers(checkpoint_spec, vb.num_layers)
+        s_video = vstate.hidden_states.shape[1]
+        s_action = 0 if astate is None else astate.payload.x_action.shape[1]
+        mask = None
+        if driver.mot_split_attention:
+            mask = driver._split_plan(s_video, s_action, per_frame,
+                                      clean_prefix_tokens=clean_tokens if astate is None else 0)
+        if mask is None:
+            mask = driver._build_attention_mask(s_video, s_action, per_frame, device=vstate.hidden_states.device)
+            if astate is None:
+                mask[:clean_tokens, clean_tokens:] = False
         if astate is None:
             # Native Wan run_block consumes this mask. Keep the clean visual
             # prefix isolated from noisy future tactile writes at later layers.
-            mask[:clean_tokens, clean_tokens:] = False
             vstate.extras["shared_attention_mask"] = mask
         for layer in range(vb.num_layers):
             if astate is None:
+                selected = driver.layer_checkpointed(layer)
+                vstate.use_gradient_checkpointing = use_gradient_checkpointing and selected
+                vstate.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload and selected
                 vstate = vb.run_block(layer, vstate)
             else:
                 vstate, astate = driver.step(
@@ -320,6 +331,8 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
                 vstate.hidden_states = vx
                 if astate is not None:
                     astate.payload.x_action = ax
+        vstate.use_gradient_checkpointing = use_gradient_checkpointing
+        vstate.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
         prediction = self._predict_tactile(future, touch_condition).masked_fill(~tactile_future_valid[..., None], 0)
         return vb.finalize(vstate), None if astate is None else ab.extract_prediction(astate), prediction
 

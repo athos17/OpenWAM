@@ -21,6 +21,7 @@ Usage:
     trainer.train()
 """
 
+import contextlib
 import itertools
 import logging
 import math
@@ -29,6 +30,7 @@ import os
 import torch
 from omegaconf import DictConfig
 
+from openwam.model.compile_options import eager_compiled_regions
 from openwam.train.utils.checkpointing import (
     compute_resume_position,
     find_latest_accel_state,
@@ -41,13 +43,18 @@ from openwam.train.utils.checkpointing import (
     validate_checkpoint_retention,
     verify_resume_normalization_stats,
 )
+from openwam.train.utils import deferred_allgather
 from openwam.train.utils.optimizer_groups import build_trainable_parameters
 from openwam.train.utils.seeding import per_step_seed, seed_process, wire_sampler_seed
+from openwam.train.utils.step_timing import StepTimer
+from openwam.train.utils.torch_profile import TorchProfile
 from openwam.train.utils.training_utils import (
     align_stop_step,
-    append_training_metrics,
+    LossCsvLog,
+    TrainingMetricsLog,
     build_cosine_scheduler,
     cfg_get,
+    collate_samples_with_video_uint8,
     init_wandb,
     log_parameter_counts,
     optimizer_steps_through,
@@ -56,6 +63,13 @@ from openwam.train.utils.training_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _checkpoint_layers_spec(spec):
+    """``training.gradient_checkpointing_layers`` as a plain Python value (ListConfig -> list)."""
+    if spec is None or isinstance(spec, (int, str)):
+        return spec
+    return [int(i) for i in spec]
 
 
 class OpenWAMTrainer:
@@ -178,9 +192,15 @@ class OpenWAMTrainer:
             use_gradient_checkpointing_offload=bool(t.use_gradient_checkpointing_offload),
             max_timestep_boundary=float(t.max_timestep_boundary),
             min_timestep_boundary=float(t.min_timestep_boundary),
+            gradient_checkpointing_layers=_checkpoint_layers_spec(t.get("gradient_checkpointing_layers")),
+            gradient_checkpointing_layers_video_only=_checkpoint_layers_spec(
+                t.get("gradient_checkpointing_layers_video_only")
+            ),
         )
 
         self.model = self  # self-reference some external callers expect
+        # Replaced in train() from training.step_timing; disabled stages are no-ops.
+        self.step_timer = StepTimer(enabled=False)
 
         is_main = self.accelerator is None or self.accelerator.is_main_process
         log_parameter_counts(self.architecture, is_main=is_main)
@@ -188,6 +208,16 @@ class OpenWAMTrainer:
     # (2) Driver — build optimizer/dataloader/scheduler -> setup dir -> accelerate prepare
     #     -> (resume) -> epoch/step loop{compute_loss -> log_step -> save} -> finish_training.
     def train(self, num_epochs: int = None, max_steps: int = None):
+        """Scope buffered logs and the DeepSpeed patch to this training run."""
+        try:
+            return self._train(num_epochs=num_epochs, max_steps=max_steps)
+        finally:
+            self._flush_logs()
+            if getattr(self, "_owns_deferred_allgather", False):
+                deferred_allgather.uninstall()
+                self._owns_deferred_allgather = False
+
+    def _train(self, num_epochs: int = None, max_steps: int = None):
         """Run the training loop (HuggingFace Accelerate distributed).
 
         Three entry modes (train.yaml finetune/resume fields): fresh, finetune warm-start
@@ -211,6 +241,9 @@ class OpenWAMTrainer:
         configured_save_steps = getattr(t, "save_steps", None)
         if configured_save_steps is not None and (type(configured_save_steps) is not int or configured_save_steps < 0):
             raise ValueError("training.save_steps must be a nonnegative integer or null")
+        stop_after_steps = getattr(t, "stop_after_steps", None)
+        if stop_after_steps is not None and (type(stop_after_steps) is not int or stop_after_steps < 1):
+            raise ValueError("training.stop_after_steps must be a positive integer or null")
 
         debug = bool(getattr(t, "debug", False))
         if debug:
@@ -237,6 +270,8 @@ class OpenWAMTrainer:
         if len(dataloader) == 0:
             raise ValueError("Training dataloader has no batches")
         batches_per_epoch = math.ceil(len(dataloader) / n_proc)
+        if stop_after_steps is not None:
+            stop_after_steps = align_stop_step(stop_after_steps, batches_per_epoch, grad_accum)
         requested_max_steps = max_steps
         if max_steps:
             max_steps = align_stop_step(max_steps, batches_per_epoch, grad_accum)
@@ -270,6 +305,11 @@ class OpenWAMTrainer:
         if self._batches_per_epoch != batches_per_epoch:
             raise ValueError("Prepared dataloader length differs from the scheduler/accumulation plan")
         self._last_checkpoint_step = None
+        # Build the default process group's all_reduce connections now. DeepSpeed reduces
+        # gradients on its own cloned world group, so otherwise their first use is the barrier
+        # inside the first checkpoint save, and a stray TCP connection (internet scanners reach
+        # NCCL's listening ports on the txy nodes) landing in that lazy setup aborts the job.
+        self.accelerator.wait_for_everyone()
 
         if self._run_seed is not None:
             from openwam.dataloader.mixture import MixtureDataset
@@ -309,7 +349,7 @@ class OpenWAMTrainer:
             global_step, opt_step, start_epoch, skip_first = self.resume_if_configured(
                 resume_state_dir, dataloader, grad_accum
             )
-            already_done = (num_epochs is not None and start_epoch >= num_epochs) or (
+            already_done = (stop_after_steps is not None and global_step >= stop_after_steps) or (num_epochs is not None and start_epoch >= num_epochs) or (
                 max_steps and global_step >= max_steps
             )
             if already_done:
@@ -326,6 +366,13 @@ class OpenWAMTrainer:
                     "for faithful mid-epoch resume.",
                     skip_first,
                 )
+
+        self._setup_step_timer(batch_size * n_proc, output_path, is_main)
+        timer = self.step_timer
+        profile = TorchProfile.from_cfg(self.cfg.training.get("torch_profile"), output_path=output_path,
+                                        rank=self.accelerator.process_index)
+        # Stage ranges come from StepTimer, so profiling needs training.step_timing.enabled.
+        timer.annotate = profile.enabled and timer.enabled
 
         _step_t0 = _time.monotonic()
         pbar = tqdm(total=total_steps, desc="Training", unit="step", initial=min(global_step, total_steps))
@@ -350,53 +397,64 @@ class OpenWAMTrainer:
             else:
                 epoch_iter = dataloader
             for batch in epoch_iter:
+                timer.begin_step()
                 if self._run_seed is not None:
                     step_seed = per_step_seed(self._run_seed, rank=self._rank, step=global_step)
                     torch.manual_seed(step_seed)
                     if torch.cuda.is_available():
                         torch.cuda.manual_seed_all(step_seed)
-                with self.accelerator.accumulate(self.architecture):
-                    losses = self.compute_loss(batch)
+                # The FLOP-counted step runs train-time compiled regions eagerly, forward and
+                # backward alike (checkpoint recompute must match the forward's path).
+                eager = eager_compiled_regions() if timer.counting_flops else contextlib.nullcontext()
+                with self.accelerator.accumulate(self.architecture), eager:
+                    with timer.stage("compute_loss"):
+                        losses = self.compute_loss(batch)
                     loss = losses["total"]
-                    self.accelerator.backward(loss)
+                    with timer.stage("backward"):
+                        self.accelerator.backward(loss)
 
                     grad_norm = torch.tensor(0.0, device=loss.device)
                     if self.accelerator.sync_gradients:
-                        if max_grad_norm is not None:
-                            grad_norm_val = self.accelerator.clip_grad_norm_(all_params, max_grad_norm)
-                            grad_norm = torch.tensor(float(grad_norm_val), device=loss.device)
-                        optimizer.step()
-                        if getattr(self, "_modality_optimizer", None) is not None:
-                            # Also clear activation after a ZeRO overflow-skipped step.
-                            self._modality_optimizer.reset_activation()
-                        if scheduler is not None:
-                            scheduler.step()
-                        optimizer.zero_grad()
-                        if not self.accelerator.optimizer_step_was_skipped:
-                            opt_step += 1
+                        with timer.stage("optimizer_wrapper"):
+                            if max_grad_norm is not None:
+                                grad_norm_val = self.accelerator.clip_grad_norm_(all_params, max_grad_norm)
+                                grad_norm = torch.tensor(float(grad_norm_val), device=loss.device)
+                            optimizer.step()
+                            if getattr(self, "_modality_optimizer", None) is not None:
+                                # Also clear activation after a ZeRO overflow-skipped step.
+                                self._modality_optimizer.reset_activation()
+                            if scheduler is not None:
+                                scheduler.step()
+                            optimizer.zero_grad()
+                            if not self.accelerator.optimizer_step_was_skipped:
+                                opt_step += 1
 
                 global_step += 1
 
-                metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
+                with timer.stage("metrics_reduce"):
+                    metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
+                timer.end_step()
 
                 current_lr = optimizer.param_groups[0]["lr"]
                 _now = _time.monotonic()
                 steps_per_sec = 1.0 / max(_now - _step_t0, 1e-9)
                 _step_t0 = _now
 
-                self.log_step(
-                    metrics=metrics,
-                    global_step=global_step,
-                    opt_step=opt_step,
-                    epoch=epoch,
-                    lr=current_lr,
-                    steps_per_sec=steps_per_sec,
-                    batch_size=batch_size,
-                    pbar=pbar,
-                    wandb_run=wandb_run,
-                    debug=debug,
-                    output_path=output_path,
-                )
+                with timer.stage("log_step"):
+                    self.log_step(
+                        metrics=metrics,
+                        global_step=global_step,
+                        opt_step=opt_step,
+                        epoch=epoch,
+                        lr=current_lr,
+                        steps_per_sec=steps_per_sec,
+                        batch_size=batch_size,
+                        pbar=pbar,
+                        wandb_run=wandb_run,
+                        debug=debug,
+                        output_path=output_path,
+                    )
+                timer.maybe_summarize(global_step)
 
                 # save_steps: write the weights line (+ the resumable full state when
                 # save_full_states_for_resume=true), then prune in lockstep.
@@ -405,6 +463,8 @@ class OpenWAMTrainer:
                 if save_steps and global_step % save_steps == 0:
                     checkpoint_pending = True
                 if (save_steps and checkpoint_pending and self.accelerator.sync_gradients):
+                    self._flush_logs()
+                    deferred_allgather.wait()
                     save_weights(self.accelerator, self.architecture, output_path, global_step, final=False)
                     if save_full_states_for_resume:
                         save_full_state(self.accelerator, output_path, global_step, opt_step, epoch,
@@ -414,13 +474,18 @@ class OpenWAMTrainer:
                     self._last_checkpoint_step = global_step
                     checkpoint_pending = False
 
-                if max_steps and global_step >= max_steps:
+                timer.finish_iteration()
+                profile.step()
+
+                if (max_steps and global_step >= max_steps) or (stop_after_steps and global_step >= stop_after_steps):
                     pbar.close()
+                    profile.stop()
                     self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run,
                                          opt_step=opt_step, epoch=epoch)
                     return
 
         pbar.close()
+        profile.stop()
         self.finish_training(output_path, global_step, save_steps, keep_last_k, is_main, wandb_run,
                              opt_step=opt_step, epoch=epoch)
 
@@ -473,7 +538,9 @@ class OpenWAMTrainer:
             batch_size=batch_size,
             shuffle=shuffle,
             num_workers=int(t.dataset_num_workers),
-            collate_fn=list,
+            # video_uint8_in_workers: frames stacked to uint8 in the workers, pinned by
+            # the DataLoader (bitwise-identical model input).
+            collate_fn=collate_samples_with_video_uint8 if getattr(t, "video_uint8_in_workers", False) else list,
             pin_memory=True,
         )
         if not shuffle:
@@ -612,12 +679,115 @@ class OpenWAMTrainer:
         # Propagate device down through architecture; frozen modules (T5/VAE) idempotent move.
         arch.set_dtype_device(arch.dtype, self.accelerator.device)
         arch.move_frozen_to_device(self.accelerator.device)
+        self._configure_input_fast_paths(arch)
+        self._configure_compute_options(arch)
+        cfg = getattr(self, "cfg", None)
+        if cfg is not None and bool(cfg.training.get("overlap_param_allgather", False)):
+            stage = getattr(self.architecture, "zero_optimization_stage", lambda: None)()
+            if stage not in (1, 2):
+                raise ValueError("training.overlap_param_allgather needs the DeepSpeed ZeRO-1/2 engine")
+            # Only known frozen preprocessing implementations may run while
+            # trainable parameter shards are in flight. Unknown/custom encoders
+            # use the earlier wait in compute_loss instead.
+            self._overlap_frozen_inputs = type(arch).__dict__.get("supports_frozen_input_overlap", False)
+            for path in getattr(arch, "preprocess_modules", ()):
+                module = arch
+                for part in path.split("."):
+                    module = getattr(module, part, None)
+                if isinstance(module, torch.nn.Module) and any(p.requires_grad for p in module.parameters()):
+                    self._overlap_frozen_inputs = False
+            deferred_allgather.install()
+            self._owns_deferred_allgather = True
         logger.info(
             "architecture wrapped (%s), device=%s",
             type(self.architecture).__name__,
             self.accelerator.device,
         )
         return optimizer, dataloader, scheduler
+
+    def _configure_input_fast_paths(self, arch) -> None:
+        """Opt-in frozen-encoder input options; runs after frozen modules reach the device.
+
+        ``training.text_padding`` / ``training.text_dedup`` (UMT5) and
+        ``training.vae_cudnn_benchmark`` / ``training.vae_channels_last`` /
+        ``training.vae_fused_norm`` (VAE encode). All default to the reference path.
+        """
+        cfg = getattr(self, "cfg", None)  # tests may build the trainer without a cfg
+        if cfg is None:
+            return
+        t = cfg.training
+        vb = getattr(arch, "video_backbone", None)
+        padding = str(t.get("text_padding", "max_length") or "max_length")
+        dedup = bool(t.get("text_dedup", False))
+        if padding != "max_length" or dedup:
+            if not hasattr(vb, "set_text_encode_options"):
+                raise ValueError("training.text_padding / text_dedup need a Wan video backbone")
+            vb.set_text_encode_options(padding=padding, dedup=dedup)
+            logger.info("text encode: padding=%s dedup=%s", padding, dedup)
+        cudnn_benchmark = bool(t.get("vae_cudnn_benchmark", False))
+        channels_last = bool(t.get("vae_channels_last", False))
+        fused_norm = bool(t.get("vae_fused_norm", False))
+        if cudnn_benchmark or channels_last or fused_norm:
+            if not hasattr(vb, "set_vae_encode_options"):
+                raise ValueError(
+                    "training.vae_cudnn_benchmark / vae_channels_last / vae_fused_norm need a Wan video backbone"
+                )
+            vb.set_vae_encode_options(cudnn_benchmark=cudnn_benchmark, channels_last=channels_last, fused_norm=fused_norm)
+            logger.info(
+                "VAE encode: cudnn_benchmark=%s channels_last=%s fused_norm=%s", cudnn_benchmark, channels_last, fused_norm
+            )
+
+    def _configure_compute_options(self, arch) -> None:
+        """Opt-in DiT compute options: ``training.rope_impl`` (Wan RoPE precision/kernel),
+        ``training.frame_time_modulation`` (per-latent-frame AdaLN modulation) and
+        ``training.dit_block_fusion`` (compiled elementwise regions per Wan block). Defaults
+        keep the reference path."""
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            return
+        t = cfg.training
+        if bool(t.get("frame_time_modulation", False)):
+            vb = getattr(arch, "video_backbone", None)
+            if not getattr(arch, "supports_frame_time_modulation", False) or not hasattr(
+                vb, "set_frame_time_modulation"
+            ):
+                raise ValueError(
+                    "training.frame_time_modulation needs a Wan video backbone and an architecture that "
+                    f"declares supports_frame_time_modulation (got {type(arch).__name__})"
+                )
+            vb.set_frame_time_modulation(True)
+            logger.info("Wan time modulation: per latent frame")
+        rope_impl = str(t.get("rope_impl", "fp64") or "fp64")
+        if rope_impl != "fp64":
+            from openwam.model.video_backbone.wan.models import dit as wan_dit
+
+            wan_dit.set_rope_impl(rope_impl)
+            logger.info("Wan RoPE: %s", rope_impl)
+        if bool(t.get("dit_block_fusion", False)):
+            vb = getattr(arch, "video_backbone", None)
+            if not hasattr(vb, "set_block_fusion"):
+                raise ValueError(f"training.dit_block_fusion needs a Wan video backbone (got {type(vb).__name__})")
+            vb.set_block_fusion(True)
+            logger.info("Wan block fusion: compiled elementwise regions")
+
+    def _setup_step_timer(self, samples_per_step: int, output_path: str, is_main: bool) -> None:
+        """``training.step_timing``: stage timers, incl. DeepSpeed's backward / step inside
+        ``accelerator.backward`` and the text / video encode inside ``prepare_inputs``."""
+        self.step_timer = StepTimer.from_cfg(
+            self.cfg.training.get("step_timing"),
+            samples_per_step=samples_per_step,
+            output_path=output_path,
+            is_main=is_main,
+        )
+        if not self.step_timer.enabled:
+            return
+        engine = self.architecture
+        if hasattr(engine, "backward") and hasattr(engine, "step") and hasattr(engine, "module"):
+            self.step_timer.wrap(engine, "backward", "ds_backward")
+            self.step_timer.wrap(engine, "step", "ds_step")
+        vb = getattr(self.accelerator.unwrap_model(self.architecture), "video_backbone", None)
+        if vb is not None:
+            vb._stage_timer = self.step_timer
 
     # (8) Called by train() on the resume path — restore full state, map step -> (start_epoch, skip).
     def resume_if_configured(self, resume_state_dir: str, dataloader, grad_accum: int) -> tuple[int, int, int, int]:
@@ -686,17 +856,24 @@ class OpenWAMTrainer:
             if -1 in codes or len(set(codes)) != 1:
                 raise ValueError(f"Distributed mixture requires aligned global modalities; got {codes}. Use GlobalModalitySampler.")
 
-        inputs = self.architecture.prepare_inputs(batch)
+        timer = getattr(self, "step_timer", None) or StepTimer(enabled=False)
+        if not getattr(self, "_overlap_frozen_inputs", False):
+            deferred_allgather.wait()
+        with timer.stage("prepare_inputs"), timer.count_flops("encoder"):
+            inputs = self.architecture.prepare_inputs(batch)
         has_action = any(sample.get("training_modality", "video_action")
                          in ("video_action", "video_action_tactile") for sample in batch)
         if self.lambda_action > 0 and has_action and inputs.get("actions") is None:
             raise ValueError("lambda_action > 0 but no action in data.")
 
-        result = self.architecture.compute_loss(
-            **inputs,
-            lambda_video=self.lambda_video,
-            lambda_action=self.lambda_action,
-        )
+        # All trainable video/action/tactile parameters must be gathered before use.
+        deferred_allgather.wait()
+        with timer.count_flops("model"):
+            result = self.architecture.compute_loss(
+                **inputs,
+                lambda_video=self.lambda_video,
+                lambda_action=self.lambda_action,
+            )
         if active_modality is not None:
             from openwam.dataloader.modality_sampler import batch_tactile_codec
 
@@ -737,6 +914,13 @@ class OpenWAMTrainer:
         return losses
 
     # (10) Called each step in train()'s loop — progress bar, wandb log, debug loss-history CSV.
+    def _flush_logs(self) -> None:
+        """Write buffered per-step rows (training.log_flush_every) before checkpoints / exit."""
+        for name in ("_loss_csv_log", "_training_metrics_log"):
+            log = getattr(self, name, None)
+            if log is not None:
+                log.flush()
+
     def log_step(
         self,
         *,
@@ -787,13 +971,38 @@ class OpenWAMTrainer:
             wandb_run.log(log_dict, step=global_step)
 
         is_main = self.accelerator is None or self.accelerator.is_main_process
+        cfg = getattr(self, "cfg", None)
+        flush_every = int(cfg.training.get("log_flush_every", 1) or 1) if cfg is not None else 1
         if is_main and output_path:
-            append_training_metrics(output_path, metrics=metrics, global_step=global_step,
-                                    opt_step=opt_step, epoch=epoch, lr=lr, steps_per_sec=steps_per_sec)
+            if getattr(self, "_training_metrics_log", None) is None:
+                self._training_metrics_log = TrainingMetricsLog(output_path, flush_every=flush_every)
+            self._training_metrics_log.add(metrics=metrics, global_step=global_step,
+                                          opt_step=opt_step, epoch=epoch, lr=lr, steps_per_sec=steps_per_sec)
 
+        cfg = getattr(self, "cfg", None)
+        loss_csv = bool(cfg.training.get("loss_log_csv", False)) if cfg is not None else False
         if not debug:
+            # training.loss_log_csv: the per-step CSV without the debug run overrides.
+            if loss_csv and is_main and output_path:
+                if getattr(self, "_loss_csv_log", None) is None:
+                    # Keep one CSV schema when V/VA/intensity/RGB batches alternate.
+                    csv_labels = [("action", "loss_action")]
+                    if getattr(self.architecture, "model_version", "").startswith("touchwam"):
+                        csv_labels.extend((key, "loss_" + key) for key in (
+                            "tactile", "tactile_contact", "tactile_distance", "tactile_deform",
+                            "tactile_intensity", "tactile_rgb"))
+                    self._loss_csv_log = LossCsvLog(
+                        output_path, labels=csv_labels, flush_every=flush_every
+                    )
+                self._loss_csv_log.add(
+                    metrics=metrics,
+                    global_step=global_step,
+                    opt_step=opt_step,
+                    epoch=epoch,
+                    lr=lr,
+                    steps_per_sec=steps_per_sec,
+                )
             return
-        is_main = self.accelerator is None or self.accelerator.is_main_process
         if not is_main:
             return
         loss_parts = " ".join(f"{name}={metrics[key]:.6f}" for name, key in labels)
@@ -839,6 +1048,8 @@ class OpenWAMTrainer:
         Falsy save_steps disables checkpoint IO, including retention. The final
         full state is kept under the same retention policy as periodic saves.
         """
+        self._flush_logs()
+        deferred_allgather.wait()
         if save_steps:
             if not self.accelerator.sync_gradients:
                 raise RuntimeError("Cannot finish training with unapplied accumulated gradients")

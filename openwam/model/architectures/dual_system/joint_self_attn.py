@@ -20,7 +20,11 @@ from torch import Tensor
 
 from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
-from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
+from openwam.model.architectures.dual_system.mot_driver import (
+    DualSystemMoTDriver,
+    resolve_checkpoint_layers,
+    run_video_blocks,
+)
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
@@ -96,6 +100,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             "mot_checkpoint_mixed_attn": bool(cfg.get("mot_checkpoint_mixed_attn", True)),
             "attention_mask_mode": str(cfg.get("attention_mask_mode", ACTION_SEES_VIDEO)),
             "video_attention_mask_mode": str(cfg.get("video_attention_mask_mode", "first_frame_causal")),
+            "mot_split_attention": bool(cfg.get("mot_split_attention", False)),
         }
         if self.video_backbone is not None:
             self.build_mot_driver()
@@ -167,6 +172,10 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         logger.info("Enabled dual self-attn MoT compile with torch.compile kwargs=%s", kwargs)
 
     supports_video_only_training = True
+    # vstate.time_mod only reaches the Wan blocks (MoT pre/post halves, video-only blocks),
+    # so the backbone may keep it per latent frame (training.frame_time_modulation).
+    supports_frame_time_modulation = True
+    supports_frozen_input_overlap = True
 
     def forward(
         self,
@@ -217,13 +226,16 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         )
 
         if noisy_actions is None or ab is None:
-            for block_id in range(vb.num_layers):
-                vstate = vb.run_block(block_id, vstate)
+            layers = resolve_checkpoint_layers(self.video_only_checkpoint_spec(), vb.num_layers)
+            vstate = run_video_blocks(vb, vstate, layers)
             return vb.finalize(vstate), None
 
         driver = self._mot_driver
         if driver is None:
             driver = self.build_mot_driver()
+        driver.checkpoint_layers = resolve_checkpoint_layers(
+            getattr(self, "_gradient_checkpointing_layers", None), driver.num_layers
+        )
 
         astate = ab.prepare_state(
             noisy_actions,
