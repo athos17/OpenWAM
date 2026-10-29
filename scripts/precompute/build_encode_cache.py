@@ -10,6 +10,7 @@ the online batch grouping matches.
 Sub-commands (Hydra overrides = the training run's overrides, after ``--``)::
 
     encode   --out DIR --shard I --num-shards N [--kinds text latent]  -- <overrides>
+    (every sub-command takes ``--config-name`` = the training run's config, default ``train``)
     finalize --out DIR --num-shards N [--kinds ...]                    -- <overrides>
     verify   --out DIR [--kinds ...]
     check    --out DIR [--groups 2] [--kinds ...]                      -- <overrides>
@@ -39,12 +40,15 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+CONFIG_NAME = "train"  # --config-name: the training run's Hydra config
+
+
 def compose_cfg(overrides: list):
     from hydra import compose, initialize_config_dir
     from omegaconf import OmegaConf
 
     with initialize_config_dir(config_dir=str(PROJECT_ROOT / "configs"), version_base=None):
-        cfg = compose(config_name="train", overrides=list(overrides))
+        cfg = compose(config_name=CONFIG_NAME, overrides=list(overrides))
     # Caches are built from the online path, never from another cache.
     OmegaConf.update(cfg, "dataloader.latent_cache_dir", None, force_add=True)
     OmegaConf.update(cfg, "dataloader.text_cache_dir", None, force_add=True)
@@ -85,12 +89,23 @@ def build_model(cfg, device):
     _, arch, _ = build_architecture_from_ckpt_dir(
         cfg.training.finetune_ckpt_path, weights_required=True, override_cfg=cfg
     )
+    from openwam.train.openwam_trainer import configure_input_fast_paths
+
     arch.set_dtype_device(arch.dtype, device)
     arch.freeze_modules(list(cfg.model.get("freeze", [])))
     vb = arch.video_backbone
     if vb.video_encoder is not None:
         raise ValueError("latent cache supports the native Wan VAE only")
+    # The run's training.vae_* options, so latents come from the training VAE kernels.
+    configure_input_fast_paths(cfg, arch)
     return arch, vb
+
+
+def sample_collate(cfg):
+    """The training DataLoader's collate (``training.video_uint8_in_workers``)."""
+    from openwam.train.utils.training_utils import collate_samples_with_video_uint8
+
+    return collate_samples_with_video_uint8 if cfg.training.get("video_uint8_in_workers", False) else list
 
 
 # ----------------------------------------------------------------------------
@@ -104,14 +119,11 @@ def online_text(vb, prompts):
     return wan_encode.encode_text(prompts, tokenizer=vb._tokenizer, text_encoder=vb.text_encoder, device=vb.device)
 
 
-def online_latents(vb, clips):
-    from openwam.model.video_backbone.wan import encode as wan_encode
-
-    import torch
-
-    videos = [wan_encode.preprocess_video(c, encoder=vb.video_encoder, dtype=vb.dtype, device=vb.device) for c in clips]
-    stacked = torch.cat(videos, dim=0)
-    latents = wan_encode.encode_video(stacked, vae=vb.vae, encoder=vb.video_encoder)
+def online_latents(vb, samples):
+    """``WanBase.encode_video_batch`` on collated samples, as ``preprocess_input_for_train`` calls it."""
+    clips = [s["video"] for s in samples]
+    uint8 = [s.get("video_uint8") for s in samples]
+    _, latents = vb.encode_video_batch(clips, frames_uint8=uint8 if all(u is not None for u in uint8) else None)
     return latents.to(dtype=vb.dtype, device=vb.device)
 
 
@@ -224,7 +236,7 @@ def encode_latent_shard(args, cfg, dataset, vb, out: Path):
         batch_size=BATCH,
         shuffle=False,
         num_workers=args.workers,
-        collate_fn=list,
+        collate_fn=sample_collate(cfg),
         prefetch_factor=4,
         persistent_workers=False,
     )
@@ -237,7 +249,7 @@ def encode_latent_shard(args, cfg, dataset, vb, out: Path):
         for batch in loader:
             for k, sample in enumerate(batch):
                 check_window(dataset, windows, done + k, sample)
-            latents = online_latents(vb, padded([s["video"] for s in batch]))
+            latents = online_latents(vb, padded(batch))
             if latents.dtype != torch.bfloat16:
                 raise ValueError(f"unexpected latent dtype {latents.dtype}")
             if rows is None:
@@ -267,6 +279,7 @@ def encode_latent_shard(args, cfg, dataset, vb, out: Path):
         extra={
             "signature_sha256": ec.digest(signature),
             "encoder_fingerprint": ec.vae_fingerprint(vb),
+            "vae_encode_options": vb.vae_encode_options(),
             "tokenizer_sha256": None,
             "row_shape": row_shape,
             "num_rows": len(dataset),
@@ -335,6 +348,7 @@ def cmd_finalize(args, overrides):
                 "batch": records[0].get("encode_batch", BATCH),
                 "encode_seconds_per_shard": [r["encode_seconds"] for r in records],
                 "hosts": sorted({r["host"] for r in records}),
+                **({"vae_encode_options": records[0].get("vae_encode_options")} if kind == "latent" else {}),
             },
         )
         log(f"{kind}: meta.json rows={num_rows} shape={row_shape} manifest={meta['manifest_sha256'][:16]}")
@@ -428,8 +442,8 @@ def cmd_check(args, overrides):
                         idx = aligned_group(rng, cache.meta["shards"])
                     else:
                         idx = random_group(rng, len(dataset))
-                    samples = [dataset[i] for i in idx]
-                    online = online_latents(vb, padded([s["video"] for s in samples]))[: len(idx)]
+                    samples = sample_collate(cfg)([dataset[i] for i in idx])
+                    online = online_latents(vb, padded(samples))[: len(idx)]
                     cached = torch.stack([cache.get(i) for i in idx]).to(device)
                     entry = compare(cached, online)
                     entry.update(mode=mode, rows=[idx[0], idx[-1]])
@@ -459,6 +473,7 @@ def raise_nofile_limit():
 
 
 def main():
+    global BATCH, CONFIG_NAME
     raise_nofile_limit()
     argv = sys.argv[1:]
     overrides = []
@@ -474,11 +489,12 @@ def main():
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--groups", type=int, default=2, help="check: batches per mode and kind")
     ap.add_argument("--seed", type=int, default=0, help="check: batch selection seed")
+    ap.add_argument("--config-name", default=CONFIG_NAME, help="the training run's Hydra config name")
     ap.add_argument("--batch", type=int, default=48,
                     help="encoder call batch; the VAE is batch-size sensitive, so match the training per-GPU batch")
     args = ap.parse_args(argv)
-    global BATCH
     BATCH = args.batch
+    CONFIG_NAME = args.config_name
     if not 0 <= args.shard < args.num_shards:
         ap.error("--shard must be in [0, --num-shards)")
     {"encode": cmd_encode, "finalize": cmd_finalize, "verify": cmd_verify, "check": cmd_check}[args.command](

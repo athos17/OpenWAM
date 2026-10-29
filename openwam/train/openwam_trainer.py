@@ -69,6 +69,37 @@ def _checkpoint_layers_spec(spec):
     return [int(i) for i in spec]
 
 
+def configure_input_fast_paths(cfg, arch) -> None:
+    """Opt-in frozen-encoder input options; runs after frozen modules reach the device
+    (the trainer, and the offline latent cache builder so cached rows use the same VAE kernels).
+
+    ``training.text_padding`` / ``training.text_dedup`` (UMT5) and
+    ``training.vae_cudnn_benchmark`` / ``training.vae_channels_last`` /
+    ``training.vae_fused_norm`` (VAE encode). All default to the reference path.
+    """
+    t = cfg.training
+    vb = getattr(arch, "video_backbone", None)
+    padding = str(t.get("text_padding", "max_length") or "max_length")
+    dedup = bool(t.get("text_dedup", False))
+    if padding != "max_length" or dedup:
+        if not hasattr(vb, "set_text_encode_options"):
+            raise ValueError("training.text_padding / text_dedup need a Wan video backbone")
+        vb.set_text_encode_options(padding=padding, dedup=dedup)
+        logger.info("text encode: padding=%s dedup=%s", padding, dedup)
+    cudnn_benchmark = bool(t.get("vae_cudnn_benchmark", False))
+    channels_last = bool(t.get("vae_channels_last", False))
+    fused_norm = bool(t.get("vae_fused_norm", False))
+    if cudnn_benchmark or channels_last or fused_norm:
+        if not hasattr(vb, "set_vae_encode_options"):
+            raise ValueError(
+                "training.vae_cudnn_benchmark / vae_channels_last / vae_fused_norm need a Wan video backbone"
+            )
+        vb.set_vae_encode_options(cudnn_benchmark=cudnn_benchmark, channels_last=channels_last, fused_norm=fused_norm)
+        logger.info(
+            "VAE encode: cudnn_benchmark=%s channels_last=%s fused_norm=%s", cudnn_benchmark, channels_last, fused_norm
+        )
+
+
 class OpenWAMTrainer:
     """Joint video-action trainer for OpenWAM. See module docstring for call order.
 
@@ -639,36 +670,10 @@ class OpenWAMTrainer:
         return optimizer, dataloader, scheduler
 
     def _configure_input_fast_paths(self, arch) -> None:
-        """Opt-in frozen-encoder input options; runs after frozen modules reach the device.
-
-        ``training.text_padding`` / ``training.text_dedup`` (UMT5) and
-        ``training.vae_cudnn_benchmark`` / ``training.vae_channels_last`` /
-        ``training.vae_fused_norm`` (VAE encode). All default to the reference path.
-        """
+        """Opt-in frozen-encoder input options; runs after frozen modules reach the device."""
         cfg = getattr(self, "cfg", None)  # tests may build the trainer without a cfg
-        if cfg is None:
-            return
-        t = cfg.training
-        vb = getattr(arch, "video_backbone", None)
-        padding = str(t.get("text_padding", "max_length") or "max_length")
-        dedup = bool(t.get("text_dedup", False))
-        if padding != "max_length" or dedup:
-            if not hasattr(vb, "set_text_encode_options"):
-                raise ValueError("training.text_padding / text_dedup need a Wan video backbone")
-            vb.set_text_encode_options(padding=padding, dedup=dedup)
-            logger.info("text encode: padding=%s dedup=%s", padding, dedup)
-        cudnn_benchmark = bool(t.get("vae_cudnn_benchmark", False))
-        channels_last = bool(t.get("vae_channels_last", False))
-        fused_norm = bool(t.get("vae_fused_norm", False))
-        if cudnn_benchmark or channels_last or fused_norm:
-            if not hasattr(vb, "set_vae_encode_options"):
-                raise ValueError(
-                    "training.vae_cudnn_benchmark / vae_channels_last / vae_fused_norm need a Wan video backbone"
-                )
-            vb.set_vae_encode_options(cudnn_benchmark=cudnn_benchmark, channels_last=channels_last, fused_norm=fused_norm)
-            logger.info(
-                "VAE encode: cudnn_benchmark=%s channels_last=%s fused_norm=%s", cudnn_benchmark, channels_last, fused_norm
-            )
+        if cfg is not None:
+            configure_input_fast_paths(cfg, arch)
 
     def _configure_compute_options(self, arch) -> None:
         """Opt-in DiT compute options: ``training.rope_impl`` (Wan RoPE precision/kernel),

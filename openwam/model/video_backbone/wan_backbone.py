@@ -871,6 +871,38 @@ class WanBase(VideoBackbone):
         timer = getattr(self, "_stage_timer", None)
         return timer.stage(name) if timer is not None else contextlib.nullcontext()
 
+    def encode_video_batch(self, frames, *, frames_uint8=None):
+        """Training-path VAE encode of a batch of clips -> ``(stacked_inputs, latents)``.
+
+        Applies the ``set_vae_encode_options`` options; the offline latent cache
+        builder calls this too, so cached rows come from the same kernels.
+        """
+        # Runs on the host while the text encoder executes: nothing before it syncs,
+        # and the batch upload is pinned + non-blocking.
+        with self._timed("preprocess_video"):
+            stacked_inputs = wan_encode.preprocess_video_batch(
+                frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device,
+                uint8_clips=frames_uint8,
+            )
+        with (
+            self._timed("encode_video"),
+            _cudnn_autotune(getattr(self, "_vae_cudnn_benchmark", False)),
+            wan_vae.vae_fusion(getattr(self, "_vae_fused_norm", False)),
+        ):
+            vae_inputs = stacked_inputs
+            if getattr(self, "_vae_channels_last", False):
+                vae_inputs = stacked_inputs.contiguous(memory_format=torch.channels_last_3d)
+            input_latents = wan_encode.encode_video(vae_inputs, vae=self.vae, encoder=self.video_encoder)
+        return stacked_inputs, input_latents
+
+    def vae_encode_options(self) -> dict:
+        """The ``set_vae_encode_options`` state (recorded in latent caches)."""
+        return {
+            "cudnn_benchmark": bool(getattr(self, "_vae_cudnn_benchmark", False)),
+            "channels_last": bool(getattr(self, "_vae_channels_last", False)),
+            "fused_norm": bool(getattr(self, "_vae_fused_norm", False)),
+        }
+
     def preprocess_input_for_train(self, *, frames=None, text=None, **kw) -> dict:
         """Unified train preprocessing: raw data (``frames``/``text``, optional
         ``vace_videos``/``ref_images`` in kw) → the denoising-loop input dict.
@@ -916,22 +948,7 @@ class WanBase(VideoBackbone):
                 context, seq_lens = wan_encode.load_cached_text(*cached_text, device=self.device, padding=text_padding)
 
         if cached_latents is None:
-            # Runs on the host while the text encoder executes: nothing above syncs, and
-            # the batch upload is pinned + non-blocking.
-            with self._timed("preprocess_video"):
-                stacked_inputs = wan_encode.preprocess_video_batch(
-                    frames, encoder=self.video_encoder, dtype=self.dtype, device=self.device,
-                    uint8_clips=kw.get("frames_uint8"),
-                )
-            with (
-                self._timed("encode_video"),
-                _cudnn_autotune(getattr(self, "_vae_cudnn_benchmark", False)),
-                wan_vae.vae_fusion(getattr(self, "_vae_fused_norm", False)),
-            ):
-                vae_inputs = stacked_inputs
-                if getattr(self, "_vae_channels_last", False):
-                    vae_inputs = stacked_inputs.contiguous(memory_format=torch.channels_last_3d)
-                input_latents = wan_encode.encode_video(vae_inputs, vae=self.vae, encoder=self.video_encoder)
+            stacked_inputs, input_latents = self.encode_video_batch(frames, frames_uint8=kw.get("frames_uint8"))
         else:
             stacked_inputs = None
             with self._timed("encode_video"):
