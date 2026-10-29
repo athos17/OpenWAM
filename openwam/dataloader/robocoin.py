@@ -19,6 +19,7 @@ validated against the exact manifest population before stats are accepted.
 from __future__ import annotations
 
 import csv
+import copy
 import hashlib
 import io
 import json
@@ -1385,6 +1386,39 @@ class MultiRobotCOINDataset(MultiLeRobotV3Reader):
     @property
     def action_dim(self):
         return self._buckets[0].action_dim if self._buckets else _ACTION_DIM
+
+    def normalization_sources_for_config(self, config):
+        """Keep each embodiment's exact raw transform in mixed checkpoints.
+
+        Dexterous embodiments have different raw widths and unify maps. Export
+        the already-resolved reader transform per robot, never pool those
+        transforms into a single denormalizer or modify the published dataset.
+        """
+        sources = {}
+        keys = ("mean", "std", "min", "max", "q01", "q99")
+        for bucket in self._buckets:
+            resolved = copy.deepcopy(dict(config))
+            resolved.update(action_mode="eef", normalize_mode=bucket._normalize_mode,
+                            normalization_robot_type=bucket.robot_type)
+            resolved["unify_action"] = bucket._unify
+            if bucket._unify:
+                resolved["unify_action_map"] = bucket._unify_dst_index.tolist()
+                resolved["unify_state_map"] = bucket._unify_state_dst_index.tolist()
+            stats = bucket._normalization_stats
+            payload = None if stats is None else {"eef": {
+                key: np.asarray(stats[key], dtype=np.float32).copy() for key in keys}}
+            previous = sources.get(bucket.robot_type)
+            if previous is not None:
+                old = previous["stats_payload"]
+                same_stats = ((old is None and payload is None) or (
+                    old is not None and payload is not None and
+                    all(np.array_equal(old["eef"][k], payload["eef"][k]) for k in keys)))
+                if previous["config"] != resolved or not same_stats:
+                    raise DataContractError(f"RoboCOIN robot_type {bucket.robot_type!r} has incompatible checkpoint transforms")
+            else:
+                sources[bucket.robot_type] = dict(config=resolved, training_modality="video_action",
+                                                  stats_path=None, stats_payload=payload)
+        return dict(sorted(sources.items()))
 
     @classmethod
     def from_config(cls, config, split: str = "train"):

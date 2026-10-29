@@ -1,0 +1,28 @@
+# Frozen 20-hour RoboCOIN subset prepared on 2026-10-29.
+type: robocoin
+source_kind: robot
+expected_modalities:
+- video_action
+require_publication: true
+strict_buckets: true
+dataset_dir: /mnt/pfs/v89atp/workspace/dataset/robocoin_20h_v1_20261029
+trim_csv: /mnt/pfs/v89atp/workspace/dataset/robocoin_20h_v1_20261029/selection_trim.csv
+num_frames: 33
+video_stride: 4
+window_stride: 1
+height: 384
+width: 320
+multiview: true
+split: train
+normalize_mode: quantile
+enable_action_supervision: true
+unify_action: true
+unify_action_map:
+- 0-9
+- 34-43
+total_hours: null
+color_jitter:
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.2
+  hue: 0.0

@@ -273,10 +273,18 @@ class MixtureDataset(BaseDataset):
         """Independent, explicitly configured source artifacts for save/deploy."""
         if self.source_configs is None:
             raise ValueError("Saving a mixture requires source_configs; build it from the dataset config")
-        return {name: {"config": copy.deepcopy(config), "training_modality": modality,
-                       "stats_path": getattr(dataset, "normalization_stats_path", None)}
-                for name, dataset, config, modality in zip(
-                    self._names, self._datasets, self.source_configs, self.source_modalities)}
+        sources = {}
+        for name, dataset, config, modality in zip(
+                self._names, self._datasets, self.source_configs, self.source_modalities):
+            expand = getattr(dataset, "normalization_sources_for_config", None)
+            entries = ({f"{name}/{key}": value for key, value in expand(config).items()}
+                       if expand is not None else {name: {
+                           "config": copy.deepcopy(config), "training_modality": modality,
+                           "stats_path": getattr(dataset, "normalization_stats_path", None)}})
+            if sources.keys() & entries.keys():
+                raise ValueError("Expanded normalization source names collide")
+            sources.update(entries)
+        return sources
 
     @property
     def training_data_contract(self) -> dict:

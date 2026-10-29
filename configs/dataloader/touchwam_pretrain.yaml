@@ -5,6 +5,10 @@
 # FTP without action contracts is excluded, never downgraded to ego video.
 # Data publication must be complete before training. Hour budgets remain optional.
 # FTP-1 sharpa is intentionally absent; do not add it alongside native SharpaDex.
+defaults:
+  - pretrain_data/robocoin_20h@datasets.robocoin
+  - _self_
+
 type: mixture
 weight_strategy: proportional
 data_root: ${oc.env:TOUCHWAM_DATA_ROOT,/mnt/pfs/v89atp/workspace/dataset/touchwam_pretrain_v1_20261028}

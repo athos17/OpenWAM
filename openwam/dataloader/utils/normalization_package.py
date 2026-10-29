@@ -1,11 +1,28 @@
 """Versioned, independently verifiable normalization assets for mixed sources."""
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
 
+import numpy as np
+
 MANIFEST_NAME = "normalization_sources.json"
 SCHEMA_VERSION = 1
+
+
+def _payload_bytes(source):
+    """Serialize a reader's resolved transform without writing into its dataset."""
+    payload = source.get("stats_payload")
+    if payload is None:
+        return None
+    if source.get("stats_path"):
+        raise ValueError("A normalization source cannot provide both a path and a payload")
+    if not isinstance(payload, dict) or not payload:
+        raise ValueError("Normalization payload must be a non-empty mode dictionary")
+    buffer = io.BytesIO()
+    np.save(buffer, payload, allow_pickle=True)
+    return buffer.getvalue()
 
 
 def file_sha256(path):
@@ -21,14 +38,17 @@ def _manifest_for(sources):
     for name, source in sources.items():
         config = source["config"]
         active = config.get("normalize_mode") not in (None, "", "none", "null")
-        stats = source["stats_path"]
-        if active and not stats:
+        stats = source.get("stats_path")
+        payload = _payload_bytes(source)
+        has_stats = bool(stats) or payload is not None
+        if active and not has_stats:
             raise ValueError(f"Normalized source {name!r} has no statistics artifact")
         if active and not config.get("action_mode"):
             raise ValueError(f"Normalized source {name!r} requires an explicit action_mode")
-        relative = f"normalization/{hashlib.sha256(name.encode()).hexdigest()[:16]}/normalization_stats.npy" if stats else None
+        relative = f"normalization/{hashlib.sha256(name.encode()).hexdigest()[:16]}/normalization_stats.npy" if has_stats else None
+        checksum = hashlib.sha256(payload).hexdigest() if payload is not None else file_sha256(stats) if stats else None
         entries[name] = {"config": config, "training_modality": source["training_modality"],
-                         "stats_file": relative, "stats_sha256": file_sha256(stats) if stats else None}
+                         "stats_file": relative, "stats_sha256": checksum}
     return {"schema_version": SCHEMA_VERSION, "sources": entries}
 
 
@@ -78,7 +98,11 @@ def save_normalization_package(output_dir, sources):
         if target.exists() and file_sha256(target) != entry["stats_sha256"]:
             raise ValueError(f"Existing source artifact differs: {target}")
         temporary = target.with_suffix(".npy.tmp")
-        shutil.copyfile(source["stats_path"], temporary)
+        payload = _payload_bytes(source)
+        if payload is None:
+            shutil.copyfile(source["stats_path"], temporary)
+        else:
+            temporary.write_bytes(payload)
         if file_sha256(temporary) != entry["stats_sha256"]:
             raise ValueError(f"Source statistics changed while saving {name!r}")
         temporary.replace(target)
