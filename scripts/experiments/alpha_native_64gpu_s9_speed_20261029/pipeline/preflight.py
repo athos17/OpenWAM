@@ -41,9 +41,17 @@ def flatten(value, prefix=''):
     return out
 
 
+# Written into the saved config by the trainer, not composed: the Wan component / tokenizer
+# specs come from the Alpha checkpoint's config.yaml (propagate_component_specs).
+RUNTIME_PREFIXES = ('model.video_backbone.components', 'model.video_backbone.tokenizer.', 'project.output_dir')
+
+
 def resolved(name):
+    from scripts.train import _inject_project_seed  # project.seed -> dataloader.seed, as at launch
+
     with initialize_config_dir(config_dir=str(ROOT / 'release/configs'), version_base=None):
         cfg = compose(config_name=name)
+    _inject_project_seed(cfg)
     return cfg, flatten(OmegaConf.to_container(cfg, resolve=False))
 
 
@@ -54,7 +62,7 @@ def main():
     baseline = flatten(yaml.safe_load((BASELINE_RUN / 'config.yaml').read_text()))
     _, base = resolved(BASE_CONFIG_NAME)
     mismatched = {k: [baseline[k], base.get(k, '<missing>')] for k in baseline
-                  if k != 'project.output_dir' and base.get(k, '<missing>') != baseline[k]}
+                  if not k.startswith(RUNTIME_PREFIXES) and base.get(k, '<missing>') != baseline[k]}
     assert not mismatched, f'base config differs from the baseline run: {mismatched}'
     report['base_equals_baseline_keys'] = len(baseline)
     report['base_new_keys'] = {k: base[k] for k in sorted(set(base) - set(baseline))}
