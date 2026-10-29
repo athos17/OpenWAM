@@ -1,4 +1,5 @@
-"""Production trainer for `settings.json` steps of the baseline's schedule and data order.
+"""Production trainer on the baseline's schedule and data order: `settings.json` steps
+(speed test, no checkpoints) or, with steps 0, the whole run with the config's checkpointing.
 
 Records the baseline's per-step fields (sample ids, lr, losses, step rate) in
 <output>/metrics.jsonl so compare_with_baseline.py can match the runs step by step.
@@ -16,7 +17,8 @@ import torch
 from hydra import compose, initialize_config_dir
 
 sys.path.insert(0, str(Path(__file__).parent))
-from runtime import CONFIG_NAME, OUTPUT, ROOT, SAMPLE_KEYS, release_hash, settings, write_json  # noqa: E402
+from runtime import (CONFIG_NAME, ROOT, SAMPLE_KEYS, output_root, phase, release_hash, settings,  # noqa: E402
+                     write_json)
 
 from openwam.dataloader.registry import build_dataset  # noqa: E402
 from openwam.train.openwam_trainer import OpenWAMTrainer  # noqa: E402
@@ -61,7 +63,7 @@ class SpeedTrainer(OpenWAMTrainer):
         self.write_report('passed', output_path)
 
     def write_report(self, status, output_path):
-        write_json(ROOT / 'results' / f'speed_rank{self.accelerator.process_index}.json', {
+        write_json(ROOT / 'results' / f'{phase()}_rank{self.accelerator.process_index}.json', {
             'status': status, 'release_manifest_sha256': release_hash(), 'output_path': str(output_path),
             'last_step': self.last and self.last['step'], 'elapsed_seconds': time.time() - self.started,
             'peak_gpu_memory_bytes': torch.cuda.max_memory_allocated(),
@@ -74,9 +76,10 @@ def main():
     logging.basicConfig(level=logging.WARNING)
     torch.cuda.set_device(int(os.environ['LOCAL_RANK']))
     torch.distributed.init_process_group('nccl', timeout=timedelta(seconds=1200))
-    overrides = [f'training.stop_after_steps={run["steps"]}', 'training.save_steps=0',
-                 'training.save_full_states_for_resume=false', f'training.output_path={OUTPUT}',
-                 f'training.dataset_num_workers={run["dataset_num_workers"]}']
+    overrides = [f'training.output_path={output_root()}', f'training.dataset_num_workers={run["dataset_num_workers"]}']
+    if phase() == 'speed':
+        overrides += [f'training.stop_after_steps={run["steps"]}', 'training.save_steps=0',
+                      'training.save_full_states_for_resume=false']
     with initialize_config_dir(config_dir=str(ROOT / 'release/configs'), version_base=None):
         cfg = compose(config_name=CONFIG_NAME, overrides=overrides)
     t = cfg.training

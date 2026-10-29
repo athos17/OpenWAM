@@ -13,7 +13,10 @@ BASE_CONFIG_NAME = 'train_alpha_native_64gpu_aug'
 # The formal run this test reproduces (same data order and LR schedule) and compares against.
 BASELINE_SETUP = BASE / 'setup/sharpa_native_64gpu_aug_20261026'
 BASELINE_RUN = BASE / 'outputs/alpha_native_64gpu_aug/2026-10-26_23-07-36'
-OUTPUT = BASE / 'outputs/alpha_native_64gpu_aug_s9_speed'
+SPEED_OUTPUT = BASE / 'outputs/alpha_native_64gpu_aug_s9_speed'
+# Full run: the config's own output_path, save_steps (2000, all kept) and resume states.
+FULL_OUTPUT = BASE / 'outputs/alpha_native_64gpu_aug_s9'
+FULL_STEPS = 23845
 SAMPLE_KEYS = ('episode_id', 'episode_start_frame', '_dataset_name', '_dataset_index')
 
 
@@ -35,6 +38,15 @@ def write_json(path, value):
 
 def settings():
     return json.loads((ROOT / 'settings.json').read_text())
+
+
+def phase():
+    """'speed' (stop after settings.steps, no checkpoints) or 'full' (steps 0: the whole schedule)."""
+    return 'speed' if settings()['steps'] else 'full'
+
+
+def output_root():
+    return SPEED_OUTPUT if phase() == 'speed' else FULL_OUTPUT
 
 
 def release_hash():

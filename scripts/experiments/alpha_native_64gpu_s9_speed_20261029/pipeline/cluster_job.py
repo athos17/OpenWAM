@@ -1,11 +1,11 @@
-"""Submit / inspect / stop the speed job with dev-cpu's authenticated AIHC client.
+"""Submit / inspect / stop the speed or full job with dev-cpu's authenticated AIHC client.
 
 Never exports or prints credentials: every API result goes through api.redact.
 
     cluster_job.py request|create|status|logs|stop
     cluster_job.py wait-submit [--poll-minutes 5] [--timeout-hours 24]
         waits until the baseline formal job (alpha_native_64gpu_aug) has finished, then
-        creates the speed job (same resources as the baseline).
+        creates the job (same resources as the baseline).
 """
 import argparse
 from datetime import datetime, timezone
@@ -17,7 +17,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).parent))
-from runtime import BASELINE_SETUP, ROOT, require_preflight, settings, write_json  # noqa: E402
+from runtime import BASELINE_SETUP, ROOT, phase, require_preflight, settings, write_json  # noqa: E402
 
 POOL = 'aihc-serverless'
 QUEUE = 'aihcq-7crsdg0y5p20'
@@ -28,9 +28,10 @@ def job_request(stamp=None):
     stamp = stamp or datetime.now(timezone.utc).strftime('%m%d-%H%M%S')
     return {
         'resourcePoolId': POOL, 'queueID': QUEUE,
-        'name': f'openwam-alpha-native-s9-speed-{settings()["steps"]}s-w{settings()["dataset_num_workers"]}-{stamp}',
+        'name': (f'openwam-alpha-native-s9-{phase()}-' + (f'{settings()["steps"]}s-' if settings()['steps'] else '')
+                 + f'w{settings()["dataset_num_workers"]}-{stamp}'),
         'jobType': 'PyTorchJob',
-        'command': f'bash {shlex.quote(str(ROOT / "pipeline/cluster_bootstrap.sh"))} speed',
+        'command': f'bash {shlex.quote(str(ROOT / "pipeline/cluster_bootstrap.sh"))} {phase()}',
         # Identical to the baseline's request (setup/sharpa_native_64gpu_aug_20261026/results/formal_request.json).
         'jobSpec': {'replicas': 8, 'image': 'registry.baidubce.com/inference/aibox-ubuntu:v2.0-22.04',
                     'resources': [{'name': 'baidu.com/a800_80g_cgpu', 'quantity': 8},
@@ -50,8 +51,8 @@ def describe(api, job_id):
 
 def create(api):
     require_preflight()
-    record = ROOT / 'results/speed_job.json'
-    request_file = ROOT / 'results/speed_request.json'
+    record = ROOT / 'results' / f'{phase()}_job.json'
+    request_file = ROOT / 'results' / f'{phase()}_request.json'
     # A persistent request marker prevents a double submission after an API timeout;
     # an ambiguous response is inspected on the platform using the saved name.
     with (ROOT / 'results/submission.lock').open('a') as lock:
@@ -101,14 +102,14 @@ def main():
         return create(api)
     if args.operation == 'wait-submit':
         return wait_submit(api, args.poll_minutes, args.timeout_hours)
-    job_id = json.loads((ROOT / 'results/speed_job.json').read_text())['jobId']
+    job_id = json.loads((ROOT / 'results' / f'{phase()}_job.json').read_text())['jobId']
     if args.operation == 'stop':
         print(api.redact(json.dumps(api.call('StopJob', resourcePoolId=POOL, queueID=QUEUE, jobId=job_id))))
         return
     result = describe(api, job_id)
     details = result.get('job', result)
     if args.operation == 'status':
-        write_json(ROOT / 'results/speed_status.json', result)
+        write_json(ROOT / 'results' / f'{phase()}_status.json', result)
         compact = {k: details[k] for k in ('jobId', 'name', 'status', 'createdAt', 'finishedAt', 'message') if k in details}
         compact['pods'] = [{k: v for k, v in pod.items() if k in ('name', 'nodeName', 'status', 'reason')}
                            for pod in details.get('pods', [])]
@@ -118,7 +119,7 @@ def main():
             logs = api.call('DescribeJobLogs', resourcePoolId=POOL, queueID=QUEUE, jobId=job_id,
                             podName=pod['name'], maxLines=1000)
             logs = json.loads(api.redact(json.dumps(logs)))
-            write_json(ROOT / 'results' / f"speed_{pod['name']}_logs.json", logs)
+            write_json(ROOT / 'results' / f"{phase()}_{pod['name']}_logs.json", logs)
             print(json.dumps({'pod': pod['name'], 'last_lines': logs.get('logs', [])[-10:]}))
 
 

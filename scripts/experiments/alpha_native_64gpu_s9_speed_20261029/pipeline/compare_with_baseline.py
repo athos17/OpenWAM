@@ -1,6 +1,6 @@
 """Speed test vs the baseline formal run on the same steps (same sample ids, same LR schedule).
 
-    python compare_with_baseline.py [run_dir]     (default: newest dir under OUTPUT)
+    python compare_with_baseline.py [run_dir]     (default: newest run dir of this experiment)
 """
 import json
 from pathlib import Path
@@ -8,7 +8,7 @@ import statistics as st
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
-from runtime import BASELINE_RUN, OUTPUT, ROOT, SAMPLE_KEYS, write_json  # noqa: E402
+from runtime import BASELINE_RUN, ROOT, SAMPLE_KEYS, output_root, phase, write_json  # noqa: E402
 
 SKIP = 20  # startup, compile and first-batch steps
 
@@ -31,7 +31,7 @@ def step_stats(rows, steps):
 
 
 def main():
-    run = Path(sys.argv[1]) if len(sys.argv) > 1 else sorted(p for p in OUTPUT.iterdir() if p.is_dir())[-1]
+    run = Path(sys.argv[1]) if len(sys.argv) > 1 else sorted(p for p in output_root().iterdir() if p.is_dir())[-1]
     ours = read(run)
     base = read(BASELINE_RUN, until=max(ours))
     common = sorted(set(ours) & set(base))
@@ -41,8 +41,9 @@ def main():
     first_diff = next((k for k in common if k not in same_ids), None)
 
     windows = []
-    for lo in range(1, common[-1] + 1, 50):
-        w = [k for k in common if lo <= k < lo + 50]
+    size = 50 if common[-1] <= 2000 else 500  # the full run: 48 windows instead of 477
+    for lo in range(1, common[-1] + 1, size):
+        w = [k for k in common if lo <= k < lo + size]
         entry = {'from': w[0], 'to': w[-1]}
         for m in ('loss_total', 'loss_video', 'loss_action', 'grad_norm'):
             a, b = st.mean(ours[k]['metrics'][m] for k in w), st.mean(base[k]['metrics'][m] for k in w)
@@ -68,7 +69,7 @@ def main():
         report['s9_peak_reserved_gib'] = max(r['stages'].get('peak_reserved_gib', {}).get('rank_max', 0) for r in records)
         report['s9_mfu'] = st.mean(r['mfu'] for r in late if r.get('mfu'))
     cpu = {}
-    for path in sorted((ROOT / 'results').glob('speed_resources_node*.jsonl')):
+    for path in sorted((ROOT / 'results').glob(f'{phase()}_resources_node*.jsonl')):
         used = [json.loads(line).get('cpu_cores_used') for line in path.open()]
         used = [u for u in used if u]
         if used:

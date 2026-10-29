@@ -2,6 +2,8 @@
 
     python scripts/experiments/alpha_native_64gpu_s9_speed_20261029/pipeline/prepare.py \
         [--dest DIR] [--steps 300] [--workers 8]
+
+--steps 0 prepares the full run (whole schedule, checkpoints every 2000 steps, all kept).
 """
 import argparse
 import json

@@ -1,4 +1,4 @@
-"""AIHC node entry: 8 nodes x 8 ranks; NCCL probe, then the speed run, from the frozen release."""
+"""AIHC node entry: 8 nodes x 8 ranks; NCCL probe, then the speed or full run, from the frozen release."""
 import json
 import os
 from pathlib import Path
@@ -7,11 +7,11 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
-from runtime import ROOT, verify_release, write_json  # noqa: E402
+from runtime import ROOT, phase as frozen_phase, verify_release, write_json  # noqa: E402
 
 phase = sys.argv[1]
-if phase != 'speed':
-    raise ValueError(phase)
+if phase != frozen_phase():
+    raise ValueError(f'job phase {phase} does not match settings.json ({frozen_phase()})')
 keys = ['MASTER_ADDR', 'MASTER_PORT', 'RANK', 'WORLD_SIZE', 'NODE_RANK', 'NCCL_IB_DISABLE']
 env = {key: os.environ.get(key) for key in keys}
 rank = int(os.environ.get('NODE_RANK', os.environ.get('RANK', '-1')))
@@ -29,7 +29,8 @@ os.environ['PYTHONPATH'] = str(ROOT / 'release')
 monitor = subprocess.Popen([sys.executable, str(ROOT / 'pipeline/node_monitor.py'), phase])
 try:
     with (ROOT / 'results' / f'{phase}_node{rank}.log').open('a', buffering=1) as output:
-        for script, timeout in (('nccl_probe.py', 600), ('train_experiment.py', 4 * 3600)):
+        train_timeout = 4 * 3600 if phase == 'speed' else None
+        for script, timeout in (('nccl_probe.py', 600), ('train_experiment.py', train_timeout)):
             command = torchrun + [str(ROOT / 'pipeline' / script)]
             print('LAUNCH', json.dumps(command), flush=True)
             subprocess.run(command, check=True, timeout=timeout, stdout=output, stderr=subprocess.STDOUT)

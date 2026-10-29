@@ -30,6 +30,13 @@
 
 资源与对照一致：每节点 8×A800、116 CPU、928 GiB 内存、128 GiB 共享内存，开启 RDMA；镜像、队列和系统包相同。
 
+## 完整训练
+
+`prepare.py --steps 0` 冻结一个完整训练目录（建议 `--dest .../setup/alpha_native_64gpu_s9_full_<日期>`）：
+- 跑完整的 23,845 步，不设 stop_after_steps。
+- 按配置每 2000 步保存一次权重和恢复状态，全部保留；输出到 `outputs/alpha_native_64gpu_aug_s9/<timestamp>`。
+- 结果文件以 `full_` 开头，其余命令（preflight / create / status / progress / compare / stop）用法与测速相同。
+
 ## 准备（dev-cpu，不申请 GPU）
 
 ```bash
