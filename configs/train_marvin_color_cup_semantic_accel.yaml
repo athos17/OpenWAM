@@ -1,0 +1,87 @@
+# Marvin Pro + SharpaWave color-cup semantic sim snapshot (Isaac Sim, 156 episodes / 39 layouts,
+# 4 colour-specific task prompts, 91,663 frames) post-training from the OpenWAM-Alpha pretrain
+# checkpoint (all weights, incl. the pretrained ActionDiT) with the s9 accelerated recipe on one
+# 8 x H20 node (txy_2).
+#   1 x 8 H20, micro-batch 48, GA 1 -> global 384; 20 epochs; lr 5e-5 cosine (5% warmup, min 1%);
+#   RTC 16 uniform; no colour jitter; recompute layers 0-19; s9 options (compiled Wan block regions,
+#   fused VAE norm, overlapped ZeRO-2 parameter all-gather) as in the 2026-10-29 txy_2 s9 probe.
+#   All 156 episodes train (the snapshot has no held-out split; see meta/layout_groups.json).
+#
+# Offline encode caches (scripts/precompute/build_encode_cache.py): dataloader.latent_cache_dir /
+# text_cache_dir below; null = encode online. The launcher's ENCODE_CACHE switch sets both:
+#   ENCODE_CACHE=1 bash scripts/experiments/color_cup_semantic_20261029/run_txy2.sh
+defaults:
+  - train
+  - override dataloader: marvin
+  - _self_
+
+dataloader:
+  dataset_dir: /data/dataset/openwam/color_cup_semantic_20261027_156ep
+  color_jitter:
+    enabled: false
+  latent_cache_dir: null
+  text_cache_dir: null
+
+model:
+  architecture:
+    mot_split_attention: true
+
+training:
+  finetune_ckpt_path: /data/models/OpenWAM-Alpha-Pretrain-Foundation-Model
+  action_backbone_init: pretrained
+
+  batch_size: 48
+  gradient_accumulation_steps: 1  # 1 node x 8 GPUs x 48 = 384
+  num_epochs: 20
+  max_steps: null
+  learning_rate: 5e-5
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  lr_min_ratio: 0.01
+  mixed_precision: bf16
+  zero_stage: 2
+  rtc:
+    enabled: true
+    max_delay_steps: 16
+    delay_distribution: uniform
+
+  deepspeed_zero:
+    overlap_comm: true
+    contiguous_gradients: true
+    reduce_bucket_size: 200000000
+    allgather_bucket_size: 500000000
+  text_padding: longest
+  text_dedup: true
+  video_uint8_in_workers: true
+  vae_cudnn_benchmark: true
+  vae_channels_last: true
+  vae_fused_norm: true
+  frame_time_modulation: true
+  dit_block_fusion: true
+  overlap_param_allgather: true
+  use_gradient_checkpointing: true
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  max_gpu_memory_gib: null        # ~67 GiB peak measured with 8-way ZeRO-2 shards (online encode)
+
+  dataset_num_workers: 14
+  output_path: /data/lyh/OpenWAM/outputs/color_cup_semantic_accel
+  save_steps: 1000
+  save_full_states_for_resume: true
+  keep_resume_state_at_end: false
+  keep_last_k_ckpts: -1
+  step_timing:
+    enabled: true
+    summary_every: 50
+    mfu: true
+    peak_tflops: 148
+  loss_log_csv: true
+  log_flush_every: 50
+
+project:
+  name: openwam
+  output_dir: outputs/accel_s9_color_cup_semantic_1node_bs48ga1_rtc16_ep20
+  seed: 42
+  wandb:
+    project: openwam-acceptance
+    entity: -harbin-institute-of-technology
+    run_name: accel_s9_color_cup_semantic_1node_bs48ga1_rtc16_ep20
