@@ -35,6 +35,15 @@ if [ "${WAIT_FOR_DATA:-0}" = 1 ]; then
   done
   log "copies complete"
 fi
+# Node 0 derives the reader-side subset files once (EgoDex index, stale .part cleanup); node 1 waits.
+if [ ! -e "$PERF_ROOT/data_prepared" ]; then
+  if [ "$NODE_RANK" = 0 ]; then
+    bash scripts/perf/touchwam_a800/prepare_data.sh >> "$PERF_ROOT/queue.node0.log" 2>&1 || { log "prepare_data failed"; exit 1; }
+    touch "$PERF_ROOT/data_prepared"
+  else
+    wait_for "$PERF_ROOT/data_prepared" "$BARRIER_TIMEOUT" || { log "node0 never prepared the data"; exit 1; }
+  fi
+fi
 
 while read -r TAG CONFIG REST; do
   [ -e "$PERF_ROOT/$TAG.node$NODE_RANK.done" ] && { log "$TAG already done, skipping"; continue; }

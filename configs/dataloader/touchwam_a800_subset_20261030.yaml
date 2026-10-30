@@ -3,7 +3,8 @@
 # population shrinks to median-size buckets copied from bdy PFS (1-3 per source, 1-2 per FTP source).
 # Publication contracts bind the full population, so they are off here; bucket discovery picks up
 # exactly the copied buckets. TouchScale's frozen selection already holds every episode of every
-# shard, so dropping it selects the same episodes of the copied shards.
+# shard, so dropping it selects the same episodes of the copied shards. EgoDex indexes episodes
+# globally, so it reads egodex_300h_video_v1_sub (make_egodex_subset.py: copied videos only).
 defaults:
   - touchwam_six_source_20261029
   - _self_
@@ -18,7 +19,7 @@ datasets:
     trim_csv: ${dataloader.subset_root}/robocoin_200h_v1_20261029/selection_trim.csv
   egodex:
     require_publication: false
-    dataset_dir: ${dataloader.subset_root}/egodex_300h_video_v1
+    dataset_dir: ${dataloader.subset_root}/egodex_300h_video_v1_sub
   agibot:
     require_publication: false
     dataset_dir: ${dataloader.subset_root}/agibot_pretrain_v1
