@@ -57,6 +57,33 @@ the preceding production preflight. No data was reconverted.
   from output directories. The full Alpha audit is reused after verifying the
   checkpoint stat/header and resolved model configuration still match.
 
+## Initial 64-GPU updates verified
+
+At 11:45 CST r2 passed a bounded acceptance of its first 50 optimizer updates.
+All 64 rank traces are present, updates start at one, and each update contains
+3,072 samples. All 14 enabled sources contributed samples. The window includes
+22 video/action updates, 11 video-only updates, five video/tactile updates and
+12 video/action/tactile updates. RGB tactile supervision first appears at update
+41; Sharpa deform and TouchScale matrices both enter the normalized intensity
+codec with distinct source identities. All recorded losses and gradient norms
+are finite, and no node failure or OOM was observed.
+
+The window timing reports a median across ranks of 7.31 seconds per iteration
+(about 420 samples/second). Rank 0's startup iteration mean is 8.66 seconds and
+includes a 66.52-second warmup iteration; this is not a stable throughput
+measurement. Across the recorded steps, the maximum allocated GPU memory is
+70.60 GiB and reserved memory is 74.16 GiB. The per-step maximum data wait across
+64 ranks has median 0.093 seconds and maximum 0.276 seconds. The timer excludes
+the initial wait before the very first batch, so these values do not measure
+startup data preparation.
+
+The existing TensorBoard was checked through its scalar API: video, action,
+tactile, RGB tactile and optimizer-update series all contain the first 50 steps.
+Evidence is saved in `results/startup_acceptance.json` and
+`results/tensorboard_acceptance.json`. This acceptance does not establish
+full-epoch data validity, long-run memory stability, or successful publication
+of the first scheduled step-500 checkpoint.
+
 ## Paths and monitoring
 
 On dev-cpu, under `/mnt/pfs/v89atp/workspace/`:
@@ -68,6 +95,7 @@ On dev-cpu, under `/mnt/pfs/v89atp/workspace/`:
   `results/alpha_bitwise_audit.json`.
 - Output alias: `outputs/touchwam_six_source_64gpu_bs48_20261030`, a symlink
   to this setup's `training_output/`.
+- Run directory: `training_output/2026-10-30_11-35-20/`.
 - Logs/resources: `results/full_node*.log`, `results/full_resources_node*.jsonl`.
 - Per-rank startup traces: run directory's `step_trace_rank*.jsonl`.
 - Repair evidence: `results/egodex_restore.json`; comparison:
