@@ -73,9 +73,9 @@ class AcceptanceTrainer(trainer_module.OpenWAMTrainer):
             assert init['tactile_observation_encoder']['initialization'] == 'ftp1_pretrained'
 
     def prepare_accelerate(self, *args):
-        result = super().prepare_accelerate(*args)
-        self.acceptance_scheduler = result[3]
-        return result
+        optimizer, dataloader, scheduler = super().prepare_accelerate(*args)
+        self.acceptance_scheduler = scheduler
+        return optimizer, dataloader, scheduler
 
     def snapshot(self):
         arch = self.accelerator.unwrap_model(self.architecture)
