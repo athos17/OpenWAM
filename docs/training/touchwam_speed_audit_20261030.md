@@ -102,6 +102,52 @@ kernel、参数复制、通信等待和 launch gap，因此 0.207 s 不能全算
 
 ## 下一步验证顺序
 
+### 无触觉路径专项核对（10:08 CST，steps 201–1090）
+
+| 模态 | 步数 | 当前中位数 | 当前平均 | 昨日同配置 TouchWAM 中位数 / 平均 |
+|---|---:|---:|---:|---:|
+| V | 247 | 1.7305 s | 2.1337 s | 1.7263 / 2.1527 s |
+| VA | 320 | 2.0997 s | 2.6321 s | 2.0766 / 2.5967 s |
+
+昨日对照为 `outputs/touchwam_six_source_64gpu_bs12_20261029/2026-10-29_23-28-07`，
+同为 64 卡、batch12、关闭重计算，取完全相同的步数范围。约 1% 的速度差异不
+支持“checkpoint 修复/恢复使无触觉路径明显降速”的判断。
+
+原 S9 在 steps 21–300 的 V 批次（127 步）平均 5.1408 s、597.6 样本/s；VA
+批次（153 步）平均 6.3161 s、486.4 样本/s。当前 V / VA 实际吞吐约为
+359.9 / 291.8 样本/s，两者均低约 40%。但 S9 每卡 batch48 且开启部分重计算，
+VA 来源分布也不同，不能把这 40% 当作同配置代码回归的测量。
+
+源码进一步确认：**N=0 只绕过触觉网络，尚未绕过所有触觉管理路径。**
+
+- `RegionalTouchWAMArchitecture.compute_loss` 仍进入 `_condition` 的空布局校验、
+  空未来目标/噪声准备；真正的网络 bypass 位于 `forward`。
+- loss 侧仍分别归约 V、A、T 的有效样本数。无触觉时 T 的计数为零；纯 V 时 A
+  的计数也为零，仍调用归约。
+- trainer 仍调用 `global_observation_encoder_ids`，对全零的 encoder 激活向量
+  执行 all-reduce，再转回 Python。相比原基础 loss，这两个位置合计增加四次
+  all-reduce 调用（V/A/T 计数各一次，encoder 激活一次），不含 ZeRO 自身通信。
+- 原 S9 已有模态一致性检查，不能把当前的布局 all-gather 整体算作新增通信。
+
+还核对了实际环境的 DeepSpeed 源码：
+`envs/openwam/lib/python3.12/site-packages/deepspeed/runtime/zero/stage_1_and_2.py`。
+`scaled_global_norm`（2055 行）遍历每个参数组，并在 `get_grad_norm_direct`
+（1897 行）分别做 DP all-reduce。`step`（2098 行）仍逐组整理梯度、调用内部
+optimizer 和复制分片，之后把所有参数组传入 all-gather。当前的异步 patch
+也逐组发起 gather，没有读取 `touchwam_active_in_window`。因此 9 组都会参与
+这些管理路径；inactive Adam 更新被跳过，不代表外层 ZeRO 工作被跳过。
+这是已确认的执行差异，具体时间占比仍需要 trace。
+
+567 个无触觉步骤中，29 个超过 5 s。数据等待尖峰/straggler 的根因仍未测定；
+这些长步应独立于触觉 forward 分析。
+
+优先优化候选是：在保持全局标注归一化语义的前提下，让 N=0 路径跳过触觉
+布局/目标处理及空激活归约，合并有效样本数与分组梯度范数归约，并验证未激活
+组的参数同步能否安全省去。参数组本身用于保护 inactive Adam 状态，不应简单
+合并成一组。正式任务尚未改动。
+
+### 对照实验
+
 1. 在单独的短任务增加逐 rank、逐 step 的 stage 记录及短 profiler 窗口，标注
    layout collective、encoder collective、tactile encoder、bridge、Adam、gather。
    同时记录数据来源、区域数、文字长度，避免仅看聚合中位数。
