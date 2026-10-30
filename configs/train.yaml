@@ -47,6 +47,8 @@ training:
     summary_every: 50
     mfu: false                    # count the step's FLOPs once (first step) and report MFU in STEP_TIMING
     peak_tflops: null             # dense bf16 peak per GPU; null = by device name (H20 148, A800/A100 312, H100/H800 989)
+    per_step: false               # also <run dir>/step_records.jsonl: every step's modality, rank-max data wait / step
+                                  # time and rank-max peak memory of that step alone (one small all_reduce per step)
   torch_profile:                  # torch.profiler window -> <run dir>/torch_profile/rank<r>.json.gz (needs step_timing)
     enabled: false
     wait: 5                       # steps skipped before warmup

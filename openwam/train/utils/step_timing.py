@@ -15,6 +15,12 @@ Every ``summary_every`` steps all ranks exchange their window medians and rank 0
 prints ``STEP_TIMING {...}`` and appends it to ``<output>/step_timing.jsonl``
 (per-stage median of the rank medians and the rank max, plus samples/s).
 
+``step_timing.per_step`` additionally appends one line per step to
+``<output>/step_records.jsonl``: the step's modality and the rank max of its data
+wait, step time and allocator peak since the previous step (the peak counters are
+reset each step; ``peak_*_gib`` in the summary stay running maxima). Video-only and
+robot steps differ in activation memory and time, so a window median hides both.
+
 MFU (``step_timing.mfu``): the FLOPs of one step are counted once, on the first
 step, with ``torch.utils.flop_counter.FlopCounterMode`` around the trainable
 model's forward (``model``) and the frozen-encoder input path (``encoder``).
@@ -74,8 +80,11 @@ class StepTimer:
         is_main: bool = True,
         mfu: bool = False,
         peak_tflops: Optional[float] = None,
+        per_step: bool = False,
     ):
         self.enabled = bool(enabled)
+        self.per_step = self.enabled and bool(per_step)
+        self._peak_allocated = self._peak_reserved = 0
         self.summary_every = int(summary_every)
         self.samples_per_step = int(samples_per_step)
         self.output_path = output_path
@@ -105,6 +114,7 @@ class StepTimer:
             summary_every=int(cfg.get("summary_every", 50)),
             mfu=bool(cfg.get("mfu", False)),
             peak_tflops=cfg.get("peak_tflops"),
+            per_step=bool(cfg.get("per_step", False)),
             **kw,
         )
 
@@ -187,8 +197,11 @@ class StepTimer:
         self._data_wait = 0.0 if self._loop_end is None else now - self._loop_end
         self._prev_step_t0, self._step_t0 = self._step_t0, now
 
-    def end_step(self) -> dict:
-        """Resolve this step's stages into ``{name_cpu_s, name_gpu_s}`` (summed per name)."""
+    def end_step(self, step: Optional[int] = None, *, video_only: Optional[bool] = None) -> dict:
+        """Resolve this step's stages into ``{name_cpu_s, name_gpu_s}`` (summed per name).
+
+        ``step`` / ``video_only`` label the ``per_step`` record (a collective: all ranks call it).
+        """
         if not self.enabled:
             return {}
         out = {"data_wait_cpu_s": self._data_wait, "step_cpu_s": time.perf_counter() - self._step_t0}
@@ -201,16 +214,38 @@ class StepTimer:
             if start is not None:
                 out[f"{name}_gpu_s"] = out.get(f"{name}_gpu_s", 0.0) + start.elapsed_time(end) / 1000.0
         self._pending.clear()
+        step_peaks = (0, 0)
         if self._cuda:
+            step_peaks = (torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved())
+            if self.per_step:
+                torch.cuda.reset_peak_memory_stats()
+            self._peak_allocated = max(self._peak_allocated, step_peaks[0])
+            self._peak_reserved = max(self._peak_reserved, step_peaks[1])
             # Allocator high-water mark since start (GiB); a running max, not per step.
-            out["peak_allocated_gib"] = torch.cuda.max_memory_allocated() / (1 << 30)
-            out["peak_reserved_gib"] = torch.cuda.max_memory_reserved() / (1 << 30)
+            out["peak_allocated_gib"] = self._peak_allocated / (1 << 30)
+            out["peak_reserved_gib"] = self._peak_reserved / (1 << 30)
         if self.forward_flops:
             self._counting_done = True
         for k, v in out.items():
             self._window[k].append(v)
         self.last = out
+        if self.per_step:
+            self._write_step_record(step, video_only, out, step_peaks)
         return out
+
+    def _write_step_record(self, step, video_only, out: dict, step_peaks) -> None:
+        values = torch.tensor([out["data_wait_cpu_s"], out["step_cpu_s"], step_peaks[0] / (1 << 30),
+                               step_peaks[1] / (1 << 30)], dtype=torch.float64,
+                              device=torch.cuda.current_device() if self._cuda else "cpu")
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(values, op=torch.distributed.ReduceOp.MAX)
+        if not (self.is_main and self.output_path):
+            return
+        data_wait, step_s, allocated, reserved = values.tolist()
+        record = {"step": step, "video_only": video_only, "data_wait_max_s": data_wait, "step_max_s": step_s,
+                  "peak_allocated_gib": allocated, "peak_reserved_gib": reserved}
+        with open(os.path.join(self.output_path, "step_records.jsonl"), "a") as f:
+            f.write(json.dumps(record) + "\n")
 
     def finish_iteration(self) -> None:
         if self.enabled:

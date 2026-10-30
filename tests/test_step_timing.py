@@ -120,3 +120,19 @@ def test_loss_csv_log_buffers_rows(tmp_path):
     for step in range(1, 5):
         write_debug_loss_row(str(ref), labels=labels, global_step=step, **row)
     assert path.read_text() == (ref / "debug_loss_history.csv").read_text()
+
+
+def test_per_step_records(tmp_path):
+    t = StepTimer(enabled=True, summary_every=0, output_path=str(tmp_path), per_step=True)
+    t._cuda = False
+    for step, video_only in ((1, True), (2, False)):
+        t.begin_step()
+        with t.stage("compute_loss"):
+            time.sleep(0.002)
+        t.end_step(step, video_only=video_only)
+        t.finish_iteration()
+    rows = [json.loads(line) for line in (tmp_path / "step_records.jsonl").read_text().splitlines()]
+    assert [(r["step"], r["video_only"]) for r in rows] == [(1, True), (2, False)]
+    assert all(r["step_max_s"] >= 0.002 and r["data_wait_max_s"] >= 0 for r in rows)
+    assert not (tmp_path / "step_timing.jsonl").exists()
+    assert StepTimer.from_cfg({"enabled": False, "per_step": True}).per_step is False

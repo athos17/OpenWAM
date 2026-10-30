@@ -401,7 +401,11 @@ class OpenWAMTrainer:
 
                 with timer.stage("metrics_reduce"):
                     metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
-                timer.end_step()
+                timer.end_step(
+                    global_step,
+                    video_only=isinstance(batch, list)
+                    and all(s.get("training_modality") == "video_only" for s in batch),
+                )
 
                 current_lr = optimizer.param_groups[0]["lr"]
                 _now = _time.monotonic()
