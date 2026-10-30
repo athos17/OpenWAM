@@ -242,7 +242,11 @@ class HeterogeneousObservationEncoder(nn.Module):
         for name, module, prefix, ignored in targets:
             entry = self.spec["weights"][name]
             path = Path(self.spec["weights_root"]) / entry["file"]
-            digest = hashlib.file_digest(path.open("rb"), "sha256").hexdigest()
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:  # hashlib.file_digest needs Python 3.11 (a800 env: 3.10)
+                for block in iter(lambda: handle.read(1 << 24), b""):
+                    digest.update(block)
+            digest = digest.hexdigest()
             if digest != entry["sha256"]:
                 raise RuntimeError(f"FTP-1 checksum mismatch: {name}")
             expected = module.state_dict()
