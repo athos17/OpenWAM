@@ -11,6 +11,7 @@ import hashlib
 from pathlib import Path
 
 import torch
+from omegaconf import OmegaConf
 from torch import nn
 from torch.nn import functional as F
 
@@ -109,9 +110,23 @@ class MatrixEncoder(nn.Module):
         return self.projection(F.adaptive_avg_pool2d(features, 2).flatten(2).transpose(1, 2))
 
 
+def _plain_config(value):
+    """Detach nested Hydra containers while their interpolation context exists."""
+    if OmegaConf.is_config(value):
+        value = OmegaConf.to_container(value, resolve=True, throw_on_missing=True)
+    if isinstance(value, dict):
+        return {key: _plain_config(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_config(item) for item in value]
+    return value
+
+
 def normalize_encoder_spec(value, source_names):
     """Validate the versioned model contract without opening checkpoint files."""
-    s = dict(value)
+    # A shallow dict(DictConfig) leaves sensors, weights and normalizations as
+    # DictConfig/ListConfig objects, which cannot be serialized in safetensors
+    # metadata. Also avoid mutating the caller's source mappings below.
+    s = _plain_config(value)
     defaults = dict(kind="ftp1_heterogeneous_v1", initialization="pretrained", image_size=224,
                     image_patch_size=16, image_width=768, image_front_layers=3,
                     image_shared_layers=9, image_heads=12, matrix_width=1024,

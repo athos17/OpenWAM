@@ -130,6 +130,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         ):
             raise ValueError("bridge_layers must be ordered, unique and inside the V/A depth")
         s["bridge_layers"] = layers
+        # Validate serialization at construction, before any optimizer steps.
+        # The same property is used by actual safetensors saving/loading.
+        self.checkpoint_metadata
         self.touch_v2 = RegionalTactileFlowStream(s, self.video_backbone.dim, self.action_backbone.dim)
 
     def _apply_training_policy(self):

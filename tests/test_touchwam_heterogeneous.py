@@ -1,11 +1,13 @@
 """Spatial FTP observation routing, strict reuse and generative integration."""
 import copy
 import hashlib
+import json
 from unittest.mock import patch
 
 import pytest
 import torch
 from safetensors.torch import save_file
+from omegaconf import OmegaConf
 
 from openwam.model import build_architecture
 from openwam.model.architectures.base import BaseWAMArchitecture
@@ -34,6 +36,35 @@ def config(frozen=False):
                          sensor_names=["sharpa_real", "bench2dex_sim", "optical"],
                          observation_encoder=encoder_spec(frozen))
     return cfg
+
+
+def test_hydra_encoder_spec_resolves_nested_values_without_mutating_input():
+    cfg = OmegaConf.create(dict(shared_mean=.1, encoder=encoder_spec()))
+    cfg.encoder.normalizations.sharpa_real.Sharpa.mean[0] = "${shared_mean}"
+    cfg.encoder.source_to_encoder.sharpa_real = "Sharpa"
+    before = OmegaConf.to_container(cfg, resolve=False)
+    normalized = normalize_encoder_spec(cfg.encoder, ["sharpa_real", "bench2dex_sim", "optical"])
+    assert json.loads(json.dumps(normalized)) == normalized
+    assert normalized["normalizations"]["sharpa_real"]["Sharpa"]["mean"][0] == .1
+    assert normalized["source_to_encoder"]["sharpa_real"] == ["Sharpa"]
+    assert OmegaConf.to_container(cfg, resolve=False) == before
+
+
+def test_hydra_heterogeneous_checkpoint_roundtrip(monkeypatch, tmp_path):
+    from safetensors import safe_open
+
+    monkeypatch.setattr(BaseWAMArchitecture, "_init_video_backbone", lambda self, cfg: setattr(
+        self, "video_backbone", VideoBackbone(dim=32, num_layers=3, num_heads=4)))
+    cfg = OmegaConf.create(config())
+    model = build_architecture("touchwam_regions", cfg)
+    target = tmp_path / "heterogeneous.safetensors"
+    model.save_checkpoint(str(target))
+    with safe_open(str(target), framework="pt") as saved:
+        assert json.loads(saved.metadata()["tactile_spec"]) == model.tactile_spec
+    restored = build_architecture("touchwam_regions", cfg)
+    restored.load_checkpoint(str(target))
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], value, rtol=0, atol=0)
 
 
 @pytest.fixture
