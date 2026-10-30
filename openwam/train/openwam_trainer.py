@@ -399,8 +399,7 @@ class OpenWAMTrainer:
             for batch in epoch_iter:
                 timer.begin_step()
                 if self._run_seed is not None:
-                    prior_steps = int((t.get("rebatch") or {}).get("from_step", 0))
-                    step_seed = per_step_seed(self._run_seed, rank=self._rank, step=global_step + prior_steps)
+                    step_seed = per_step_seed(self._run_seed, rank=self._rank, step=global_step)
                     torch.manual_seed(step_seed)
                     if torch.cuda.is_available():
                         torch.cuda.manual_seed_all(step_seed)
@@ -569,14 +568,7 @@ class OpenWAMTrainer:
             if mixed_modalities:
                 from openwam.dataloader.modality_sampler import GlobalModalitySampler
 
-                rebatch = t.get("rebatch")
-                if rebatch is not None:
-                    from omegaconf import OmegaConf
-                    rebatch = OmegaConf.to_container(rebatch, resolve=True)
-                    if int(t.num_epochs) != 1 or int(t.gradient_accumulation_steps) != 1:
-                        raise ValueError("Rebatch continuation requires one epoch and accumulation one")
-                    self.dataset.training_layout["rebatch"] = rebatch
-                kwargs["sampler"] = GlobalModalitySampler(self.dataset, batch_size, world_size, rebatch=rebatch)
+                kwargs["sampler"] = GlobalModalitySampler(self.dataset, batch_size, world_size)
                 logger.info("Global modality batching: %d samples per global microbatch", batch_size * world_size)
         if self._run_seed is not None:
             from openwam.train.utils.seeding import dataloader_worker_init_fn, make_dataloader_generator

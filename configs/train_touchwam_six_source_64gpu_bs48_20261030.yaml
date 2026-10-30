@@ -1,6 +1,6 @@
-# Continue the remaining source epoch using a separately staged rebatch checkpoint.
+# Fresh full OpenWAM Alpha + FTP initialization; 8 nodes x 8 A800 GPUs.
 defaults:
-  - train_touchwam_six_source_64gpu_bs12_20261029
+  - train_touchwam_six_source_bs48_s9recompute_20261029
   - _self_
 
 training:
@@ -10,13 +10,19 @@ training:
   gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
   gradient_checkpointing_layers_video_only: null
   use_gradient_checkpointing_offload: false
-  initialize_touch_from_openwam: false
-  finetune_ckpt_path: null
-  resume_ckpt_path: ${oc.env:TOUCHWAM_REBATCH_RUN}
-  rebatch: null
+  initialize_touch_from_openwam: true
+  resume_ckpt_path: null
+  learning_rate: 0.0001
+  num_epochs: 1
+  max_steps: null
+  stop_after_steps: null
   # Approximately preserve the previous checkpoint interval in processed samples.
   save_steps: 500
-  output_path: /mnt/pfs/v89atp/workspace/outputs/touchwam_six_source_64gpu_bs48_20261030
+  save_full_states_for_resume: true
+  keep_last_k_ckpts: 3
+  step_timing:
+    record_steps: 1000
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_six_source_64gpu_bs48_20261030}
 
 model:
   architecture:

@@ -121,24 +121,6 @@ def build_cosine_scheduler(optimizer, *, total_opt_steps: int, cfg, num_processe
     warmup_ratio = float(getattr(t, "warmup_ratio", 0.05))
     lr_min_ratio = float(getattr(t, "lr_min_ratio", 0.01))
     n = max(int(num_processes), 1)
-    rebatch = getattr(t, "rebatch", None)
-    if rebatch is not None:
-        if total_opt_steps != rebatch["remaining_steps"] or n != rebatch["world_size"]:
-            raise ValueError("Rebatch schedule length or world size differs from the migration plan")
-        # The migrated checkpoint keeps Adam moments and group learning rates.
-        # This new phase starts at that exact LR and advances the old schedule
-        # by consumed samples rather than by the previous smaller batch's steps.
-        warmup_iters = int(rebatch["remaining_warmup_ticks"])
-        cosine_iters = int(rebatch["cosine_ticks"])
-        start_factor = float(rebatch["start_lr_factor"])
-        if warmup_iters < 1 or cosine_iters < 1 or not 0 < start_factor < 1:
-            raise ValueError("Unsupported rebatch schedule: migration must occur during warmup")
-        if not math.isclose(lr, rebatch["peak_lr"], rel_tol=1e-12) or not math.isclose(
-                lr_min_ratio, rebatch["lr_min_ratio"], rel_tol=1e-12):
-            raise ValueError("Rebatch must preserve the source peak and minimum learning rate")
-        warmup_sched = LinearLR(optimizer, start_factor=start_factor, total_iters=warmup_iters)
-        cosine_sched = CosineAnnealingLR(optimizer, T_max=cosine_iters, eta_min=lr * lr_min_ratio)
-        return SequentialLR(optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_iters])
     warmup_steps = int(total_opt_steps * warmup_ratio)
     cosine_steps = max(total_opt_steps - warmup_steps, 1)
     warmup_iters = warmup_steps * n
