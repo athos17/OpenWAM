@@ -10,14 +10,16 @@ training:
   finetune_ckpt_path: ${oc.env:TOUCHWAM_OPENWAM_CKPT,/gaozt-test1/lyh/models/OpenWAM-Alpha-Pretrain-Foundation-Model/checkpoint_step_154000.safetensors}
   num_epochs: null
   max_steps: 34599
-  stop_after_steps: 300
+  # One pass over the subset is ~1724 steps (1.324M samples / 768 per step): 1700 sees every sample at
+  # most once, avoids the epoch-rollover loader restart and ends at 98% of the 1729-step warmup peak LR.
+  stop_after_steps: 1700
   save_steps: 0
   save_full_states_for_resume: false
   max_gpu_memory_gib: null
   step_timing:
     enabled: true
     summary_every: 50
-    record_steps: 300
+    record_steps: 1700
     peak_per_step: true
     mfu: false
   output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/gaozt-test1/lyh/perf_runs/touchwam_a800/p0}

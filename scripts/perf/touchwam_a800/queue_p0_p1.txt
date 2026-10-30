@@ -1,9 +1,12 @@
 # TAG                CONFIG                               [PROFILE=1] [hydra overrides]
+# ~10 h at ~6 s/step. Short runs first, so a broken setup fails within the first half hour.
 nccl                 nccl_bench
-# Speed and per-step losses: same seed and samples in every run.
-p0                   train_touchwam_a800_p0_20261030
-p1                   train_touchwam_a800_p1_20261030
-p1v                  train_touchwam_a800_p1v_20261030
-# Short profiler runs (steps 23-30 traced on ranks 0 and 8) for the per-op breakdown.
+# Profiler runs (steps 23-30 traced on ranks 0 and 8) for the per-op breakdown.
 p0_prof              train_touchwam_a800_p0_20261030      PROFILE=1 training.stop_after_steps=30 training.step_timing.record_steps=30
 p1_prof              train_touchwam_a800_p1_20261030      PROFILE=1 training.stop_after_steps=30 training.step_timing.record_steps=30
+# Speed and per-step losses over one pass of the subset (1700 steps); same seed and samples in every run.
+p0                   train_touchwam_a800_p0_20261030
+p1                   train_touchwam_a800_p1_20261030
+p1v                  train_touchwam_a800_p1v_20261030     training.stop_after_steps=1000 training.step_timing.record_steps=1000
+# P0 again: the run-to-run noise floor for both speed and losses (steps 1-500).
+p0r                  train_touchwam_a800_p0_20261030      training.stop_after_steps=500 training.step_timing.record_steps=500

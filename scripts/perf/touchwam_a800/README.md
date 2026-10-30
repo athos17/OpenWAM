@@ -38,14 +38,20 @@ The two nodes cannot ssh into each other. Instead, one worker per node reads the
 for r in 0 1; do ssh -n a800_$((r+1)) "cd /gaozt-test1/lyh/OpenWAM-touchwam && (NODE_RANK=$r WAIT_FOR_DATA=1 setsid nohup bash scripts/perf/touchwam_a800/queue_worker.sh scripts/perf/touchwam_a800/queue_p0_p1.txt > /dev/null 2>&1 < /dev/null &)"; done
 ```
 
-`queue_p0_p1.txt` runs, in order:
+`queue_p0_p1.txt` runs, in order (short runs first, so a broken setup fails early):
 1. `nccl`: busbw for world (16), intra-node (8) and inter-node (2) groups, for the ZeRO-2 → HSDP projection.
-2. `p0`, `p1`, `p1v`: 300 steps each.
-3. `p0_prof`, `p1_prof`: torch.profiler on 8 steps, ranks 0 and 8.
+2. `p0_prof`, `p1_prof`: torch.profiler on 8 steps, ranks 0 and 8.
+3. `p0`, `p1`: 1700 steps each.
+   - One pass over the subset is ~1724 steps (1.324M samples, 768 per step). So every sample is seen at most once, and there is no epoch-rollover loader restart.
+   - The runs cover 98% of the production warmup (1729 steps, peak LR 1e-4), where loss divergence would show.
+   - With the subset's modality mix, that is roughly 940 V, 480 VA, 150 VAT and 130 VT steps.
+4. `p1v`: 1000 steps. Recompute changes only memory and speed, so this is mainly the per-step peak memory over many batches.
+5. `p0r`: P0 again for 500 steps. This is the noise floor: how much speed and loss move between two identical runs.
 
 Expected time:
-- Each 300-step run takes about 40–45 min, including ~5 min of startup and the 60 s first step.
-- The whole queue takes about 2.5–3 h.
+- Steps take ~4.5 s (V) to ~8 s (VT) here, ~6 s on average. Each run also spends ~5 min starting up plus a ~60 s first step.
+- `p0` and `p1` take ~3 h each, `p1v` ~1.8 h and `p0r` ~1 h. The whole queue takes ~9.5–10.5 h.
+- A run that fails (e.g. OOM) is recorded in its `.done` file, and the queue moves on to the next one.
 
 Logs:
 - Queue logs: `/gaozt-test1/lyh/perf_runs/touchwam_a800/queue.node{0,1}.log`.
@@ -58,9 +64,14 @@ To run a single job instead of the queue: `bash scripts/perf/touchwam_a800/start
 
 ## Reading the results
 
+Every run is cut to the steps all listed runs have, because step k is the same batch in each run. So compare in two passes:
+
 ```bash
-python scripts/perf/touchwam_a800/compare.py p0 p1 p1v --json /gaozt-test1/lyh/perf_runs/touchwam_a800/p1_report.json
+python scripts/perf/touchwam_a800/compare.py p0 p1 --json /gaozt-test1/lyh/perf_runs/touchwam_a800/p1_1700.json
+python scripts/perf/touchwam_a800/compare.py p0 p0r p1 p1v --json /gaozt-test1/lyh/perf_runs/touchwam_a800/p1_500.json
 ```
+- The first pass covers all 1700 steps.
+- The second covers steps 1–500 and puts P1's gaps next to the `p0r` noise floor.
 
 **Per modality (V/VA/VAT/VT):**
 - Median over steps of the median-rank stage times.
@@ -70,7 +81,10 @@ python scripts/perf/touchwam_a800/compare.py p0 p1 p1v --json /gaozt-test1/lyh/p
 
 **Overall:** the mean iteration reweighted to the production mix (V 0.30, VA 0.37, VAT 0.27, VT 0.06).
 
-**Losses:** step-by-step against `p0`. Nondeterministic kernels allow tiny differences; any systematic drift is a bug.
+**Losses:**
+- Step by step against `p0`. Nondeterministic kernels start at ~1e-5 relative, and in bf16 the gap compounds over hundreds of steps.
+- The verdict therefore uses per-modality loss means over 100-step windows (`--window`). A gap clearly above `p0r`'s is a bug.
+- Later changes (FSDP2/TorchTitan, P2) are compared the same way against this `p0`.
 
 **Profiler traces:** `<TAG>/<timestamp>/torch_profile/rank{0,8}.json.gz`, plus op tables in `rank*_ops.txt`.
 
