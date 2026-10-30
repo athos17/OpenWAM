@@ -17,6 +17,9 @@ datasets:
     require_publication: false
     dataset_dir: ${dataloader.subset_root}/robocoin_200h_v1_20261029
     trim_csv: ${dataloader.subset_root}/robocoin_200h_v1_20261029/selection_trim.csv
+    # Every bucket's meta/ is present (pooled stats validate all contributors); videos only here.
+    include_buckets: [AIRBOT_MMK2_place_the_blue_and_purple_blocks, Airbot_MMK2_move_cake_tape_measure,
+                      Agilex_Cobot_Magic_fold_towel_grey_tray, Agilex_Split_Aloha_move_beverage]
   egodex:
     require_publication: false
     dataset_dir: ${dataloader.subset_root}/egodex_300h_video_v1_sub

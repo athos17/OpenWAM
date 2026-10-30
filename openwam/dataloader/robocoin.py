@@ -1337,6 +1337,14 @@ class RoboCOINDataset(LeRobotV3Reader):
                     len(excluded),
                     ", ".join(path.name for path in excluded),
                 )
+            includes = get_cfg(config, "include_buckets")
+            if includes is not None:
+                # Same contract as LeRobotV3Reader.from_config. Pooled stats still validate every
+                # contributor's metadata, so a partial copy keeps all meta/ and selects buckets here.
+                wanted = set(includes)
+                sub_dirs = [p for p in sub_dirs if p.name in wanted]
+                if {p.name for p in sub_dirs} != wanted:
+                    raise ValueError("Requested bucket selection contains absent data")
             if not sub_dirs:
                 raise FileNotFoundError(f"{cls.__name__}: no non-excluded sub-buckets with meta/info.json under {root}")
 
