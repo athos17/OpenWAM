@@ -108,8 +108,17 @@ def run(args):
                     item = latest(path)
                     if item: resources.append(item)
                 except (OSError, ValueError): pass  # A concurrent final line may be incomplete.
+            failed_nodes = len(list(args.reports_dir.glob('failure_node*.json')))
+            completed_nodes = len(list(args.reports_dir.glob('completed_node*.json')))
             values = {'progress/latest_logged_training_step': state['last_step'],
-                      'health/resource_nodes': len(resources)}
+                      'health/resource_nodes': len(resources),
+                      'health/failed_nodes': failed_nodes,
+                      'health/completed_nodes': completed_nodes,
+                      'health/recent_resource_nodes': sum(time.time()-r['time'] < 60 for r in resources)}
+            if state['run_dir']:
+                metrics_path = Path(state['run_dir'])/'training_metrics.jsonl'
+                if metrics_path.exists():
+                    values['health/training_metrics_age_seconds'] = max(0, time.time()-metrics_path.stat().st_mtime)
             for node in resources:
                 index = node['node_rank']
                 gpus = node.get('gpus', [])
@@ -122,7 +131,9 @@ def run(args):
             train.flush(); system.flush()
             state['updated_at'] = time.time()
             atomic(state_path, state)
-            if args.once or len(list(args.reports_dir.glob('completed_node*.json'))) == 8: break
+            # Publish the terminal health state once; never keep presenting stale
+            # GPU observations as an ongoing job after a node reports failure.
+            if args.once or failed_nodes or completed_nodes == 8: break
             time.sleep(args.poll_seconds)
     finally:
         train.close(); system.close(); lock.close()
