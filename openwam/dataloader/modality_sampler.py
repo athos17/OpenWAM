@@ -72,7 +72,7 @@ def batch_modality_code(samples):
 
 
 class GlobalModalitySampler(Sampler):
-    def __init__(self, dataset, batch_size: int, world_size: int):
+    def __init__(self, dataset, batch_size: int, world_size: int, *, rebatch=None):
         if batch_size < 1 or world_size < 1:
             raise ValueError("batch_size and world_size must be positive")
         self.dataset = dataset
@@ -104,8 +104,26 @@ class GlobalModalitySampler(Sampler):
             order = {key: i for i, key in enumerate(sorted(set(keys)))}
             self._source_codes = np.asarray([order[key] for key in keys])
         self._modalities = tuple(sorted(set(self._source_codes.tolist())))
+        self.rebatch = rebatch
+        self._consumed = [0] * len(self._modalities)
+        if rebatch is not None:
+            if (rebatch["schema_version"] != 1 or dataset._seed != rebatch["seed"]
+                    or self.global_batch_size != rebatch["target_global_batch"]):
+                raise ValueError("Rebatch seed or global batch differs from its migration plan")
+            counts = self._counts()
+            expected = {str(flag): n for flag, n in zip(self._modalities, counts)}
+            if expected != dict(rebatch["bucket_counts"]):
+                raise ValueError("Rebatch source buckets changed")
+            consumed = dict(rebatch["consumed_by_bucket"])
+            if consumed.keys() != expected.keys():
+                raise ValueError("Rebatch consumed bucket identities differ")
+            self._consumed = [consumed[str(flag)] for flag in self._modalities]
+            if any(type(c) is not int or not 0 <= c <= n for c, n in zip(self._consumed, counts)):
+                raise ValueError("Invalid rebatch consumed prefix")
 
     def set_epoch(self, epoch):
+        if self.rebatch is not None and epoch != 0:
+            raise ValueError("Rebatch continuation covers only the remaining source epoch")
         self.dataset.set_epoch(epoch)
 
     def _counts(self):
@@ -115,11 +133,14 @@ class GlobalModalitySampler(Sampler):
 
     def __len__(self):
         block = self.global_batch_size
-        return sum(math.ceil(n / block) * block for n in self._counts())
+        return sum(math.ceil((n - c) / block) * block for n, c in zip(self._counts(), self._consumed))
 
     def __iter__(self):
         flags = self._source_codes[self.dataset._index_map[:, 0]]
-        positions = [np.flatnonzero(flags == flag) for flag in self._modalities]
+        if self.rebatch is not None and self.dataset._seed != self.rebatch["seed"]:
+            raise ValueError("Rebatch source epoch changed")
+        positions = [np.flatnonzero(flags == flag)[consumed:]
+                     for flag, consumed in zip(self._modalities, self._consumed)]
         block = self.global_batch_size
         schedule = np.concatenate([np.full(math.ceil(len(p) / block), i, dtype=np.int64)
                                    for i, p in enumerate(positions)])

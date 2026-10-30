@@ -74,12 +74,15 @@ class StepTimer:
         is_main: bool = True,
         mfu: bool = False,
         peak_tflops: Optional[float] = None,
+        record_steps: int = 0,
     ):
         self.enabled = bool(enabled)
         self.summary_every = int(summary_every)
         self.samples_per_step = int(samples_per_step)
         self.output_path = output_path
         self.is_main = is_main
+        self.record_steps = int(record_steps)
+        self._records = []
         self.mfu = self.enabled and bool(mfu)
         self.peak_tflops = float(peak_tflops) if peak_tflops else (detect_peak_tflops() if self.mfu else None)
         # Forward FLOPs of one step per counted scope ("model", "encoder"); filled on
@@ -105,6 +108,7 @@ class StepTimer:
             summary_every=int(cfg.get("summary_every", 50)),
             mfu=bool(cfg.get("mfu", False)),
             peak_tflops=cfg.get("peak_tflops"),
+            record_steps=int(cfg.get("record_steps", 0)),
             **kw,
         )
 
@@ -215,6 +219,19 @@ class StepTimer:
     def finish_iteration(self) -> None:
         if self.enabled:
             self._loop_end = time.perf_counter()
+
+    def record_step(self, step: int, metrics: dict) -> None:
+        """Bounded local traces retain loader tails without another collective."""
+        if not self.enabled or not self.output_path or not 0 < step <= self.record_steps:
+            return
+        self._records.append({"step": step, **self.last, "samples": {
+            key: value for key, value in metrics.items() if key.startswith("samples_") and value}})
+        if step % max(self.summary_every, 1) == 0 or step == self.record_steps:
+            rank = int(os.environ.get("RANK", "0"))
+            path = os.path.join(self.output_path, f"step_trace_rank{rank}.jsonl")
+            with open(path, "a") as handle:
+                handle.writelines(json.dumps(row) + "\n" for row in self._records)
+            self._records.clear()
 
     # ------------------------------------------------------------------ summary
 

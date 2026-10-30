@@ -1,0 +1,26 @@
+# Continue the remaining source epoch using a separately staged rebatch checkpoint.
+defaults:
+  - train_touchwam_six_source_64gpu_bs12_20261029
+  - _self_
+
+training:
+  batch_size: 48
+  dataset_num_workers: 8
+  use_gradient_checkpointing: true
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  gradient_checkpointing_layers_video_only: null
+  use_gradient_checkpointing_offload: false
+  initialize_touch_from_openwam: false
+  finetune_ckpt_path: null
+  resume_ckpt_path: ${oc.env:TOUCHWAM_REBATCH_RUN}
+  rebatch: null
+  # Approximately preserve the previous checkpoint interval in processed samples.
+  save_steps: 500
+  output_path: /mnt/pfs/v89atp/workspace/outputs/touchwam_six_source_64gpu_bs48_20261030
+
+model:
+  architecture:
+    mot_checkpoint_mixed_attn: true
+
+project:
+  name: touchwam-six-source-64gpu-bs48-20261030
