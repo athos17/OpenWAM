@@ -29,7 +29,7 @@ LOG="$PERF_ROOT/$TAG.node$NODE_RANK.log"
 [ "$NODE_RANK" = 0 ] && { echo "$CONFIG $*"; git rev-parse HEAD; git status --porcelain --untracked-files=no; } \
   > "$PERF_ROOT/$TAG.sha" 2>/dev/null
 PROFILE_ARGS=()
-# Eight consecutive steps (several modalities) after 20 warm steps, ranks 0 and 8 (one per node).
+# Eight consecutive steps (several modalities: 23-30) after 20 waited + 2 warmup steps, ranks 0 and 8 (one per node).
 [ "${PROFILE:-0}" = 1 ] && PROFILE_ARGS=(training.torch_profile.enabled=true training.torch_profile.wait=20
   training.torch_profile.warmup=2 training.torch_profile.active=8 "training.torch_profile.ranks=[0,8]")
 if [ "$CONFIG" = nccl_bench ]; then
