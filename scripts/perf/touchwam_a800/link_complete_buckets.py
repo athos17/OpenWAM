@@ -65,7 +65,8 @@ def main():
     alias = 0
     for rel, value in links:
         target = args.dest / rel
-        if bucket_of(rel) is None and (args.dest / os.path.dirname(rel) / value).exists() and not target.is_symlink():
+        resolved = Path(os.path.normpath(args.dest / os.path.dirname(rel) / value))  # parent may not exist yet
+        if bucket_of(rel) is None and resolved.exists() and not target.is_symlink():
             target.parent.mkdir(parents=True, exist_ok=True)
             target.symlink_to(value)
             alias += 1
