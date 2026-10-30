@@ -6,6 +6,11 @@
 Each TAG resolves to the newest <root>/<TAG>/<timestamp>/ holding step_trace_rank*.jsonl.
 - Speed: per step, the median over ranks of each stage (GPU time where recorded) and the max over
   ranks of the step (the step really waits for the slowest rank); grouped by the step's modality.
+- Data stalls: on the a800 vePFS ~8% of steps stall 10-30 s on every rank at once, which makes the
+  wall-clock mean noisy. The stall-free step is the fastest rank's step_cpu_s: the rank whose batch
+  arrived last does not wait in the collectives, so its step is pure compute. Speed verdicts use it;
+  wall time and stall seconds are reported next to it. Stall steps shared with the first run tell
+  storage noise (different steps) from the sample order (same steps).
 - Memory: per-step peaks (training.step_timing.peak_per_step) per modality, max over ranks.
 - Losses: debug_loss_history.csv of each run against the first run. The runs share seed and samples,
   so differences come only from nondeterministic kernels. Step by step they compound in bf16, so long
@@ -64,6 +69,8 @@ def load(path, lo, hi=None):
             row[key + "_min"] = min(vals)
         # Wall time of the step for the job: the slowest rank's loop iteration.
         row["iter_max_s"] = max(r.get("step_cpu_s", 0.0) + r.get("data_wait_cpu_s", 0.0) for r in recs)
+        row["clean_s"] = min(r.get("step_cpu_s", 0.0) for r in recs)
+        row["stall_s"] = row["iter_max_s"] - row["clean_s"]
         row["peak_alloc_gib"] = max(r.get("peak_allocated_gib", 0.0) for r in recs)
         row["peak_reserved_gib"] = max(r.get("peak_reserved_gib", 0.0) for r in recs)
         rows.append(row)
@@ -76,7 +83,9 @@ def summarize(rows):
         by[r["mode"]].append(r)
     n = len(rows)
     out = {"steps": n, "mean_iter_s": st.mean(r["iter_max_s"] for r in rows),
-           "median_iter_s": st.median(r["iter_max_s"] for r in rows), "modes": {}}
+           "median_iter_s": st.median(r["iter_max_s"] for r in rows), "mean_clean_s": st.mean(r["clean_s"] for r in rows),
+           "stall_s_per_step": st.mean(r["stall_s"] for r in rows),
+           "stall_steps": [r["step"] for r in rows if r["stall_s"] > 3.0], "modes": {}}
     for m in MODES:
         rs = by.get(m, [])
         if not rs:
@@ -86,6 +95,7 @@ def summarize(rows):
             d[key] = st.median(r[key] for r in rs)
         d["forward_min_gpu_s"] = st.median(r["forward_gpu_s_min"] for r in rs)
         d["mean_iter_s"] = st.mean(r["iter_max_s"] for r in rs)
+        d["mean_clean_s"] = st.mean(r["clean_s"] for r in rs)
         d["peak_alloc_gib"] = max(r["peak_alloc_gib"] for r in rs)
         d["peak_reserved_gib"] = max(r["peak_reserved_gib"] for r in rs)
         out["modes"][m] = d
@@ -93,6 +103,7 @@ def summarize(rows):
     prod = {"V": 0.30, "VA": 0.37, "VAT": 0.27, "VT": 0.06}
     if set(prod) <= set(out["modes"]):
         out["prod_weighted_iter_s"] = sum(prod[m] * out["modes"][m]["mean_iter_s"] for m in prod)
+        out["prod_weighted_clean_s"] = sum(prod[m] * out["modes"][m]["mean_clean_s"] for m in prod)
     return out
 
 
@@ -160,22 +171,29 @@ def main():
             s["loss_windows_vs_" + args.tags[0]] = loss_windows(ref_losses, cur, ref_modes, args.window)
         report[tag] = s
     cols = ("n", "data_wait_cpu_s", "encode_text_gpu_s", "encode_video_gpu_s", "forward_min_gpu_s", "forward_gpu_s",
-            "ds_backward_gpu_s", "ds_step_gpu_s", "iter_max_s", "mean_iter_s", "peak_alloc_gib")
-    short = ("n", "wait", "text", "vae", "fwd_mn", "fwd_md", "bwd", "dsstep", "it_med", "it_mean", "peakA")
+            "ds_backward_gpu_s", "ds_step_gpu_s", "iter_max_s", "mean_iter_s", "mean_clean_s", "peak_alloc_gib")
+    short = ("n", "wait", "text", "vae", "fwd_mn", "fwd_md", "bwd", "dsstep", "it_med", "it_mean", "clean", "peakA")
     print("%-8s %-4s " % ("run", "mode") + " ".join("%7s" % c for c in short))
     for tag, s in report.items():
         for m, d in s["modes"].items():
             print("%-8s %-4s " % (tag, m) + " ".join("%7d" % d[c] if c == "n" else "%7.3f" % d[c] for c in cols))
-        print("%-8s all  steps=%d mean=%.3f median=%.3f prod-weighted=%s  %s" % (
-            tag, s["steps"], s["mean_iter_s"], s["median_iter_s"],
-            "%.3f" % s["prod_weighted_iter_s"] if "prod_weighted_iter_s" in s else "-", s["dir"]))
+        print("%-8s all  steps=%d mean=%.3f median=%.3f stall-free=%.3f stall=%.2f s/step (%d steps >3 s) "
+              "prod-weighted wall=%s stall-free=%s  %s" % (
+            tag, s["steps"], s["mean_iter_s"], s["median_iter_s"], s["mean_clean_s"], s["stall_s_per_step"],
+            len(s["stall_steps"]), "%.3f" % s["prod_weighted_iter_s"] if "prod_weighted_iter_s" in s else "-",
+            "%.3f" % s["prod_weighted_clean_s"] if "prod_weighted_clean_s" in s else "-", s["dir"]))
     base = report[args.tags[0]]
     for tag in args.tags[1:]:
         s = report[tag]
         if "prod_weighted_iter_s" in s and "prod_weighted_iter_s" in base:
-            print("%s vs %s: prod-weighted %.3f -> %.3f s (%+.1f%%)" % (
-                tag, args.tags[0], base["prod_weighted_iter_s"], s["prod_weighted_iter_s"],
+            print("%s vs %s: prod-weighted stall-free %.3f -> %.3f s (%+.1f%%), wall %.3f -> %.3f s (%+.1f%%)" % (
+                tag, args.tags[0], base["prod_weighted_clean_s"], s["prod_weighted_clean_s"],
+                100 * (s["prod_weighted_clean_s"] / base["prod_weighted_clean_s"] - 1),
+                base["prod_weighted_iter_s"], s["prod_weighted_iter_s"],
                 100 * (s["prod_weighted_iter_s"] / base["prod_weighted_iter_s"] - 1)))
+        shared = set(s["stall_steps"]) & set(base["stall_steps"])
+        print("  stall steps: %d here, %d in %s, %d shared" % (
+            len(s["stall_steps"]), len(base["stall_steps"]), args.tags[0], len(shared)))
         lv = s.get("loss_vs_" + args.tags[0])
         if lv:
             print("  losses over %d steps: " % lv["steps"] + ", ".join(

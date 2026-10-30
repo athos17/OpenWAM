@@ -81,6 +81,12 @@ python scripts/perf/touchwam_a800/compare.py p0 p0r p1 p1v --json /gaozt-test1/l
 
 **Overall:** the mean iteration reweighted to the production mix (V 0.30, VA 0.37, VAT 0.27, VT 0.06).
 
+**Data stalls:**
+- In `p0`, ~8% of steps waited 10–30 s for data on all 16 ranks at once. That is 23% of the wall time, which the bdy production run does not have.
+- Speed verdicts therefore use the stall-free step: the fastest rank's `step_cpu_s`. The last rank to get its batch does not wait in the collectives, so its step is pure compute.
+- Wall time and stall seconds are printed next to it.
+- "Stall steps shared" with the first run separates storage noise (different steps) from the sample order (the same steps every run).
+
 **Losses:**
 - Step by step against `p0`. Nondeterministic kernels start at ~1e-5 relative, and in bf16 the gap compounds over hundreds of steps.
 - The verdict therefore uses per-modality loss means over 100-step windows (`--window`). A gap clearly above `p0r`'s is a bug.
