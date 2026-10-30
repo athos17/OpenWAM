@@ -2,21 +2,22 @@
 
     python link_complete_buckets.py <copy_list.tsv> <subset root> <dest> [--rounds 0 1]
 
-Root files and small metadata directories (round 0) are linked as they are; a bucket is linked only
-when every file the copy list holds for it is present at full size. Bucket alias symlinks (SharpaDex
+Root files and small metadata directories (round 0) are symlinked; a bucket is hardlinked (same
+vePFS, no extra space) only when every file the copy list holds for it is present at full size. Bucket alias symlinks (SharpaDex
 buckets/ -> partitions/) are recreated, so they resolve inside <dest>. Point
 TOUCHWAM_SUBSET_ROOT=<dest> at the result; the copy itself is never touched.
 """
 import argparse
 import collections
 import os
+import shutil
 from pathlib import Path
 
 # Directories whose children are buckets (relative to the dataset root), as in build_copy_list.py.
 PARENTS = ("egodex_300h_video_v1/cached_500h/train", "robocoin_200h_v1_20261029", "agibot_pretrain_v1",
            "sharpadex_native_tcp_v1_20261026/partitions/*", "touchwam_pretrain_v1_20261028/sharpadex/partitions/*",
            "touchscale_lerobot_v3_full_v1_20261029/buckets", "ftp1_frozen25h_v1_20261029/*")
-SMALL_DIRS = ("meta", "provenance", "control")
+SMALL_DIRS = ("meta", "provenance", "control", "validation")
 
 
 def bucket_of(rel):
@@ -58,10 +59,10 @@ def main():
         if not target.is_symlink():
             target.symlink_to(args.root / rel)
     for b in sorted(done):
+        # Hardlinked tree, not a directory symlink: Path.rglob (bucket discovery) skips symlinked dirs.
         target = args.dest / b
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.is_symlink():
-            target.symlink_to(args.root / b)
+        if not target.exists():
+            shutil.copytree(args.root / b, target, symlinks=True, copy_function=os.link)
     alias = 0
     for rel, value in links:
         target = args.dest / rel
