@@ -6,7 +6,8 @@
 #
 # Queue file: one run per line, "TAG CONFIG [PROFILE=1] [hydra overrides...]"; '#' comments.
 # A finished run leaves $PERF_ROOT/$TAG.node<rank>.done (holding the exit code) and is skipped on a
-# restart; delete those files (and the run directory) to repeat a run. WAIT_FOR_DATA=1 holds the
+# restart; delete those files (and the run directory) to repeat a run. A run interrupted before both
+# nodes finished leaves $TAG.ready<rank>; delete those too before restarting the workers. WAIT_FOR_DATA=1 holds the
 # first run until both copy logs on vePFS report COMPLETE.
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
@@ -25,6 +26,7 @@ wait_for() {  # wait_for <file> <seconds>
     sleep 10; waited=$((waited + 10))
     [ "$waited" -ge "$2" ] && return 1
   done
+  return 0  # an until loop returns its body's last status (the failed timeout test) otherwise
 }
 
 if [ "${WAIT_FOR_DATA:-0}" = 1 ]; then
@@ -62,5 +64,7 @@ while read -r TAG CONFIG REST; do
   log "$TAG: exit $status"
   # Leave the node only after the peer finished too, so the next run starts on two idle nodes.
   wait_for "$PERF_ROOT/$TAG.node$OTHER.done" "$BARRIER_TIMEOUT" || log "$TAG: node$OTHER did not finish in time"
+  # Both nodes are past this run's start barrier; a stale marker would let a rerun start alone.
+  rm -f "$PERF_ROOT/$TAG.ready$NODE_RANK"
 done < <(grep -v '^\s*\(#\|$\)' "$QUEUE")
 log "queue finished"
