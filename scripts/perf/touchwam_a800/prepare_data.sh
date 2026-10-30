@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# After the copy: drop stale chunk files and build the EgoDex subset index (README.md).
+# After the copy: drop stale chunk files, restore bdy mtimes (SharpaDex binds them) and build the
+# EgoDex subset index (README.md).
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 SUBSET=${TOUCHWAM_SUBSET_ROOT:-/gaozt-test1/lyh/datasets/touchwam_subset_v1}
@@ -10,4 +11,5 @@ find "$SUBSET" -name '*.part' | while read -r part; do
 done
 left=$(find "$SUBSET" -name '*.part' | wc -l)
 [ "$left" = 0 ] || { echo "$left unfinished files remain in $SUBSET" >&2; exit 1; }
+"$PY" scripts/perf/touchwam_a800/sync_mtimes.py "$SUBSET/.copy_state/copy_list.tsv" "$SUBSET"
 "$PY" scripts/perf/touchwam_a800/make_egodex_subset.py "$SUBSET/egodex_300h_video_v1" "$SUBSET/egodex_300h_video_v1_sub"
