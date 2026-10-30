@@ -277,9 +277,10 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
         per_frame = driver._video_tokens_per_frame(vstate)
         bridges = {layer: i for i, layer in enumerate(s["bridge_layers"])}
         clean_tokens = per_frame * max(1, int(pipeline_inputs.get("num_clean_prefix_frames", 0) or 0))
-        checkpoint_spec = (self.video_only_checkpoint_spec() if astate is None else
-                           getattr(self, "_gradient_checkpointing_layers", None))
-        driver.checkpoint_layers = resolve_checkpoint_layers(checkpoint_spec, vb.num_layers)
+        # Every batch here carries tactile tokens (VT when astate is None); video-only batches take the
+        # DualSystemSelfAttnArchitecture path, which applies video_only_checkpoint_spec itself.
+        driver.checkpoint_layers = resolve_checkpoint_layers(
+            getattr(self, "_gradient_checkpointing_layers", None), vb.num_layers)
         s_video = vstate.hidden_states.shape[1]
         s_action = 0 if astate is None else astate.payload.x_action.shape[1]
         mask = None
