@@ -26,6 +26,8 @@ datasets:
   agibot:
     require_publication: false
     dataset_dir: ${dataloader.subset_root}/agibot_pretrain_v1
+    # Pooled stats validate every contributor's meta/ (all 75 copied); data was copied for these two.
+    include_buckets: [task_551, task_744]
   sharpadex:
     require_publication: false
     dataset_dir: ${dataloader.subset_root}/sharpadex_native_tcp_v1_20261026/buckets

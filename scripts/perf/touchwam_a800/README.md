@@ -74,6 +74,17 @@ python scripts/perf/touchwam_a800/compare.py p0 p1 p1v --json /gaozt-test1/lyh/p
 
 **Profiler traces:** `<TAG>/<timestamp>/torch_profile/rank{0,8}.json.gz`, plus op tables in `rank*_ops.txt`.
 
+## How the subset stays readable
+
+Production readers bind the full published population. The subset therefore needs a few extra pieces. `prepare_data.sh` runs them once, before the first queued run:
+
+- **Publication contracts:** turned off with `require_publication: false` on every source.
+- **EgoDex:** the reader indexes `episodes.parquet` globally and needs every listed video. It reads `egodex_300h_video_v1_sub` instead, built by `make_egodex_subset.py`. That root holds hardlinks of the copied videos and the matching filtered index.
+- **RoboCOIN and AgiBot:** the pooled stats validate every contributor bucket's `meta/`. So all of `meta/` was copied (RoboCOIN 199 MB, AgiBot 26 MB), and `include_buckets` picks the buckets whose data was copied: four for RoboCOIN, two for AgiBot. AgiBot uses the generic LeRobot v3 root mode, which already had `include_buckets`; it was added to the RoboCOIN root mode.
+- **SharpaDex history:** the manifests bind each video's `mtime_ns`. `sync_mtimes.py` restores the bdy modification times.
+- **TouchScale:** the frozen selection covers every episode, so it is dropped.
+- **Bucket discovery:** FTP sources and TouchScale find buckets with `rglob`, so they see exactly what was copied.
+
 ## Caveats
 
 - **Memory:** two nodes shard ZeRO-2 16-way rather than 64-way, so the optimizer state costs about 4–5 GiB more per GPU than in the 64-GPU job. The production peak of 74.3 GiB reserved can therefore approach 80 GiB here.
