@@ -135,6 +135,23 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         self.checkpoint_metadata
         self.touch_v2 = RegionalTactileFlowStream(s, self.video_backbone.dim, self.action_backbone.dim)
 
+    # training.touchwam_p1 switches (OpenWAMTrainer._configure_touchwam_p1); defaults = reference path.
+    _validate_inputs = True
+    _encoder_activity_mask = False
+    _pinned_tactile_h2d = False
+
+    def configure_training_fastpath(self, *, validate_inputs=None, encoder_activity_mask=None, pinned_tactile_h2d=None):
+        """validate_inputs=False skips only checks that raise on bad input and read GPU values
+        back to the host; every value that enters the forward/loss is computed identically."""
+        if validate_inputs is not None:
+            self._validate_inputs = bool(validate_inputs)
+            if hasattr(self.touch_v2, "observation_encoder"):
+                self.touch_v2.observation_encoder._validate_inputs = bool(validate_inputs)
+        if encoder_activity_mask is not None:
+            self._encoder_activity_mask = bool(encoder_activity_mask)
+        if pinned_tactile_h2d is not None:
+            self._pinned_tactile_h2d = bool(pinned_tactile_h2d)
+
     def _apply_training_policy(self):
         super()._apply_training_policy()
         if hasattr(self.touch_v2, "observation_encoder"):
@@ -257,14 +274,17 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             raise ValueError("Explicit tactile_layout_present is required")
         ids = tensor(region_ids, 2, torch.long, "region IDs")
         present = tensor(layout_present, 2, torch.bool, "layout presence")
-        if ids.shape != present.shape or ((ids < -1) | (ids >= len(s["region_names"]))).any():
+        if ids.shape != present.shape:
             raise ValueError("Invalid region layout")
-        if (present & (ids < 0)).any():
-            raise ValueError("Padding IDs cannot be present")
-        for row in ids:
-            regions = row[row >= 0]
-            if regions.unique().numel() != regions.numel():
-                raise ValueError("Duplicate region in one sample; compose native sensors first")
+        if self._validate_inputs:
+            if ((ids < -1) | (ids >= len(s["region_names"]))).any():
+                raise ValueError("Invalid region layout")
+            if (present & (ids < 0)).any():
+                raise ValueError("Padding IDs cannot be present")
+            for row in ids:
+                regions = row[row >= 0]
+                if regions.unique().numel() != regions.numel():
+                    raise ValueError("Duplicate region in one sample; compose native sensors first")
         palm_ids = [i for i, name in enumerate(s["region_names"]) if "palm" in region_spec(name).groups]
         palms = torch.zeros_like(present)
         for i in palm_ids:
@@ -290,7 +310,8 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         active &= spatial.flatten(2).any(-1)
         spatial = spatial & active[..., None, None, None]
         sensors = torch.zeros_like(ids) if sensor_ids is None else tensor(sensor_ids, 2, torch.long, "sensor IDs")
-        if sensors.shape != ids.shape or ((sensors < 0) | (sensors >= len(s["sensor_names"]))).any():
+        if sensors.shape != ids.shape or (
+                self._validate_inputs and ((sensors < 0) | (sensors >= len(s["sensor_names"]))).any()):
             raise ValueError("Unknown sensor identity")
         if maps is None:
             if valid is not None:
@@ -344,7 +365,16 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         elif not s.get("observation_encoder") and any(x is not None for x in (observation_maps, observation_spatial_valid, encoder_ids)):
             raise ValueError("Observation encoder inputs require an enabled heterogeneous encoder")
         history, mask, available = self.touch_v2.encode_history(maps, valid, ids, sensors, spatial, codec_name, **observation_kwargs)
-        if s.get("observation_encoder"):
+        if s.get("observation_encoder") and self._encoder_activity_mask:
+            # Same set as encoder_ids[available].unique(), as a fixed-size bitmask: no host sync.
+            count = len(s["observation_encoder"]["sensors"])
+            activity = torch.zeros(count, dtype=torch.long, device=device)
+            if n:
+                keep = available & (encoder_ids >= 0) & (encoder_ids < count)
+                activity.scatter_reduce_(0, encoder_ids.clamp(0, count - 1).flatten(), keep.long().flatten(),
+                                         reduce="amax")
+            self._observed_encoder_mask = activity
+        elif s.get("observation_encoder"):
             self._observed_encoder_ids = (encoder_ids[available].unique().detach() if n
                                           else ids.new_empty(0))
         condition = (history, mask, ids, active, spatial, sensors, available)
@@ -463,7 +493,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         possible = possible & tactile_future_valid[..., None]
         tactile_future_valid = possible.any(-1)
         noisy_tactile = torch.where(possible, noisy_tactile, 0)
-        if not torch.isfinite(noisy_tactile).all():
+        if self._validate_inputs and not torch.isfinite(noisy_tactile).all():
             raise ValueError("Nonfinite noise in requested tactile regions")
         future, time = self.touch_v2.prepare_future(
             noisy_tactile, tactile_timestep, ids, sensors, spatial, self._condition_codec(touch_condition)
@@ -534,6 +564,11 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             region_names=s["region_names"], sensor_names=s["sensor_names"], codec=codec_name,
             **observation_options,
         )
+        if self._pinned_tactile_h2d and torch.cuda.is_available():
+            # One stream-ordered copy per tensor instead of a blocking (stream-syncing) copy
+            # each time _condition/compute_loss moves them. Values are unchanged.
+            tactile = {k: v.pin_memory().to(self.device, non_blocking=True)
+                       if torch.is_tensor(v) and v.device.type == "cpu" else v for k, v in tactile.items()}
         result = DualSystemSelfAttnArchitecture.prepare_inputs(self, base_samples)
         result.update(tactile)
         result["tactile_codec"] = codec_name
@@ -546,16 +581,19 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         b = inputs["input_latents"].shape[0]
         no_action = inputs.pop("video_only_mask", None)
         if no_action is not None:
-            no_action = torch.as_tensor(no_action, device=self.device)
+            # Only read on the host: keep it where the batch produced it (no copy + sync).
+            no_action = (torch.as_tensor(no_action, device=self.device) if self._validate_inputs
+                         else torch.as_tensor(no_action))
             if no_action.dtype != torch.bool or no_action.shape != (b,):
                 raise ValueError("video_only_mask must be bool [B]")
             if no_action.any() and not no_action.all():
                 raise ValueError("Use globally aligned microbatches; mixed action/no-action batches are not supported")
-            if no_action.all():
+            if no_action.all() and self._validate_inputs:
                 for key, enabled in (("action_is_pad", True), ("proprio_mask", False)):
                     value = inputs.get(key)
                     if value is not None and not (torch.as_tensor(value) == enabled).all():
                         raise ValueError(f"No-action samples contain valid {key}")
+            if no_action.all():
                 actions = None
         if actions is None:
             inputs.pop("proprio", None)
@@ -618,7 +656,7 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
         if actions is not None:
             actions = torch.as_tensor(actions, device=self.device, dtype=self.dtype)
             action_valid = self._action_valid_mask(actions, inputs.get("action_is_pad"))
-            if not torch.isfinite(actions.masked_select(action_valid)).all():
+            if self._validate_inputs and not torch.isfinite(actions.masked_select(action_valid)).all():
                 raise ValueError("Nonfinite valid action labels")
             actions = torch.where(action_valid, actions, 0)
             ai = torch.randint(len(acs.timesteps), (b,))
@@ -657,7 +695,9 @@ class RegionalTouchWAMArchitecture(TouchWAMArchitecture):
             loss_tactile_intensity=(loss_t * (codec_name != RGB_CODEC)).detach(),
             loss_tactile_rgb=(loss_t * (codec_name == RGB_CODEC)).detach(),
             tactile_labeled_regions=labels.any(1).sum().detach(), tactile_labeled_frames=labels.sum().detach(),
-            **({"observation_encoder_active_ids": self._observed_encoder_ids}
+            **({"observation_encoder_active_mask": self._observed_encoder_mask}
+               if s.get("observation_encoder") and self._encoder_activity_mask else
+               {"observation_encoder_active_ids": self._observed_encoder_ids}
                if s.get("observation_encoder") else {}),
         )
 

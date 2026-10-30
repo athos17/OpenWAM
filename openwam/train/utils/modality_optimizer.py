@@ -128,13 +128,7 @@ supported: Accelerate must retain this optimizer instance.
             self.reset_activation()
 
 
-def validate_global_modality_layout(samples, device):
-    """All ranks reject invalid/mixed graphs before entering model collectives.
-
-Region counts may differ. A T microbatch requires a nonempty declared layout
-on every rank; missing observations/targets retain the layout and use masks.
-True N=0 belongs to V/VA microbatches. Do not manufacture a tactile layout.
-"""
+def _local_layout_state(samples):
     code = batch_modality_code(samples)
     valid = code >= 0 and all(
         bool(s.get("tactile_region_names")) == ("tactile" in s.get("training_modality", "video_action"))
@@ -149,20 +143,102 @@ True N=0 belongs to V/VA microbatches. Do not manufacture a tactile layout.
         shape = batch_tactile_observation_shape(samples) or (0, 0)
     except ValueError:
         shape, valid = (-1, -1), False
-    state = torch.tensor([code, int(valid), codec, *shape], device=device, dtype=torch.int64)
-    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
-        states = [torch.empty_like(state) for _ in range(dist.get_world_size())]
-        dist.all_gather(states, state)
-    else:
-        states = [state]
-    values = [s.tolist() for s in states]
+    return [code, int(valid), codec, *shape]
+
+
+def _check_layout_states(values):
     if not all(v[1] for v in values) or len({(v[0], *v[2:]) for v in values}) != 1:
         raise ValueError(
             f"TouchWAM distributed microbatches require one global modality, tactile codec, observation shape and matching layout presence; "
             f"got [modality_code, valid_layout, tactile_codec, observation_h, observation_w] per rank: {values}. Use GlobalModalitySampler; "
             "T samples keep their real regional layout and mark missing data with masks; V/VA use N=0."
         )
-    return next(name for name, value in MODALITY_CODES.items() if value == code)
+    return next(name for name, value in MODALITY_CODES.items() if value == values[0][0])
+
+
+def validate_global_modality_layout(samples, device):
+    """All ranks reject invalid/mixed graphs before entering model collectives.
+
+Region counts may differ. A T microbatch requires a nonempty declared layout
+on every rank; missing observations/targets retain the layout and use masks.
+True N=0 belongs to V/VA microbatches. Do not manufacture a tactile layout.
+"""
+    state = torch.tensor(_local_layout_state(samples), device=device, dtype=torch.int64)
+    if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+        states = [torch.empty_like(state) for _ in range(dist.get_world_size())]
+        dist.all_gather(states, state)
+    else:
+        states = [state]
+    return _check_layout_states([s.tolist() for s in states])
+
+
+class DeferredModalitySync:
+    """``training.touchwam_p1.deferred_modality_sync``: same checks and optimizer activation,
+    without stalling the host mid-step.
+
+    The blocking path all-gathers the layout before ``prepare_inputs`` and all-reduces the
+    observed encoder IDs right after the forward; each ``.tolist()`` drains the CUDA stream
+    and waits for the slowest rank. Here the layout (CPU batch metadata) goes through a
+    gloo all-gather in the background, and the per-encoder activity bitmask is all-reduced on
+    the stream and copied to pinned memory. Both are resolved after ``engine.backward`` has
+    queued the whole backward and before ``engine.step`` runs the optimizer, which is the
+    only consumer. The first ``blocking_steps`` steps keep the blocking check, so a broken
+    sampler still fails before any ZeRO collective at startup.
+    """
+
+    def __init__(self, device, encoder_count, blocking_steps=20):
+        self.device, self.encoder_count, self.blocking_steps = device, encoder_count, blocking_steps
+        self.distributed = dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1
+        # Collective call: every rank constructs this object at the same point of startup.
+        self.group = dist.new_group(backend="gloo") if self.distributed else None
+        self._mask_host = torch.zeros(encoder_count, dtype=torch.int64, pin_memory=torch.cuda.is_available())
+        self.reset()
+
+    def reset(self):
+        self._modality = self._layout_work = self._layout_out = None
+        self._codec = None
+        self._mask_event = None
+
+    def start_layout(self, samples, step):
+        from openwam.dataloader.modality_sampler import batch_tactile_codec
+
+        if self._modality is not None or self._layout_work is not None:
+            raise RuntimeError("Previous microbatch modality was never resolved")
+        if step < self.blocking_steps or not self.distributed:
+            self._modality = validate_global_modality_layout(samples, self.device)
+        else:
+            state = torch.tensor(_local_layout_state(samples), dtype=torch.int64)
+            self._layout_out = [torch.empty_like(state) for _ in range(dist.get_world_size())]
+            self._layout_work = dist.all_gather(self._layout_out, state, group=self.group, async_op=True)
+        try:
+            self._codec = batch_tactile_codec(samples)
+        except ValueError:
+            self._codec = None  # the layout check reports the mixed codec on every rank
+
+    def start_encoders(self, mask):
+        """``mask``: int64 [encoder_count] on device, 1 where an encoder observed real input."""
+        if mask.shape != (self.encoder_count,) or mask.dtype != torch.int64:
+            raise ValueError("Observation encoder activity must be int64 [encoder_count]")
+        if self.distributed:
+            dist.all_reduce(mask, op=dist.ReduceOp.MAX, async_op=True).wait()  # stream wait only
+        self._mask_host.copy_(mask, non_blocking=True)
+        self._mask_event = torch.cuda.Event()
+        self._mask_event.record()
+
+    def resolve(self):
+        """(modality, observed encoder IDs) for ``ModalityAwareAdamW.activate``."""
+        if self._layout_work is not None:
+            self._layout_work.wait()
+            self._modality = _check_layout_states([s.tolist() for s in self._layout_out])
+        if self._modality is None:
+            raise RuntimeError("resolve() before start_layout()")
+        ids = []
+        if self._mask_event is not None:
+            self._mask_event.synchronize()
+            ids = self._mask_host.nonzero(as_tuple=False).flatten().tolist()
+        modality, codec = self._modality, self._codec
+        self.reset()
+        return modality, codec, ids
 
 
 def global_observation_encoder_ids(inputs, encoder_count, device, *, actual_ids=None):

@@ -75,6 +75,7 @@ class StepTimer:
         mfu: bool = False,
         peak_tflops: Optional[float] = None,
         record_steps: int = 0,
+        peak_per_step: bool = False,
     ):
         self.enabled = bool(enabled)
         self.summary_every = int(summary_every)
@@ -82,6 +83,8 @@ class StepTimer:
         self.output_path = output_path
         self.is_main = is_main
         self.record_steps = int(record_steps)
+        # Reset the allocator high-water mark each step, so peaks are per modality/step.
+        self.peak_per_step = bool(peak_per_step)
         self._records = []
         self.mfu = self.enabled and bool(mfu)
         self.peak_tflops = float(peak_tflops) if peak_tflops else (detect_peak_tflops() if self.mfu else None)
@@ -109,6 +112,7 @@ class StepTimer:
             mfu=bool(cfg.get("mfu", False)),
             peak_tflops=cfg.get("peak_tflops"),
             record_steps=int(cfg.get("record_steps", 0)),
+            peak_per_step=bool(cfg.get("peak_per_step", False)),
             **kw,
         )
 
@@ -187,6 +191,8 @@ class StepTimer:
     def begin_step(self) -> None:
         if not self.enabled:
             return
+        if self.peak_per_step and self._cuda:
+            torch.cuda.reset_peak_memory_stats()
         now = time.perf_counter()
         self._data_wait = 0.0 if self._loop_end is None else now - self._loop_end
         self._prev_step_t0, self._step_t0 = self._step_t0, now
@@ -206,7 +212,7 @@ class StepTimer:
                 out[f"{name}_gpu_s"] = out.get(f"{name}_gpu_s", 0.0) + start.elapsed_time(end) / 1000.0
         self._pending.clear()
         if self._cuda:
-            # Allocator high-water mark since start (GiB); a running max, not per step.
+            # Allocator high-water mark since start (GiB); a running max unless peak_per_step.
             out["peak_allocated_gib"] = torch.cuda.max_memory_allocated() / (1 << 30)
             out["peak_reserved_gib"] = torch.cuda.max_memory_reserved() / (1 << 30)
         if self.forward_flops:

@@ -398,6 +398,7 @@ class OpenWAMTrainer:
                 epoch_iter = dataloader
             for batch in epoch_iter:
                 timer.begin_step()
+                self._global_step = global_step
                 if self._run_seed is not None:
                     step_seed = per_step_seed(self._run_seed, rank=self._rank, step=global_step)
                     torch.manual_seed(step_seed)
@@ -411,7 +412,7 @@ class OpenWAMTrainer:
                         losses = self.compute_loss(batch)
                     loss = losses["total"]
                     with timer.stage("backward"):
-                        self.accelerator.backward(loss)
+                        self._backward_and_step(loss)
 
                     grad_norm = torch.tensor(0.0, device=loss.device)
                     if self.accelerator.sync_gradients:
@@ -699,12 +700,68 @@ class OpenWAMTrainer:
                     self._overlap_frozen_inputs = False
             deferred_allgather.install()
             self._owns_deferred_allgather = True
+        self._configure_touchwam_p1(arch)
         logger.info(
             "architecture wrapped (%s), device=%s",
             type(self.architecture).__name__,
             self.accelerator.device,
         )
         return optimizer, dataloader, scheduler
+
+    def _configure_touchwam_p1(self, arch) -> None:
+        """``training.touchwam_p1``: host-sync removals with unchanged training values.
+
+        - ``deferred_modality_sync``: see :class:`DeferredModalitySync`; needs the
+          ModalityAwareAdamW and the DeepSpeed engine (backward and step are split).
+        - ``deferred_blocking_steps``: steps that keep the blocking layout check (default 20).
+        - ``input_validation_steps``: after this many steps, skip TouchWAM's pure input
+          checks that read GPU values back (``.any()``/``.item()``/``unique``); null keeps them.
+        - ``pinned_tactile_h2d``: collated tactile tensors go to the GPU from pinned memory
+          without a stream sync per tensor.
+        """
+        cfg = getattr(self, "cfg", None)
+        p1 = dict(cfg.training.get("touchwam_p1") or {}) if cfg is not None else {}
+        unknown = set(p1) - {"deferred_modality_sync", "deferred_blocking_steps", "input_validation_steps",
+                             "pinned_tactile_h2d"}
+        if unknown:
+            raise ValueError(f"Unknown training.touchwam_p1 keys: {sorted(unknown)}")
+        self._input_validation_steps = p1.get("input_validation_steps")
+        self._deferred_modality = None
+        deferred = bool(p1.get("deferred_modality_sync", False))
+        if not (deferred or p1.get("pinned_tactile_h2d") or self._input_validation_steps is not None):
+            return
+        if not hasattr(arch, "configure_training_fastpath"):
+            raise ValueError("training.touchwam_p1 requires a TouchWAM regional architecture")
+        arch.configure_training_fastpath(pinned_tactile_h2d=bool(p1.get("pinned_tactile_h2d", False)),
+                                         encoder_activity_mask=deferred)
+        if deferred:
+            if getattr(self, "_modality_optimizer", None) is None:
+                raise ValueError("deferred_modality_sync requires the TouchWAM modality-aware optimizer")
+            if getattr(self.accelerator, "deepspeed_engine_wrapped", None) is None:
+                raise ValueError("deferred_modality_sync splits DeepSpeed backward/step; DeepSpeed is required")
+            from openwam.train.utils.modality_optimizer import DeferredModalitySync
+
+            observation = getattr(arch, "tactile_spec", {}).get("observation_encoder") or {}
+            count = len(observation["sensors"]) if observation.get("kind") == "ftp1_heterogeneous_v1" else 0
+            self._deferred_modality = DeferredModalitySync(
+                self.accelerator.device, count, blocking_steps=int(p1.get("deferred_blocking_steps", 20)))
+        logger.info("touchwam_p1: %s", p1)
+
+    def _backward_and_step(self, loss) -> None:
+        """``accelerator.backward`` for DeepSpeed, with the optimizer activation resolved after
+        ``engine.backward`` has queued the backward (DeepSpeedEngineWrapper.backward otherwise)."""
+        deferred = getattr(self, "_deferred_modality", None)
+        if deferred is None:
+            self.accelerator.backward(loss)
+            return
+        engine = self.accelerator.deepspeed_engine_wrapped.engine
+        sync = self.accelerator.sync_gradients
+        engine.set_gradient_accumulation_boundary(is_boundary=sync)
+        engine.backward(loss)
+        modality, codec, encoder_ids = deferred.resolve()
+        self._modality_optimizer.activate(modality, codec, observation_encoder_ids=encoder_ids)
+        if sync:
+            engine.step()
 
     def _configure_input_fast_paths(self, arch) -> None:
         """Opt-in frozen-encoder input options; runs after frozen modules reach the device.
@@ -836,14 +893,22 @@ class OpenWAMTrainer:
             batch = [batch]
 
         active_modality = None
-        if getattr(self, "_modality_optimizer", None) is not None:
+        deferred = getattr(self, "_deferred_modality", None)
+        step = getattr(self, "_global_step", 0)
+        limit = getattr(self, "_input_validation_steps", None)
+        if limit is not None and step == limit:
+            self.accelerator.unwrap_model(self.architecture).configure_training_fastpath(validate_inputs=False)
+        if deferred is not None:
+            deferred.start_layout(batch, step)
+        elif getattr(self, "_modality_optimizer", None) is not None:
             from openwam.train.utils.modality_optimizer import validate_global_modality_layout
 
             active_modality = validate_global_modality_layout(batch, self.accelerator.device)
 
         # Reject an external sampler that could deadlock ZeRO-2 before any
         # model backward starts. The normal mixture loader aligns these flags.
-        if (active_modality is None and getattr(self, "accelerator", None) is not None and self.accelerator.num_processes > 1
+        if (active_modality is None and deferred is None and getattr(self, "accelerator", None) is not None
+                and self.accelerator.num_processes > 1
                 and len(set(getattr(getattr(self, "dataset", None), "source_modalities", []))) > 1):
             import torch.distributed as dist
 
@@ -875,6 +940,8 @@ class OpenWAMTrainer:
                 lambda_video=self.lambda_video,
                 lambda_action=self.lambda_action,
             )
+        if deferred is not None and deferred.encoder_count:
+            deferred.start_encoders(result["observation_encoder_active_mask"])
         if active_modality is not None:
             from openwam.dataloader.modality_sampler import batch_tactile_codec
 

@@ -1,0 +1,51 @@
+# Six-source TouchWAM mixture on the a800 vePFS subset (scripts/perf/touchwam_a800/README.md).
+# Same sources, weights, readers and per-sample processing as touchwam_six_source_20261029; only the
+# population shrinks to median-size buckets copied from bdy PFS (1-3 per source, 1-2 per FTP source).
+# Publication contracts bind the full population, so they are off here; bucket discovery picks up
+# exactly the copied buckets. TouchScale's frozen selection already holds every episode of every
+# shard, so dropping it selects the same episodes of the copied shards.
+defaults:
+  - touchwam_six_source_20261029
+  - _self_
+
+subset_root: ${oc.env:TOUCHWAM_SUBSET_ROOT,/gaozt-test1/lyh/datasets/touchwam_subset_v1}
+data_root: ${dataloader.subset_root}/touchwam_pretrain_v1_20261028
+ftp1_root: ${dataloader.subset_root}/ftp1_frozen25h_v1_20261029
+datasets:
+  robocoin:
+    require_publication: false
+    dataset_dir: ${dataloader.subset_root}/robocoin_200h_v1_20261029
+    trim_csv: ${dataloader.subset_root}/robocoin_200h_v1_20261029/selection_trim.csv
+  egodex:
+    require_publication: false
+    dataset_dir: ${dataloader.subset_root}/egodex_300h_video_v1
+  agibot:
+    require_publication: false
+    dataset_dir: ${dataloader.subset_root}/agibot_pretrain_v1
+  sharpadex:
+    require_publication: false
+    dataset_dir: ${dataloader.subset_root}/sharpadex_native_tcp_v1_20261026/buckets
+    tactile_observation_root: ${dataloader.subset_root}/sharpadex_deform_history_v1_20261029
+  touchscale:
+    require_publication: false
+    dataset_dir: ${dataloader.subset_root}/touchscale_lerobot_v3_full_v1_20261029/buckets
+    episode_selection_manifest: null
+    episode_selection_sha256: null
+  ftp_freetacman:
+    require_publication: false
+  ftp_rdp_bimanual:
+    require_publication: false
+  ftp_vla_touch:
+    require_publication: false
+  ftp_vitamin:
+    require_publication: false
+  ftp_exumi:
+    require_publication: false
+  ftp_motiontrans:
+    require_publication: false
+  ftp_rh20tcfg5franka:
+    require_publication: false
+  ftp_rh20tcfg6atiaxia:
+    require_publication: false
+  ftp_rh20tcfg7tactile:
+    require_publication: false

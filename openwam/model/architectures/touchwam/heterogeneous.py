@@ -187,6 +187,9 @@ def normalize_encoder_spec(value, source_names):
 
 
 class HeterogeneousObservationEncoder(nn.Module):
+    # RegionalTouchWAMArchitecture.configure_training_fastpath(validate_inputs=False) clears it.
+    _validate_inputs = True
+
     def __init__(self, spec, output_width, source_names):
         super().__init__()
         self.spec, self.source_names = spec, list(source_names)
@@ -275,17 +278,18 @@ class HeterogeneousObservationEncoder(nn.Module):
         if not n:
             return maps.new_zeros(b, 0, self.output_width), valid.new_zeros(b, 0), valid.any(1)
         supported = spatial.flatten(2).any(-1)
-        if ((encoder_ids < -1) | (encoder_ids >= len(self.encoder_names))
-                | ((encoder_ids < 0) & (supported | valid.any(1)))).any():
-            raise ValueError("Unknown tactile encoder ID")
-        real_ids = encoder_ids[supported]
-        if real_ids.numel() and tuple((h, w)) != self.observation_shape(real_ids):
-            raise ValueError("Observation maps must preserve the configured image/matrix spatial resolution")
+        if self._validate_inputs:
+            if ((encoder_ids < -1) | (encoder_ids >= len(self.encoder_names))
+                    | ((encoder_ids < 0) & (supported | valid.any(1)))).any():
+                raise ValueError("Unknown tactile encoder ID")
+            real_ids = encoder_ids[supported]
+            if real_ids.numel() and tuple((h, w)) != self.observation_shape(real_ids):
+                raise ValueError("Observation maps must preserve the configured image/matrix spatial resolution")
         pixel_valid = valid[..., None, None, None] & spatial[:, None]
         finite = (torch.isfinite(maps) | ~pixel_valid).flatten(3).all(-1)
         observed = valid & finite & spatial.flatten(2).any(-1)[:, None]
         pixel_valid &= observed[..., None, None, None]
-        if ((maps < 0) | (maps > 1)).masked_select(pixel_valid).any():
+        if self._validate_inputs and ((maps < 0) | (maps > 1)).masked_select(pixel_valid).any():
             raise ValueError("Observation values must be source-normalized [0,1]")
         maps = torch.where(pixel_valid, maps, 0)
         result = maps.new_zeros(b * t * n, 4, self.output_width)
@@ -305,7 +309,7 @@ class HeterogeneousObservationEncoder(nn.Module):
                     raise ValueError(f"Unregistered source/encoder pair: {source}/{name}")
                 x, mask = flat[selection], roi[selection]
                 if sensor["kind"] == "image":
-                    if not self.weights_initialized.item():
+                    if self._validate_inputs and not self.weights_initialized.item():
                         raise RuntimeError("FTP-1 observation weights not initialized; load pinned weights or full checkpoint")
                     expected_channels = 3 if sensor["input_representation"] == "rgb" else 1
                     if c != expected_channels:

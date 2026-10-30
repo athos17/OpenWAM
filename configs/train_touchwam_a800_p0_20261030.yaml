@@ -1,0 +1,33 @@
+# P0 baseline on 2x8 A800: the 64-GPU bs48 production recipe (job-v19j6o92tot0) unchanged except
+# for the data subset and run length. Same seed, so P0 and every P1 variant see the same samples,
+# timesteps and noise step by step; LR follows the production 34,599-step schedule.
+defaults:
+  - train_touchwam_six_source_64gpu_bs48_20261030
+  - override dataloader: touchwam_a800_subset_20261030
+  - _self_
+
+training:
+  finetune_ckpt_path: ${oc.env:TOUCHWAM_OPENWAM_CKPT,/gaozt-test1/lyh/models/OpenWAM-Alpha-Pretrain-Foundation-Model/checkpoint_step_154000.safetensors}
+  num_epochs: null
+  max_steps: 34599
+  stop_after_steps: 300
+  save_steps: 0
+  save_full_states_for_resume: false
+  max_gpu_memory_gib: null
+  step_timing:
+    enabled: true
+    summary_every: 50
+    record_steps: 300
+    peak_per_step: true
+    mfu: false
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/gaozt-test1/lyh/perf_runs/touchwam_a800/p0}
+
+model:
+  architecture:
+    tactile:
+      observation_encoder:
+        weights_root: ${oc.env:TOUCHWAM_FTP1_ENCODER_ROOT,/gaozt-test1/lyh/models/FTP-1-Tactile-Encoder/d6e5b73e473d3e70fb5f53132a2b1c35b5031156}
+
+project:
+  name: touchwam-a800-p0-20261030
+  wandb: null

@@ -1,0 +1,16 @@
+# P1 on 2x8 A800: P0 plus the host-sync removals of training.touchwam_p1. No recipe change:
+# per-step losses must match P0 (up to nondeterministic kernels).
+defaults:
+  - train_touchwam_a800_p0_20261030
+  - _self_
+
+training:
+  touchwam_p1:
+    deferred_modality_sync: true
+    deferred_blocking_steps: 20
+    input_validation_steps: 20
+    pinned_tactile_h2d: true
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/gaozt-test1/lyh/perf_runs/touchwam_a800/p1}
+
+project:
+  name: touchwam-a800-p1-20261030

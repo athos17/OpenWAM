@@ -1,0 +1,14 @@
+# P1 + fewer recomputed layers on video-only steps (layers 0-14 instead of 0-19). Video-only steps
+# carry no action/tactile activations, so they have headroom under the robot-step peak. Two nodes
+# shard ZeRO-2 16-way (more memory per GPU than the 64-GPU job), so fitting here implies fitting
+# there. Values are unchanged; only activation storage vs recompute differs.
+defaults:
+  - train_touchwam_a800_p1_20261030
+  - _self_
+
+training:
+  gradient_checkpointing_layers_video_only: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/gaozt-test1/lyh/perf_runs/touchwam_a800/p1v}
+
+project:
+  name: touchwam-a800-p1v-20261030
