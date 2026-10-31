@@ -32,6 +32,8 @@ STAGES = ("data_wait_cpu_s", "encode_text_gpu_s", "encode_video_gpu_s", "prepare
           "forward_gpu_s", "ds_backward_gpu_s", "ds_step_gpu_s", "backward_cpu_s", "metrics_reduce_gpu_s",
           "step_cpu_s")
 LOSSES = ("loss", "loss_video", "loss_action", "loss_tactile", "grad_norm")
+# training.backend=fsdp2: backward is plain autograd and the optimizer step runs in the loop's own stage.
+FSDP2_STAGES = {"ds_backward_gpu_s": "backward_gpu_s", "ds_step_gpu_s": "optimizer_wrapper_gpu_s"}
 
 
 def run_dir(root, tag):
@@ -63,6 +65,8 @@ def load(path, lo, hi=None):
         for key in STAGES:
             if key == "forward_gpu_s":
                 vals = [r.get("compute_loss_gpu_s", 0.0) - r.get("prepare_inputs_gpu_s", 0.0) for r in recs]
+            elif key in FSDP2_STAGES and key not in recs[0]:
+                vals = [r.get(FSDP2_STAGES[key], 0.0) for r in recs]
             else:
                 vals = [r.get(key, 0.0) for r in recs]
             row[key] = st.median(vals)
