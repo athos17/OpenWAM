@@ -62,6 +62,7 @@ class FSDP2Accelerator:
     deepspeed_engine_wrapped = None
     optimizer_step_was_skipped = False
     mixed_precision = "bf16"
+    min_shard = 2
 
     def __init__(self, cfg):
         t = cfg.training
@@ -98,6 +99,10 @@ class FSDP2Accelerator:
         if replicate < 1 or self.num_processes % replicate:
             raise ValueError(f"training.fsdp2.replicate={replicate} must divide world size {self.num_processes}")
         self.replicate, self.shard = replicate, self.num_processes // replicate
+        if self.shard < self.min_shard:
+            # On a 1-GPU shard group the tiny-model gate gives a wrong gradient for part of the
+            # Wan blocks' ``modulation`` (exact at 2 and 8); unexplained, and never a training layout.
+            raise ValueError("training.backend=fsdp2 needs at least 2 GPUs per shard group")
         if replicate > 1:
             self.mesh = init_device_mesh("cuda", (replicate, self.shard), mesh_dim_names=("dp_replicate", "dp_shard"))
         else:

@@ -64,7 +64,7 @@ def phase(args):
         "num_epochs": None, "max_steps": args.steps * args.grad_accum, "batch_size": 1,
         "gradient_accumulation_steps": args.grad_accum, "dataset_num_workers": 0, "max_grad_norm": args.max_grad_norm,
         "learning_rate": 1e-3, "weight_decay": 0.01, "offload_optimizer_device": "none", "zero_stage": 2,
-        "mixed_precision": mixed, "backend": args.backend, "fsdp2": {"replicate": args.replicate},
+        "mixed_precision": mixed, "backend": args.backend, "fsdp2": {"replicate": args.replicate, "reshard_after_forward": not args.no_reshard},
         "lr_scheduler": "cosine", "warmup_ratio": 0.25, "lr_min_ratio": 0.01, "save_steps": 0,
         "keep_last_k_ckpts": -1, "output_path": str(out / f"run_{args.backend}_{args.precision}_w{world}")},
         "project": {"seed": 42, "wandb": None}, "model": {}})
@@ -78,17 +78,55 @@ def phase(args):
         accelerator = Accelerator(deepspeed_plugin=plugin, gradient_accumulation_steps=args.grad_accum,
                                   mixed_precision=mixed)
     else:
-        from openwam.train.fsdp2.accelerator import FSDP2Accelerator
+        import openwam.train.fsdp2.accelerator as fsdp2_accelerator
 
-        accelerator = FSDP2Accelerator(cfg)
+        if args.backend == "eager":
+            # Reference: the FSDP2 backend's loop with nothing sharded (single GPU only).
+            class PlainRoot(torch.nn.Module):
+                def __init__(self, arch):
+                    super().__init__()
+                    self.arch = arch
+
+                def compute_loss(self, **kwargs):
+                    return self.arch.compute_loss(**kwargs)
+
+                def set_requires_all_reduce(self, value):
+                    pass
+
+            fsdp2_accelerator.parallelize_touchwam = lambda arch, mesh, **kw: (PlainRoot(arch), [])
+        if args.backend == "eager" or os.environ.get("GATE_ALLOW_SHARD1"):
+            fsdp2_accelerator.FSDP2Accelerator.min_shard = 1
+        accelerator = fsdp2_accelerator.FSDP2Accelerator(cfg)
+        if os.environ.get("GATE_DUMP_GRADS"):
+            plain_clip = accelerator.clip_grad_norm_
+
+            def clip(params, max_norm, *a):
+                params = list(params)
+                if not getattr(clip, "done", False):
+                    clip.done = True
+                    names = {id(p): n for n, p in model.named_parameters()}
+                    grads = {names[id(p)]: (p.grad.full_tensor() if isinstance(p.grad, DTensor) else p.grad).float().cpu()
+                             for p in params if p.grad is not None}
+                    if rank == 0:
+                        torch.save(grads, os.environ["GATE_DUMP_GRADS"])
+                return plain_clip(params, max_norm, *a)
+
+            accelerator.clip_grad_norm_ = clip
+        if args.sum_accum:
+            # Reproduce OpenWAM's DeepSpeed path, which sums microbatch gradients: DeepSpeed 0.18
+            # applies 1/G in an output hook installed by engine.forward, which the trainer bypasses.
+            plain_backward = accelerator.backward
+            accelerator.backward = lambda loss: plain_backward(loss * args.grad_accum)
 
     model = tiny_model(torch.device("cpu"), dtype)
-    model.set_training_runtime(use_gradient_checkpointing=True, use_gradient_checkpointing_offload=False,
+    model.set_training_runtime(use_gradient_checkpointing=not args.no_gc, use_gradient_checkpointing_offload=False,
                                max_timestep_boundary=1.0, min_timestep_boundary=0.0)
 
     def prepare_latents(self, samples):
-        return make_inputs(samples[0]["training_modality"], self.device, self.dtype,
-                           tactile_codec=samples[0].get("tactile_codec"))
+        inputs = make_inputs(samples[0]["training_modality"], self.device, self.dtype,
+                             tactile_codec=samples[0].get("tactile_codec"))
+        inputs["use_gradient_checkpointing"] = not args.no_gc
+        return inputs
 
     model.prepare_inputs = MethodType(prepare_latents, model)
     model.save_assets_for_deployment = MethodType(lambda self, path, cfg: None, model)
@@ -166,12 +204,13 @@ ACTIVE = {"video_only": {"video"}, "video_action": {"video", "action", "proprio"
           "video_action_tactile": {"video", "action", "proprio", "tactile", "tactile_intensity"}}
 
 
-def compare(paths, tol):
+def compare(paths, tol, loss_only=False):
     import torch
 
     ref, other = (torch.load(p, weights_only=False) for p in paths)
     print(f"reference {paths[0]}  vs  {paths[1]}")
     worst = 0.0
+    worst_loss = 0.0
     prev_r, prev_o = ref["initial"], other["initial"]
     for name in prev_r:
         assert torch.equal(prev_r[name], prev_o[name]), f"initial weights differ: {name}"
@@ -192,7 +231,9 @@ def compare(paths, tol):
                     if not torch.equal(prev[name], cur[name]):
                         untouched_bad.append(f"{run}:{name}")
         worst = max(worst, step_worst)
-        flag = "ok" if step_worst <= tol and not untouched_bad else "FAIL"
+        loss_rel = abs(sr["loss"] - so["loss"]) / abs(sr["loss"])
+        worst_loss = max(worst_loss, loss_rel)
+        flag = "ok" if (loss_rel if loss_only else step_worst) <= tol and not untouched_bad else "FAIL"
         ok &= flag == "ok"
         print(f"step {i + 1:2d} {sr['modality']:22s} loss {sr['loss']:.6f}/{so['loss']:.6f} "
               f"gnorm {sr['grad_norm']:.4f}/{so['grad_norm']:.4f}  max_param |diff|/|update| {step_worst:.2e}  "
@@ -200,24 +241,30 @@ def compare(paths, tol):
         if untouched_bad:
             print("   ", untouched_bad[:6])
         prev_r, prev_o = sr["params"], so["params"]
-    print(f"worst relative difference {worst:.2e} (tolerance {tol:g}); peak MiB {ref['peak_mib']:.0f}/{other['peak_mib']:.0f}")
+    print(f"worst parameter difference {worst:.2e}, worst relative loss difference {worst_loss:.2e} "
+          f"({'loss' if loss_only else 'parameter'} tolerance {tol:g}); peak MiB {ref['peak_mib']:.0f}/{other['peak_mib']:.0f}")
     print("GATE PASSED" if ok else "GATE FAILED")
     return ok
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=("deepspeed", "fsdp2"))
+    parser.add_argument("--backend", choices=("deepspeed", "fsdp2", "eager"))
     parser.add_argument("--precision", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--replicate", type=int, default=None)
     parser.add_argument("--adam-eps", type=float, default=1e-4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--no-gc", action="store_true", help="disable activation recompute")
+    parser.add_argument("--no-reshard", action="store_true", help="fsdp2: reshard_after_forward=false")
+    parser.add_argument("--sum-accum", action="store_true", help="fsdp2: sum microbatch gradients like the DeepSpeed path")
+    parser.add_argument("--loss-only", action="store_true",
+                        help="compare: judge by relative loss difference (bf16, where parameter rounding dominates)")
     parser.add_argument("--out")
     parser.add_argument("--compare", nargs=2)
     parser.add_argument("--tol", type=float, default=1e-3)
     a = parser.parse_args()
     if a.compare:
-        raise SystemExit(0 if compare(a.compare, a.tol) else 1)
+        raise SystemExit(0 if compare(a.compare, a.tol, a.loss_only) else 1)
     phase(a)
