@@ -1,0 +1,7 @@
+# TAG                CONFIG                               [PROFILE=1] [hydra overrides]
+# P4 on 2x8 A800, one switch at a time on top of F0 (FSDP2 / HSDP 2x8), 30 profiled steps each
+# (steps 23-30 traced on ranks 0 and 8); compare against f0_prof / p1_prof.
+f1_pf                train_touchwam_a800_f0_20261031      PROFILE=1 training.stop_after_steps=30 training.step_timing.record_steps=30 training.fsdp2.forward_prefetch=true
+f1_pf_bf16           train_touchwam_a800_f0_20261031      PROFILE=1 training.stop_after_steps=30 training.step_timing.record_steps=30 training.fsdp2.forward_prefetch=true training.fsdp2.reduce_dtype=bf16
+f1_pf_bf16_fused     train_touchwam_a800_f0_20261031      PROFILE=1 training.stop_after_steps=30 training.step_timing.record_steps=30 training.fsdp2.forward_prefetch=true training.fsdp2.reduce_dtype=bf16 training.optimizer_fused=true
+f1_full16            train_touchwam_a800_f0_20261031      PROFILE=1 training.stop_after_steps=30 training.step_timing.record_steps=30 training.fsdp2.forward_prefetch=true training.fsdp2.reduce_dtype=bf16 training.fsdp2.replicate=1

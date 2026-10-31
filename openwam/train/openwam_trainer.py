@@ -510,9 +510,12 @@ class OpenWAMTrainer:
                 action_lr=float(t.action_lr) if getattr(t, "action_lr", None) else None,
                 video_lr=float(t.video_lr) if getattr(t, "video_lr", None) else None,
             )
+            # training.optimizer_fused: one fused AdamW kernel per group instead of foreach ops,
+            # far less host time on FSDP2's DTensor parameters (rounding-level change).
             self._modality_optimizer = ModalityAwareAdamW(
                 params, lr=float(t.learning_rate), weight_decay=float(t.weight_decay),
                 betas=tuple(getattr(t, "adam_betas", [0.9, 0.95])),
+                **({"fused": True} if t.get("optimizer_fused", False) else {}),
             )
             return self._modality_optimizer
         params = build_trainable_parameters(

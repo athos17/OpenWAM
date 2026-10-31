@@ -67,7 +67,7 @@ class FSDP2Accelerator:
     def __init__(self, cfg):
         t = cfg.training
         f = dict(t.get("fsdp2") or {})
-        unknown = set(f) - {"replicate", "param_dtype", "reduce_dtype", "reshard_after_forward"}
+        unknown = set(f) - {"replicate", "param_dtype", "reduce_dtype", "reshard_after_forward", "forward_prefetch"}
         if unknown:
             raise ValueError(f"Unknown training.fsdp2 keys: {sorted(unknown)}")
         if str(t.get("mixed_precision", "bf16")) not in ("bf16", "no"):
@@ -82,6 +82,7 @@ class FSDP2Accelerator:
         self.reduce_dtype = _DTYPES[f.get("reduce_dtype") or ("fp32" if self.param_dtype is not None else None)]
         rafs = f.get("reshard_after_forward")
         self.reshard_after_forward = True if rafs is None else bool(rafs)
+        self.forward_prefetch = bool(f.get("forward_prefetch") or False)
         self.gradient_accumulation_steps = int(t.gradient_accumulation_steps)
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -128,7 +129,7 @@ class FSDP2Accelerator:
         arch.move_frozen_to_device(self.device)
         self.root, self._replicated = parallelize_touchwam(
             arch, self.mesh, param_dtype=self.param_dtype, reduce_dtype=self.reduce_dtype,
-            reshard_after_forward=self.reshard_after_forward,
+            reshard_after_forward=self.reshard_after_forward, forward_prefetch=self.forward_prefetch,
         )
         self.training_forward = self.root.compute_loss
         torch.cuda.empty_cache()

@@ -64,7 +64,10 @@ def phase(args):
         "num_epochs": None, "max_steps": args.steps * args.grad_accum, "batch_size": 1,
         "gradient_accumulation_steps": args.grad_accum, "dataset_num_workers": 0, "max_grad_norm": args.max_grad_norm,
         "learning_rate": 1e-3, "weight_decay": 0.01, "offload_optimizer_device": "none", "zero_stage": 2,
-        "mixed_precision": mixed, "backend": args.backend, "fsdp2": {"replicate": args.replicate, "reshard_after_forward": not args.no_reshard},
+        "mixed_precision": mixed, "backend": args.backend, "fsdp2": {"replicate": args.replicate, "reshard_after_forward": not args.no_reshard,
+                                                                 "forward_prefetch": args.prefetch,
+                                                                 "reduce_dtype": args.reduce_dtype},
+        "optimizer_fused": args.fused,
         "lr_scheduler": "cosine", "warmup_ratio": 0.25, "lr_min_ratio": 0.01, "save_steps": args.save_steps,
         "save_full_states_for_resume": args.save_steps > 0, "resume_ckpt_path": args.resume_from,
         "keep_last_k_ckpts": -1, "output_path": str(out / f"run_{args.backend}_{args.precision}_w{world}")},
@@ -304,6 +307,9 @@ if __name__ == "__main__":
     parser.add_argument("--adam-eps", type=float, default=1e-4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--no-gc", action="store_true", help="disable activation recompute")
+    parser.add_argument("--prefetch", action="store_true", help="fsdp2: forward_prefetch")
+    parser.add_argument("--fused", action="store_true", help="optimizer_fused")
+    parser.add_argument("--reduce-dtype", default=None, help="fsdp2: reduce_dtype (bf16 / fp32)")
     parser.add_argument("--no-reshard", action="store_true", help="fsdp2: reshard_after_forward=false")
     parser.add_argument("--sum-accum", action="store_true", help="fsdp2: sum microbatch gradients like the DeepSpeed path")
     parser.add_argument("--save-steps", type=int, default=0, help="checkpoint every N steps (weights + resumable state)")

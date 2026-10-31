@@ -58,6 +58,7 @@ def parallelize_touchwam(
     reduce_dtype: torch.dtype | None,
     master_dtype: torch.dtype = torch.float32,
     reshard_after_forward: bool = True,
+    forward_prefetch: bool = False,
 ) -> tuple[TrainRoot, list[nn.Parameter]]:
     """Shard ``arch`` in place; returns the FSDP root and the replicated trainable params.
 
@@ -96,6 +97,13 @@ def parallelize_touchwam(
         _upcast_trainable(bridge, master_dtype, keep_out)
         fully_shard(bridge, mesh=mesh, mp_policy=mp_policy, ignored_params=keep_out,
                     reshard_after_forward=reshard_after_forward)
+    if forward_prefetch:
+        # Each layer starts the next layer's all-gather when it begins (TorchTitan
+        # distributed/fsdp.py), so the gather overlaps this layer's compute even when the
+        # host does not run ahead of the GPU. Every modality runs every layer; the bridges
+        # run only on tactile batches and are left to gather on demand.
+        for unit, next_unit in zip(units, units[1:]):
+            unit.set_modules_to_forward_prefetch([next_unit])
     vb._layer_units = units
 
     root = TrainRoot(arch, units)
@@ -113,9 +121,9 @@ def parallelize_touchwam(
     root_params = {p for p in arch.parameters() if p.requires_grad} - unit_params - bridge_params - set(replicated)
     logger.info(
         "FSDP2: mesh=%s | %d layer units %.1fM, %d bridge units %.1fM, root %.1fM, replicated scalars %d, "
-        "frozen (per-GPU copy) %.1fM | param_dtype=%s reduce_dtype=%s reshard_after_forward=%s",
+        "frozen (per-GPU copy) %.1fM | param_dtype=%s reduce_dtype=%s reshard_after_forward=%s forward_prefetch=%s",
         mesh, len(units), count(unit_params) / 1e6, len(bridges), count(bridge_params) / 1e6,
         count(root_params) / 1e6, len(replicated), count(frozen) / 1e6, param_dtype, reduce_dtype,
-        reshard_after_forward,
+        reshard_after_forward, forward_prefetch,
     )
     return root, replicated
