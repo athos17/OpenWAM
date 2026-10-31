@@ -1,0 +1,17 @@
+# F1 on 2x8 A800: F0 (FSDP2 / HSDP 2x8) with the P4 switches that measured faster in the 200-step A/B
+# against f0: forward prefetch between layer units, bf16 gradient reduction (DeepSpeed's dtype), fused
+# AdamW, and the optimizer step / grad norm on local shards. Same seed, data and LR schedule as P0/P1.
+defaults:
+  - train_touchwam_a800_f0_20261031
+  - _self_
+
+training:
+  fsdp2:
+    reduce_dtype: bf16
+    forward_prefetch: true
+    local_optimizer: true
+  optimizer_fused: true
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/gaozt-test1/lyh/perf_runs/touchwam_a800/f1}
+
+project:
+  name: touchwam-a800-f1-20261031
