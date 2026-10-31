@@ -32,11 +32,12 @@ def main():
     _, arch, _ = build_architecture_from_ckpt_dir(str(run), weights_required=True)
     exported = arch.state_dict()
     dcp_dir = run / f"accel_state_step_{args.step}" / "dcp"
-    trained = _load_state_dict_from_keys({f"model.{k}" for k in exported}, checkpoint_id=str(dcp_dir))
-    missing = sorted(k for k in exported if f"model.{k}" not in trained)
+    loaded = _load_state_dict_from_keys({f"model.{k}" for k in exported}, checkpoint_id=str(dcp_dir))
+    trained = loaded.get("model", loaded)  # DCP hands back the nested {"model": {...}} layout
+    missing = sorted(k for k in exported if k not in trained)
     worst, mismatched = 0.0, []
     for name, tensor in exported.items():
-        ref = trained.get(f"model.{name}")
+        ref = trained.get(name)
         if ref is None:
             continue
         ref = ref.to(tensor.dtype)
