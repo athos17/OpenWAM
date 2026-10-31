@@ -1,0 +1,19 @@
+# F0 on 2x8 A800: P1 with the DeepSpeed ZeRO-2 backend replaced by FSDP2 / HSDP (shard within a node,
+# replicate across nodes). Same seed, data, LR schedule and per-rank samples as P0/P1, so losses compare
+# step by step against p0 / p0r1700. Frozen encoders keep one copy per GPU.
+defaults:
+  - train_touchwam_a800_p1_20261030
+  - _self_
+
+training:
+  backend: fsdp2
+  fsdp2:
+    replicate: null               # = nnodes
+    param_dtype: bf16
+    reduce_dtype: fp32
+    reshard_after_forward: true
+  overlap_param_allgather: false  # DeepSpeed-only
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/gaozt-test1/lyh/perf_runs/touchwam_a800/f0}
+
+project:
+  name: touchwam-a800-f0-20261031

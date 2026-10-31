@@ -128,21 +128,23 @@ def phase(args):
 
     real_build = OpenWAMTrainer.build_optimizer
 
+    streams = {}
+
     def build_optimizer(self):
+        # Streams read before prepare: DeepSpeed replaces the groups' params with flat partitions.
         nonlocal initial
         initial = full_params()
-        return real_build(self)
+        opt = real_build(self)
+        by_id = {id(p): n for n, p in self.architecture.named_parameters()}
+        for group in opt.param_groups:
+            for p in group["params"]:
+                streams[by_id[id(p)]] = group.get("touchwam_stream", "observation")
+        return opt
 
     with patch.object(trainer_module, "reduce_step_metrics", reduce), \
             patch.object(OpenWAMTrainer, "compute_loss", compute_loss), \
             patch.object(OpenWAMTrainer, "build_optimizer", build_optimizer):
         trainer.train()
-    streams = {}
-    opt = trainer._modality_optimizer
-    by_id = {id(p): n for n, p in accelerator.unwrap_model(trainer.architecture).named_parameters()}
-    for group in opt.param_groups:
-        for p in group["params"]:
-            streams[by_id[id(p)]] = group.get("touchwam_stream", "observation")
     if rank == 0:
         out.mkdir(parents=True, exist_ok=True)
         torch.save({"initial": initial, "steps": snapshots, "streams": streams, "world": world,
