@@ -65,7 +65,8 @@ def phase(args):
         "gradient_accumulation_steps": args.grad_accum, "dataset_num_workers": 0, "max_grad_norm": args.max_grad_norm,
         "learning_rate": 1e-3, "weight_decay": 0.01, "offload_optimizer_device": "none", "zero_stage": 2,
         "mixed_precision": mixed, "backend": args.backend, "fsdp2": {"replicate": args.replicate, "reshard_after_forward": not args.no_reshard},
-        "lr_scheduler": "cosine", "warmup_ratio": 0.25, "lr_min_ratio": 0.01, "save_steps": 0,
+        "lr_scheduler": "cosine", "warmup_ratio": 0.25, "lr_min_ratio": 0.01, "save_steps": args.save_steps,
+        "save_full_states_for_resume": args.save_steps > 0, "resume_ckpt_path": args.resume_from,
         "keep_last_k_ckpts": -1, "output_path": str(out / f"run_{args.backend}_{args.precision}_w{world}")},
         "project": {"seed": 42, "wandb": None}, "model": {}})
     if args.backend == "deepspeed":
@@ -159,7 +160,7 @@ def phase(args):
             window = sorted(set(modalities))
             modalities.clear()
             snapshots.append({"params": full_params(), "modality": "+".join(window), "loss": metrics["loss_total"],
-                              "grad_norm": metrics["grad_norm"]})
+                              "grad_norm": metrics["grad_norm"], "step": trainer._global_step + 1})
         return metrics
 
     initial = None
@@ -184,16 +185,42 @@ def phase(args):
                 streams[by_id[id(p)]] = group.get("touchwam_stream", "observation")
         return opt
 
+    class PlannedInterruption(Exception):
+        pass
+
+    real_save = trainer_module.save_full_state
+
+    def save_full_state(*values, **kwargs):
+        real_save(*values, **kwargs)
+        if values[2] == args.interrupt_at:
+            raise PlannedInterruption()
+
     with patch.object(trainer_module, "reduce_step_metrics", reduce), \
+            patch.object(trainer_module, "save_full_state", save_full_state), \
             patch.object(OpenWAMTrainer, "compute_loss", compute_loss), \
             patch.object(OpenWAMTrainer, "build_optimizer", build_optimizer):
-        trainer.train()
+        try:
+            trainer.train()
+        except PlannedInterruption:
+            print(f"interrupted after the step-{args.interrupt_at} checkpoint", flush=True)
+    export = None
+    if args.save_steps and rank == 0 and snapshots:
+        # The deploy safetensors written at the last step must hold the trained weights (training dtype).
+        from safetensors.torch import load_file
+
+        run = Path(args.resume_from) if args.resume_from else next((out / f"run_{args.backend}_{args.precision}_w{world}").iterdir())
+        path = run / f"checkpoint_step_{snapshots[-1]['step']}.safetensors"
+        saved = load_file(str(path))
+        export = {"path": str(path), "missing": sorted(set(names) - set(saved)),
+                  "max_abs_diff": max((saved[n].float() - snapshots[-1]["params"][n]).abs().max().item()
+                                      for n in names if n in saved)}
+        print("export check", export, flush=True)
     if rank == 0:
         out.mkdir(parents=True, exist_ok=True)
-        torch.save({"initial": initial, "steps": snapshots, "streams": streams, "world": world,
+        torch.save({"initial": initial, "steps": snapshots, "streams": streams, "world": world, "export": export,
                     "backend": args.backend, "precision": args.precision, "grad_accum": args.grad_accum,
                     "peak_mib": torch.cuda.max_memory_allocated() / 2**20},
-                   out / f"{args.backend}_{args.precision}_w{world}_g{args.grad_accum}.pt")
+                   out / f"{args.backend}_{args.precision}_w{world}_g{args.grad_accum}{args.tag_suffix}.pt")
         print(f"saved {len(snapshots)} steps, modalities {[s['modality'] for s in snapshots]}", flush=True)
     dist.barrier()
     dist.destroy_process_group()
@@ -202,6 +229,26 @@ def phase(args):
 ACTIVE = {"video_only": {"video"}, "video_action": {"video", "action", "proprio"},
           "video_tactile": {"video", "tactile", "tactile_intensity"},
           "video_action_tactile": {"video", "action", "proprio", "tactile", "tactile_intensity"}}
+
+
+def resume_compare(paths):
+    import torch
+
+    base, resumed = (torch.load(p, weights_only=False) for p in paths)
+    by_step = {s["step"]: s for s in base["steps"]}
+    ok = bool(resumed["steps"])
+    for s in resumed["steps"]:
+        b = by_step[s["step"]]
+        worst = max((s["params"][n] - b["params"][n]).abs().max().item() for n in b["params"])
+        # Two identical runs already differ by ~1e-7 (nondeterministic GPU kernels).
+        ok &= worst <= 1e-6 and abs(s["loss"] - b["loss"]) <= 1e-6 * abs(b["loss"])
+        print(f"step {s['step']:2d} {s['modality']:22s} loss {b['loss']:.6f}/{s['loss']:.6f} max|param diff| {worst:.2e}")
+    for name, run in (("baseline", base), ("resumed", resumed)):
+        export = run.get("export")
+        print(f"{name} export: {export}")
+        ok &= export is not None and not export["missing"] and export["max_abs_diff"] == 0.0
+    print("RESUME GATE PASSED" if ok else "RESUME GATE FAILED")
+    return ok
 
 
 def compare(paths, tol, loss_only=False):
@@ -259,6 +306,11 @@ if __name__ == "__main__":
     parser.add_argument("--no-gc", action="store_true", help="disable activation recompute")
     parser.add_argument("--no-reshard", action="store_true", help="fsdp2: reshard_after_forward=false")
     parser.add_argument("--sum-accum", action="store_true", help="fsdp2: sum microbatch gradients like the DeepSpeed path")
+    parser.add_argument("--save-steps", type=int, default=0, help="checkpoint every N steps (weights + resumable state)")
+    parser.add_argument("--interrupt-at", type=int, default=None, help="stop right after the checkpoint at this step")
+    parser.add_argument("--resume-from", default=None, help="run directory to resume from")
+    parser.add_argument("--tag-suffix", default="")
+    parser.add_argument("--resume-compare", nargs=2, help="baseline.pt resumed.pt: resumed steps must equal the baseline's")
     parser.add_argument("--loss-only", action="store_true",
                         help="compare: judge by relative loss difference (bf16, where parameter rounding dominates)")
     parser.add_argument("--out")
@@ -267,4 +319,6 @@ if __name__ == "__main__":
     a = parser.parse_args()
     if a.compare:
         raise SystemExit(0 if compare(a.compare, a.tol, a.loss_only) else 1)
+    if a.resume_compare:
+        raise SystemExit(0 if resume_compare(a.resume_compare) else 1)
     phase(a)

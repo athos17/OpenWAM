@@ -117,6 +117,7 @@ class FSDP2Accelerator:
         self._replicated = []
         self._replicated_checks = 0
         self._schedulers = []
+        self._optimizer = None
         self.training_forward = None
 
     # ---- model ----
@@ -155,8 +156,93 @@ class FSDP2Accelerator:
             elif isinstance(obj, torch.optim.lr_scheduler.LRScheduler):
                 obj = _SchedulerShim(obj, self.num_processes)
                 self._schedulers.append(obj)
+            elif isinstance(obj, torch.optim.Optimizer):
+                self._optimizer = obj
             out.append(obj)
         return tuple(out) if len(out) > 1 else out[0]
+
+    # ---- checkpoints ----
+
+    # save_weights must call get_state_dict on every rank (it gathers the shards).
+    state_dict_needs_all_ranks = True
+
+    def get_state_dict(self, model):
+        """Full weights for the deploy safetensors, on rank 0 (empty elsewhere).
+
+        Floating tensors come back in the model dtype, as DeepSpeed's bf16 module holds
+        them; the fp32 master values stay in the resumable state.
+        """
+        from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
+
+        state = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
+        if not self.is_main_process:
+            return {}
+        return {k: v.to(model.dtype) if v.is_floating_point() else v for k, v in state.items()}
+
+    def _training_state(self):
+        from torch.distributed.checkpoint.state_dict import get_state_dict
+
+        model_state, optim_state = get_state_dict(self.root.arch, self._optimizer)
+        return {"model": model_state, "optimizer": optim_state}
+
+    def _materialize_optimizer_state(self) -> None:
+        """Create the optimizer's per-parameter state so DCP has a template to load into.
+
+        DCP's own initialization steps on zero gradients, which ModalityAwareAdamW skips for
+        groups not marked active; here every group takes one lr=0 step (parameters unchanged).
+        """
+        opt = self._optimizer
+        if opt.state:
+            return
+        lrs = [group["lr"] for group in opt.param_groups]
+        for group in opt.param_groups:
+            group["lr"] = 0.0
+            if "touchwam_active_in_window" in group:
+                group["touchwam_active_in_window"] = True
+            for param in group["params"]:
+                if param.requires_grad:
+                    param.grad = torch.zeros_like(param)
+        opt.step()
+        for group, lr in zip(opt.param_groups, lrs):
+            group["lr"] = lr
+        opt.zero_grad(set_to_none=True)
+
+    def save_state(self, output_dir: str) -> None:
+        """Resumable state: DCP shards of model + optimizer, scheduler, per-rank RNG states."""
+        import random
+
+        import numpy as np
+        import torch.distributed.checkpoint as dcp
+
+        dcp.save(self._training_state(), checkpoint_id=os.path.join(output_dir, "dcp"))
+        if self.is_main_process:
+            torch.save([s.state_dict() for s in self._schedulers], os.path.join(output_dir, "schedulers.pt"))
+        rng = {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
+               "cuda": torch.cuda.get_rng_state(self.device)}
+        torch.save(rng, os.path.join(output_dir, f"random_states_{self.process_index}.pt"))
+        self.wait_for_everyone()
+
+    def load_state(self, input_dir: str) -> None:
+        import random
+
+        import numpy as np
+        import torch.distributed.checkpoint as dcp
+        from torch.distributed.checkpoint.state_dict import set_state_dict
+
+        self._materialize_optimizer_state()
+        state = self._training_state()
+        dcp.load(state, checkpoint_id=os.path.join(input_dir, "dcp"))
+        set_state_dict(self.root.arch, self._optimizer, model_state_dict=state["model"],
+                       optim_state_dict=state["optimizer"])
+        for scheduler, saved in zip(self._schedulers, torch.load(os.path.join(input_dir, "schedulers.pt"),
+                                                                 weights_only=False)):
+            scheduler.load_state_dict(saved)
+        rng = torch.load(os.path.join(input_dir, f"random_states_{self.process_index}.pt"), weights_only=False)
+        random.setstate(rng["python"])
+        np.random.set_state(rng["numpy"])
+        torch.set_rng_state(rng["torch"])
+        torch.cuda.set_rng_state(rng["cuda"], self.device)
+        self.wait_for_everyone()
 
     # ---- step ----
 

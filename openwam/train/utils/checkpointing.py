@@ -246,18 +246,24 @@ def save_weights(accelerator, architecture, output_path: str, global_step: int, 
     ``training.zero_stage``) replicates the bf16 params on every rank, so
     ``get_state_dict`` is rank-local: non-writers return immediately —
     otherwise every rank can clone the full state dict to host memory at once
-    and exhaust the node during checkpointing. Pruning is the caller's job, run
+    and exhaust the node during checkpointing. A sharding backend
+    (``state_dict_needs_all_ranks``) gathers on every rank and returns the full
+    weights on rank 0 only. Pruning is the caller's job, run
     after the full state is also written so the two lines stay in lockstep.
     """
     from tqdm import tqdm
 
-    if not accelerator.is_main_process:
+    gather_on_all_ranks = getattr(accelerator, "state_dict_needs_all_ranks", False)
+    if not accelerator.is_main_process and not gather_on_all_ranks:
         return
     ckpt_path = os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
     msg = f"[checkpoint] Saving {'final ' if final else ''}step {global_step} -> {ckpt_path}"
-    logger.info(msg)
-    tqdm.write(msg)
+    if accelerator.is_main_process:
+        logger.info(msg)
+        tqdm.write(msg)
     state_dict = accelerator.get_state_dict(architecture)
+    if not accelerator.is_main_process:
+        return
     temporary_path = os.path.join(output_path, f".checkpoint_step_{global_step}.safetensors.tmp")
     try:
         accelerator.unwrap_model(architecture).save_checkpoint(temporary_path, state_dict=state_dict)
