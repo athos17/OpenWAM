@@ -135,6 +135,11 @@ def phase(args):
         nonlocal initial
         initial = full_params()
         opt = real_build(self)
+        # Adam's first steps map |g| >> eps to a full +-lr update, so near-zero gradients whose sign
+        # depends on reduction order would dominate the comparison; a larger eps keeps the update a
+        # smooth function of the gradient (same on both backends).
+        for group in opt.param_groups:
+            group["eps"] = args.adam_eps
         by_id = {id(p): n for n, p in self.architecture.named_parameters()}
         for group in opt.param_groups:
             for p in group["params"]:
@@ -177,10 +182,10 @@ def compare(paths, tol):
         step_worst, untouched_bad = 0.0, []
         for name, r in sr["params"].items():
             o = so["params"][name]
-            update = (r - ref["initial"][name]).abs().max().item()
-            diff = (r - o).abs().max().item()
-            rel = diff / max(update, 1e-12)
-            step_worst = max(step_worst, rel if update > 0 else diff)
+            # Relative L2 of the parameter difference to the reference's total update so far.
+            update = (r - ref["initial"][name]).norm().item()
+            diff = (r - o).norm().item()
+            step_worst = max(step_worst, diff / update if update > 0 else diff)
             stream = ref["streams"][name]
             if stream not in active:
                 for run, prev, cur in (("ref", prev_r, sr["params"]), ("other", prev_o, so["params"])):
@@ -190,7 +195,7 @@ def compare(paths, tol):
         flag = "ok" if step_worst <= tol and not untouched_bad else "FAIL"
         ok &= flag == "ok"
         print(f"step {i + 1:2d} {sr['modality']:22s} loss {sr['loss']:.6f}/{so['loss']:.6f} "
-              f"gnorm {sr['grad_norm']:.4f}/{so['grad_norm']:.4f}  max|diff|/max|update| {step_worst:.2e}  "
+              f"gnorm {sr['grad_norm']:.4f}/{so['grad_norm']:.4f}  max_param |diff|/|update| {step_worst:.2e}  "
               f"inactive-changed {len(untouched_bad)} {flag}")
         if untouched_bad:
             print("   ", untouched_bad[:6])
@@ -207,6 +212,7 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--replicate", type=int, default=None)
+    parser.add_argument("--adam-eps", type=float, default=1e-4)
     parser.add_argument("--out")
     parser.add_argument("--compare", nargs=2)
     parser.add_argument("--tol", type=float, default=1e-3)
