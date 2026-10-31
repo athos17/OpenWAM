@@ -7,3 +7,5 @@ f3_gc17              train_touchwam_a800_f1_20261031      training.stop_after_st
 f3_save              train_touchwam_a800_f1_20261031      training.stop_after_steps=20 training.step_timing.record_steps=20 training.save_steps=20 training.save_full_states_for_resume=true
 # Speed and per-step losses over one pass of the subset, against p0 / p0r1700 / p1.
 f1                   train_touchwam_a800_f1_20261031
+# P3 resume of f3_save from its step-20 DCP state; steps 21-40 compare with f1 (uninterrupted).
+f3_resume            train_touchwam_a800_f1_20261031      training.resume_ckpt_path=/gaozt-test1/lyh/perf_runs/touchwam_a800/f3_save/2026-10-31_15-43-12 training.finetune_ckpt_path=null training.initialize_touch_from_openwam=false training.stop_after_steps=40 training.step_timing.record_steps=40 training.save_steps=0
