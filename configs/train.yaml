@@ -30,6 +30,12 @@ training:
   video_lr: null                  # Override LR for video backbone parameters
 
   # --- DeepSpeed / precision ---
+  backend: deepspeed              # deepspeed (Accelerate + ZeRO) | fsdp2 (FSDP2 / HSDP, openwam/train/fsdp2)
+  fsdp2:                          # training.backend=fsdp2 only
+    replicate: null               # HSDP replicate degree; null = number of nodes (shard within a node), 1 = full shard
+    param_dtype: null             # compute copy of the sharded fp32 params; null = bf16 under mixed_precision=bf16
+    reduce_dtype: null            # gradient reduction dtype; null = fp32 (bf16 params) / param dtype
+    reshard_after_forward: true   # free gathered layer params after forward (re-gathered in backward)
   mixed_precision: bf16           # bf16 / fp16 / no — training + deploy compute dtype
   zero_stage: 2                   # DeepSpeed ZeRO stage: 1 or 2 (CLI override: training.zero_stage=1)
   deepspeed_zero:                 # merged into DeepSpeed zero_optimization; null = DeepSpeed default

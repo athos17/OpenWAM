@@ -262,6 +262,11 @@ class OpenWAMTrainer:
         # __init__ (self-contained ckpt-dir path); only resume needs a path here.
         resume_path = cfg_get(t, "resume_ckpt_path", None) or None
 
+        # training.backend=fsdp2 shards the model in place; the optimizer must see the
+        # sharded parameters, so this precedes build_optimizer.
+        shard_model = getattr(self.accelerator, "shard_model", None)
+        if shard_model is not None:
+            shard_model(self.architecture)
         optimizer = self.build_optimizer()
         dataloader = self.build_dataloader(batch_size)
         max_grad_norm = float(t.max_grad_norm) if getattr(t, "max_grad_norm", None) else None
@@ -679,8 +684,10 @@ class OpenWAMTrainer:
         # path is ever reintroduced.
         arch = self.accelerator.unwrap_model(self.architecture)
         # Propagate device down through architecture; frozen modules (T5/VAE) idempotent move.
-        arch.set_dtype_device(arch.dtype, self.accelerator.device)
-        arch.move_frozen_to_device(self.accelerator.device)
+        # A sharding backend placed the model before sharding; .to() must not touch it now.
+        if not hasattr(self.accelerator, "shard_model"):
+            arch.set_dtype_device(arch.dtype, self.accelerator.device)
+            arch.move_frozen_to_device(self.accelerator.device)
         self._configure_input_fast_paths(arch)
         self._configure_compute_options(arch)
         cfg = getattr(self, "cfg", None)
@@ -737,8 +744,9 @@ class OpenWAMTrainer:
         if deferred:
             if getattr(self, "_modality_optimizer", None) is None:
                 raise ValueError("deferred_modality_sync requires the TouchWAM modality-aware optimizer")
-            if getattr(self.accelerator, "deepspeed_engine_wrapped", None) is None:
-                raise ValueError("deferred_modality_sync splits DeepSpeed backward/step; DeepSpeed is required")
+            if getattr(self.accelerator, "deepspeed_engine_wrapped", None) is None and not hasattr(
+                    self.accelerator, "shard_model"):
+                raise ValueError("deferred_modality_sync splits backward/step; it needs DeepSpeed or training.backend=fsdp2")
             from openwam.train.utils.modality_optimizer import DeferredModalitySync
 
             observation = getattr(arch, "tactile_spec", {}).get("observation_encoder") or {}
@@ -753,6 +761,12 @@ class OpenWAMTrainer:
         deferred = getattr(self, "_deferred_modality", None)
         if deferred is None:
             self.accelerator.backward(loss)
+            return
+        if self.accelerator.deepspeed_engine_wrapped is None:
+            # fsdp2: backward does not step; the loop's optimizer.step follows.
+            self.accelerator.backward(loss)
+            modality, codec, encoder_ids = deferred.resolve()
+            self._modality_optimizer.activate(modality, codec, observation_encoder_ids=encoder_ids)
             return
         engine = self.accelerator.deepspeed_engine_wrapped.engine
         sync = self.accelerator.sync_gradients
@@ -934,8 +948,10 @@ class OpenWAMTrainer:
 
         # All trainable video/action/tactile parameters must be gathered before use.
         deferred_allgather.wait()
+        # fsdp2: the FSDP root's registered compute_loss gathers the root parameters.
+        model_loss = getattr(self.accelerator, "training_forward", None) or self.architecture.compute_loss
         with timer.count_flops("model"):
-            result = self.architecture.compute_loss(
+            result = model_loss(
                 **inputs,
                 lambda_video=self.lambda_video,
                 lambda_action=self.lambda_action,

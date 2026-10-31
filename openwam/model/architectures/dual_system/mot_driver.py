@@ -64,13 +64,20 @@ def run_video_blocks(vb, vstate, checkpoint_layers: Optional[frozenset]):
     layer, the previous behaviour). The state's checkpoint flags are switched off for
     the other layers and restored afterwards; recompute does not change the result.
     """
+    from openwam.model.architectures.utils.layer_units import run_layer
+
     use_gc = vstate.use_gradient_checkpointing
     offload = vstate.use_gradient_checkpointing_offload
     for block_id in range(vb.num_layers):
         on = checkpoint_layers is None or block_id in checkpoint_layers
         vstate.use_gradient_checkpointing = use_gc and on
         vstate.use_gradient_checkpointing_offload = offload and on
-        vstate = vb.run_block(block_id, vstate)
+
+        def block(x, block_id=block_id):
+            vstate.hidden_states = x
+            return vb.run_block(block_id, vstate).hidden_states
+
+        vstate.hidden_states = run_layer(vb, block_id, block, vstate.hidden_states)
     vstate.use_gradient_checkpointing = use_gc
     vstate.use_gradient_checkpointing_offload = offload
     return vstate
@@ -459,15 +466,23 @@ class DualSystemMoTDriver:
             # handles the resulting rectangular mask.
             attn_mask = widen_mask_for_prefix_kv(attn_mask, vstate)
 
+        from openwam.model.architectures.utils.layer_units import run_layer
+
         for layer_id in range(self.num_layers):
-            vstate, astate = self.step(
-                layer_id,
-                vstate,
-                astate,
-                attn_mask=attn_mask,
-                use_gradient_checkpointing=use_gradient_checkpointing,
-                use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-            )
+            def joint_layer(vx, ax, layer_id=layer_id):
+                vstate.hidden_states, astate.payload.x_action = vx, ax
+                v, a = self.step(
+                    layer_id,
+                    vstate,
+                    astate,
+                    attn_mask=attn_mask,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                )
+                return v.hidden_states, a.payload.x_action
+
+            vstate.hidden_states, astate.payload.x_action = run_layer(
+                self.vb, layer_id, joint_layer, vstate.hidden_states, astate.payload.x_action)
         return vstate, astate
 
 

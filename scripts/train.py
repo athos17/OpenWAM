@@ -64,10 +64,18 @@ def _build_accelerator(cfg: DictConfig):
     torchrun has already initialised torch.distributed (``RANK``, ``WORLD_SIZE``,
     ``LOCAL_RANK`` are set); we construct the ``DeepSpeedPlugin`` from cfg.training
     so DeepSpeed is activated without ``accelerate launch``.
+    ``training.backend=fsdp2`` returns the FSDP2 / HSDP stand-in instead.
     """
+    t = cfg.training
+    backend = str(t.get("backend", "deepspeed"))
+    if backend == "fsdp2":
+        from openwam.train.fsdp2.accelerator import FSDP2Accelerator
+
+        return FSDP2Accelerator(cfg)
+    if backend != "deepspeed":
+        raise ValueError(f"training.backend must be deepspeed or fsdp2, got {backend}")
     import accelerate
 
-    t = cfg.training
     grad_accum = int(t.gradient_accumulation_steps)
     max_grad_norm = getattr(t, "max_grad_norm", None)
     mixed_precision = str(t.mixed_precision)

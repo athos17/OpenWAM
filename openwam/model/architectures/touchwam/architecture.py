@@ -16,6 +16,7 @@ from openwam.model.action_backbone.scheduler import ActionScheduler
 from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
 from openwam.model.architectures.dual_system.mot_driver import resolve_checkpoint_layers
 from openwam.model.architectures.registry import register_architecture
+from openwam.model.architectures.utils.layer_units import run_layer
 
 from .modules import TactileFlowStream, tactile_flow_loss
 
@@ -300,16 +301,27 @@ class TouchWAMArchitecture(DualSystemSelfAttnArchitecture):
                 selected = driver.layer_checkpointed(layer)
                 vstate.use_gradient_checkpointing = use_gradient_checkpointing and selected
                 vstate.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload and selected
-                vstate = vb.run_block(layer, vstate)
+
+                def video_layer(vx, layer=layer):
+                    vstate.hidden_states = vx
+                    return vb.run_block(layer, vstate).hidden_states
+
+                vstate.hidden_states = run_layer(vb, layer, video_layer, vstate.hidden_states)
             else:
-                vstate, astate = driver.step(
-                    layer,
-                    vstate,
-                    astate,
-                    mask,
-                    use_gradient_checkpointing=use_gradient_checkpointing,
-                    use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
-                )
+                def joint_layer(vx, ax, layer=layer):
+                    vstate.hidden_states, astate.payload.x_action = vx, ax
+                    v, a = driver.step(
+                        layer,
+                        vstate,
+                        astate,
+                        mask,
+                        use_gradient_checkpointing=use_gradient_checkpointing,
+                        use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+                    )
+                    return v.hidden_states, a.payload.x_action
+
+                vstate.hidden_states, astate.payload.x_action = run_layer(
+                    vb, layer, joint_layer, vstate.hidden_states, astate.payload.x_action)
             if layer in bridges:
                 block = partial(self.touch_v2.blocks[bridges[layer]], clean_video_tokens=clean_tokens)
                 args = (
