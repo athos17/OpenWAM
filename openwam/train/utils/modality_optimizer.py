@@ -120,6 +120,14 @@ supported: Accelerate must retain this optimizer instance.
                 for parameter in group["params"]:
                     held.append((parameter, parameter.grad))
                     parameter.grad = None
+            else:
+                # ZeRO-2 hands active groups zero gradients for parameters unused in this
+                # window (e.g. a tactile block's action read on VT batches), so AdamW still
+                # applies their moments and weight decay. Backends that leave those gradients
+                # None (FSDP2) get the same zeros; under ZeRO-2 this finds nothing to fill.
+                for parameter in group["params"]:
+                    if parameter.grad is None and parameter.requires_grad:
+                        parameter.grad = torch.zeros_like(parameter)
         try:
             return super().step()
         finally:

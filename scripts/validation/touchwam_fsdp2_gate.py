@@ -62,7 +62,7 @@ def phase(args):
     out = Path(args.out)
     cfg = OmegaConf.create({"training": {
         "num_epochs": None, "max_steps": args.steps * args.grad_accum, "batch_size": 1,
-        "gradient_accumulation_steps": args.grad_accum, "dataset_num_workers": 0, "max_grad_norm": 1.0,
+        "gradient_accumulation_steps": args.grad_accum, "dataset_num_workers": 0, "max_grad_norm": args.max_grad_norm,
         "learning_rate": 1e-3, "weight_decay": 0.01, "offload_optimizer_device": "none", "zero_stage": 2,
         "mixed_precision": mixed, "backend": args.backend, "fsdp2": {"replicate": args.replicate},
         "lr_scheduler": "cosine", "warmup_ratio": 0.25, "lr_min_ratio": 0.01, "save_steps": 0,
@@ -72,7 +72,7 @@ def phase(args):
         from accelerate import Accelerator, DeepSpeedPlugin
 
         plugin = DeepSpeedPlugin(zero_stage=2, gradient_accumulation_steps=args.grad_accum,
-                                 gradient_clipping=1.0, offload_optimizer_device="none")
+                                 gradient_clipping=args.max_grad_norm, offload_optimizer_device="none")
         plugin.deepspeed_config["zero_optimization"].update(
             reduce_bucket_size=1000000, allgather_bucket_size=1000000, ignore_unused_parameters=True)
         accelerator = Accelerator(deepspeed_plugin=plugin, gradient_accumulation_steps=args.grad_accum,
@@ -213,6 +213,7 @@ if __name__ == "__main__":
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--replicate", type=int, default=None)
     parser.add_argument("--adam-eps", type=float, default=1e-4)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--out")
     parser.add_argument("--compare", nargs=2)
     parser.add_argument("--tol", type=float, default=1e-3)
