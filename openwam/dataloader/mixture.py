@@ -7,7 +7,10 @@ selected source name with every item.
 """
 
 import copy
+import json
 import logging
+import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -17,6 +20,24 @@ import torch
 from openwam.dataloader.bases import BaseDataset
 
 logger = logging.getLogger(__name__)
+
+# Opt-in per-sample load timing (diagnostics): one JSONL per (rank, DataLoader worker) under this directory.
+_SAMPLE_TIMING_DIR = os.environ.get("OPENWAM_SAMPLE_TIMING_DIR")
+_sample_timing_log = []
+
+
+def _record_sample_time(idx, source, local_idx, t0):
+    t1 = time.time()
+    info = torch.utils.data.get_worker_info()
+    worker = info.id if info is not None else -1
+    _sample_timing_log.append(json.dumps({"idx": idx, "source": source, "local_idx": local_idx, "worker": worker,
+                                          "start": t0, "end": t1}))
+    if len(_sample_timing_log) >= 48:
+        os.makedirs(_SAMPLE_TIMING_DIR, exist_ok=True)
+        rank = os.environ.get("RANK", "0")
+        with open(os.path.join(_SAMPLE_TIMING_DIR, f"rank{rank}_worker{worker}.jsonl"), "a") as f:
+            f.write("\n".join(_sample_timing_log) + "\n")
+        _sample_timing_log.clear()
 
 
 class MixtureDataset(BaseDataset):
@@ -235,7 +256,10 @@ class MixtureDataset(BaseDataset):
     def __getitem__(self, idx: int) -> dict:
         di, si = self._index_map[idx]
         di, si = int(di), int(si)
+        t0 = time.time()
         sample = self._datasets[di][si]
+        if _SAMPLE_TIMING_DIR:
+            _record_sample_time(idx, self._names[di], si, t0)
         expected_shape = self.source_tactile_observation_shapes[di]
         if expected_shape is not None or "tactile_observation_maps" in sample:
             from openwam.dataloader.modality_sampler import batch_tactile_observation_shape

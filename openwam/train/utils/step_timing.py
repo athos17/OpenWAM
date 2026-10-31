@@ -99,6 +99,7 @@ class StepTimer:
         self._prev_step_t0 = None
         self._loop_end = None
         self._data_wait = 0.0
+        self._batch_ready_unix = None
         self.last: dict = {}
         # Set by the trainer under training.torch_profile: stages emit stage/<name> ranges.
         self.annotate = False
@@ -196,6 +197,7 @@ class StepTimer:
         now = time.perf_counter()
         self._data_wait = 0.0 if self._loop_end is None else now - self._loop_end
         self._prev_step_t0, self._step_t0 = self._step_t0, now
+        self._batch_ready_unix = time.time()  # aligns with DataLoader worker sample timing (wall clock)
 
     def end_step(self) -> dict:
         """Resolve this step's stages into ``{name_cpu_s, name_gpu_s}`` (summed per name)."""
@@ -219,6 +221,7 @@ class StepTimer:
             self._counting_done = True
         for k, v in out.items():
             self._window[k].append(v)
+        out["batch_ready_unix"] = self._batch_ready_unix  # trace only, not a summarized stage
         self.last = out
         return out
 

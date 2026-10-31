@@ -25,6 +25,8 @@ export NNODES=${NNODES:-2} NODE_RANK MASTER_ADDR=${MASTER_ADDR:-192.168.0.235} M
 # a800_1/a800_2 reach each other only over eth1 (a800_1: 192.168.0.235). Bootstrap sockets only:
 # NCCL still finds the RoCE NICs. gloo (training.touchwam_p1.deferred_modality_sync) uses eth1 too.
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth1} GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth1}
+# SAMPLE_TIMING=1: DataLoader workers log each sample's load time under $PERF_ROOT/$TAG/sample_timing.
+[ "${SAMPLE_TIMING:-0}" = 1 ] && export OPENWAM_SAMPLE_TIMING_DIR="$PERF_ROOT/$TAG/sample_timing"
 LOG="$PERF_ROOT/$TAG.node$NODE_RANK.log"
 [ "$NODE_RANK" = 0 ] && { echo "$CONFIG $*"; git rev-parse HEAD; git status --porcelain --untracked-files=no; } \
   > "$PERF_ROOT/$TAG.sha" 2>/dev/null
