@@ -169,9 +169,10 @@ class FSDP2Accelerator:
         else:
             self._accum_step += 1
             self.sync_gradients = self._accum_step % self.gradient_accumulation_steps == 0
-        # Reduce-scatter every microbatch (TorchTitan default); HSDP's replicate all-reduce
-        # only on the last one.
-        self.root.set_requires_all_reduce(self.sync_gradients)
+        # Gradients reduce every microbatch, HSDP's replicate all-reduce included: deferring it
+        # (TorchTitan's default) keeps one flat partial buffer per unit across microbatches,
+        # which torch 2.7 requires to cover the same parameters each time, and an accumulation
+        # window can mix modalities (VT then VAT). Only the optimizer step waits for sync.
         yield
 
     def backward(self, loss) -> None:

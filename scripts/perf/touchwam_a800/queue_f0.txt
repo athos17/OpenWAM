@@ -1,0 +1,6 @@
+# TAG                CONFIG                               [PROFILE=1] [hydra overrides]
+# P2b: FSDP2 / HSDP (2 replicate x 8 shard) against the DeepSpeed P0/P1 baselines.
+# Profiler run first (steps 23-30 traced on ranks 0 and 8), so a broken setup fails within minutes.
+f0_prof              train_touchwam_a800_f0_20261031      PROFILE=1 training.stop_after_steps=30 training.step_timing.record_steps=30
+# Speed and per-step losses over one pass of the subset (1700 steps), same seed and samples as p0 / p0r1700 / p1.
+f0                   train_touchwam_a800_f0_20261031
