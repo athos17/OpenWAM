@@ -1,6 +1,8 @@
 # TAG                CONFIG                               [PROFILE=1] [hydra overrides]
 # P4 A/B over the same first 200 steps as f0 (compare.py f0 <tag> --to-step 200: same samples per step).
+# pbf = forward prefetch + bf16 gradient reduction + fused AdamW; l = optimizer and grad norm on local shards.
 f2_pbf               train_touchwam_a800_f0_20261031      training.stop_after_steps=200 training.step_timing.record_steps=200 training.fsdp2.forward_prefetch=true training.fsdp2.reduce_dtype=bf16 training.optimizer_fused=true
-f2_pbf_full16        train_touchwam_a800_f0_20261031      training.stop_after_steps=200 training.step_timing.record_steps=200 training.fsdp2.forward_prefetch=true training.fsdp2.reduce_dtype=bf16 training.optimizer_fused=true training.fsdp2.replicate=1
+f2_pbfl              train_touchwam_a800_f0_20261031      training.stop_after_steps=200 training.step_timing.record_steps=200 training.fsdp2.forward_prefetch=true training.fsdp2.reduce_dtype=bf16 training.optimizer_fused=true training.fsdp2.local_optimizer=true
+f2_pbfl_full16       train_touchwam_a800_f0_20261031      training.stop_after_steps=200 training.step_timing.record_steps=200 training.fsdp2.forward_prefetch=true training.fsdp2.reduce_dtype=bf16 training.optimizer_fused=true training.fsdp2.local_optimizer=true training.fsdp2.replicate=1
 # Freed memory spent on recompute: 15 instead of 20 fully recomputed layers (+~6 GiB at VT).
-f2_pbf_gc15          train_touchwam_a800_f0_20261031      training.stop_after_steps=200 training.step_timing.record_steps=200 training.fsdp2.forward_prefetch=true training.fsdp2.reduce_dtype=bf16 training.optimizer_fused=true training.gradient_checkpointing_layers=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]
+f2_pbfl_gc15         train_touchwam_a800_f0_20261031      training.stop_after_steps=200 training.step_timing.record_steps=200 training.fsdp2.forward_prefetch=true training.fsdp2.reduce_dtype=bf16 training.optimizer_fused=true training.fsdp2.local_optimizer=true training.gradient_checkpointing_layers=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]

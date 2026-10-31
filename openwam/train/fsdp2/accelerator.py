@@ -67,7 +67,8 @@ class FSDP2Accelerator:
     def __init__(self, cfg):
         t = cfg.training
         f = dict(t.get("fsdp2") or {})
-        unknown = set(f) - {"replicate", "param_dtype", "reduce_dtype", "reshard_after_forward", "forward_prefetch"}
+        unknown = set(f) - {"replicate", "param_dtype", "reduce_dtype", "reshard_after_forward", "forward_prefetch",
+                            "local_optimizer"}
         if unknown:
             raise ValueError(f"Unknown training.fsdp2 keys: {sorted(unknown)}")
         if str(t.get("mixed_precision", "bf16")) not in ("bf16", "no"):
@@ -83,6 +84,7 @@ class FSDP2Accelerator:
         rafs = f.get("reshard_after_forward")
         self.reshard_after_forward = True if rafs is None else bool(rafs)
         self.forward_prefetch = bool(f.get("forward_prefetch") or False)
+        self.local_optimizer = bool(f.get("local_optimizer") or False)
         self.gradient_accumulation_steps = int(t.gradient_accumulation_steps)
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
@@ -119,6 +121,8 @@ class FSDP2Accelerator:
         self._replicated_checks = 0
         self._schedulers = []
         self._optimizer = None
+        self._plain_step = None
+        self._local_views = {}
         self.training_forward = None
 
     # ---- model ----
@@ -159,6 +163,11 @@ class FSDP2Accelerator:
                 self._schedulers.append(obj)
             elif isinstance(obj, torch.optim.Optimizer):
                 self._optimizer = obj
+                self._plain_step = obj.step
+                if self.local_optimizer:
+                    # The local step needs every parameter's state to exist already (as DTensors).
+                    self._materialize_optimizer_state(fresh=True)
+                    obj.step = self._local_step
             out.append(obj)
         return tuple(out) if len(out) > 1 else out[0]
 
@@ -186,11 +195,13 @@ class FSDP2Accelerator:
         model_state, optim_state = get_state_dict(self.root.arch, self._optimizer)
         return {"model": model_state, "optimizer": optim_state}
 
-    def _materialize_optimizer_state(self) -> None:
-        """Create the optimizer's per-parameter state so DCP has a template to load into.
+    def _materialize_optimizer_state(self, *, fresh: bool = False) -> None:
+        """Create every parameter's optimizer state (DTensors for sharded parameters).
 
-        DCP's own initialization steps on zero gradients, which ModalityAwareAdamW skips for
-        groups not marked active; here every group takes one lr=0 step (parameters unchanged).
+        DCP loads into the existing state, and DCP's own initialization steps on zero
+        gradients, which ModalityAwareAdamW skips for groups not marked active; here every
+        group takes one lr=0 step (parameters unchanged). ``fresh`` then zeroes the state,
+        which AdamW treats exactly like state it has not created yet.
         """
         opt = self._optimizer
         if opt.state:
@@ -203,10 +214,50 @@ class FSDP2Accelerator:
             for param in group["params"]:
                 if param.requires_grad:
                     param.grad = torch.zeros_like(param)
-        opt.step()
+        self._plain_step()
         for group, lr in zip(opt.param_groups, lrs):
             group["lr"] = lr
         opt.zero_grad(set_to_none=True)
+        if fresh:
+            for state in opt.state.values():
+                for value in state.values():
+                    if isinstance(value, torch.Tensor):
+                        value.zero_()
+
+    def _local_step(self, *args, **kwargs):
+        """``training.fsdp2.local_optimizer``: step on each rank's local shards.
+
+        Same kernels on the same values as stepping the DTensors, without DTensor dispatch
+        for every op over ~1600 parameters (which left the GPU idle for ~0.1-0.25 s per
+        step). Parameters, gradients and state are swapped for local views of the same
+        storage for the duration of the step; the state stays keyed by the DTensors.
+        """
+        opt = self._optimizer
+        views = self._local_views
+        originals, swapped = [], []
+        for group in opt.param_groups:
+            originals.append(group["params"])
+            local_params = []
+            for param in group["params"]:
+                if isinstance(param, DTensor):
+                    view = views.get(param)
+                    if view is None:
+                        view = views[param] = torch.nn.Parameter(param._local_tensor, requires_grad=param.requires_grad)
+                    view.grad = None if param.grad is None else param.grad._local_tensor
+                    opt.state[view] = {k: v._local_tensor if isinstance(v, DTensor) else v
+                                       for k, v in opt.state[param].items()}
+                    swapped.append(view)
+                    param = view
+                local_params.append(param)
+            group["params"] = local_params
+        try:
+            return self._plain_step(*args, **kwargs)
+        finally:
+            for group, params in zip(opt.param_groups, originals):
+                group["params"] = params
+            for view in swapped:
+                opt.state.pop(view, None)
+                view.grad = None
 
     def save_state(self, output_dir: str) -> None:
         """Resumable state: DCP shards of model + optimizer, scheduler, per-rank RNG states."""
@@ -288,7 +339,28 @@ class FSDP2Accelerator:
 
     @torch.no_grad()
     def clip_grad_norm_(self, parameters, max_norm, norm_type=2.0):
-        """Global gradient norm across shards, then clip (TorchTitan ``clip_grad_norm_``)."""
+        """Global gradient norm across shards, then clip (TorchTitan ``clip_grad_norm_``).
+
+        With ``local_optimizer`` the norm is taken on the local shards and summed over the
+        shard group (the replicas of an HSDP mesh already hold identical gradients).
+        """
+        if self.local_optimizer and norm_type == 2.0:
+            sharded, plain = [], []
+            for p in parameters:
+                if p.grad is not None:
+                    (sharded if isinstance(p.grad, DTensor) else plain).append(p)
+            local = [p.grad._local_tensor for p in sharded]
+            square = torch.zeros((), device=self.device, dtype=torch.float32)
+            if local:
+                square = torch.stack(torch._foreach_norm(local)).float().square().sum()
+            dist.all_reduce(square, group=self.mesh["dp_shard"].get_group())
+            if plain:
+                square = square + torch.stack(torch._foreach_norm([p.grad for p in plain])).float().square().sum()
+            total = square.sqrt()
+            # clip_grads_with_norm_'s scaling, applied to the local shards.
+            coef = torch.clamp(max_norm / (total + 1e-6), max=1.0)
+            torch._foreach_mul_([*local, *(p.grad for p in plain)], coef)
+            return total
         by_mesh = defaultdict(list)
         for p in parameters:
             if p.grad is not None:

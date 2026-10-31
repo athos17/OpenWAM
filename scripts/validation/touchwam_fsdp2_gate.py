@@ -66,6 +66,7 @@ def phase(args):
         "learning_rate": 1e-3, "weight_decay": 0.01, "offload_optimizer_device": "none", "zero_stage": 2,
         "mixed_precision": mixed, "backend": args.backend, "fsdp2": {"replicate": args.replicate, "reshard_after_forward": not args.no_reshard,
                                                                  "forward_prefetch": args.prefetch,
+                                                                 "local_optimizer": args.local_opt,
                                                                  "reduce_dtype": args.reduce_dtype},
         "optimizer_fused": args.fused,
         "lr_scheduler": "cosine", "warmup_ratio": 0.25, "lr_min_ratio": 0.01, "save_steps": args.save_steps,
@@ -309,6 +310,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-gc", action="store_true", help="disable activation recompute")
     parser.add_argument("--prefetch", action="store_true", help="fsdp2: forward_prefetch")
     parser.add_argument("--fused", action="store_true", help="optimizer_fused")
+    parser.add_argument("--local-opt", action="store_true", help="fsdp2: local_optimizer")
     parser.add_argument("--reduce-dtype", default=None, help="fsdp2: reduce_dtype (bf16 / fp32)")
     parser.add_argument("--no-reshard", action="store_true", help="fsdp2: reshard_after_forward=false")
     parser.add_argument("--sum-accum", action="store_true", help="fsdp2: sum microbatch gradients like the DeepSpeed path")
