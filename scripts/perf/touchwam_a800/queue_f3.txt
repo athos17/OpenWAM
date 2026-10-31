@@ -1,0 +1,9 @@
+# TAG                CONFIG                               [PROFILE=1] [hydra overrides]
+# F1 = F0 + forward prefetch + bf16 reduction + fused AdamW + local-shard optimizer.
+# Fewer recomputed layers with the freed memory (20 -> 15 ran out of memory at bs48): 17.
+f3_gc17              train_touchwam_a800_f1_20261031      training.stop_after_steps=200 training.step_timing.record_steps=200 training.gradient_checkpointing_layers=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+# P3 on the full model: deploy weights + DCP resumable state at step 20 (the resume run is appended once
+# this run's directory exists).
+f3_save              train_touchwam_a800_f1_20261031      training.stop_after_steps=20 training.step_timing.record_steps=20 training.save_steps=20 training.save_full_states_for_resume=true
+# Speed and per-step losses over one pass of the subset, against p0 / p0r1700 / p1.
+f1                   train_touchwam_a800_f1_20261031
