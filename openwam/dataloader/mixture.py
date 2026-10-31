@@ -10,6 +10,7 @@ import copy
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -38,6 +39,40 @@ def _record_sample_time(idx, source, local_idx, t0):
         with open(os.path.join(_SAMPLE_TIMING_DIR, f"rank{rank}_worker{worker}.jsonl"), "a") as f:
             f.write("\n".join(_sample_timing_log) + "\n")
         _sample_timing_log.clear()
+
+
+def write_timing_row(kind, row):
+    """Append one diagnostics row to <dir>/rank<R>_<kind>.jsonl (collate: per worker; pin: main process)."""
+    os.makedirs(_SAMPLE_TIMING_DIR, exist_ok=True)
+    with open(os.path.join(_SAMPLE_TIMING_DIR, f"rank{os.environ.get('RANK', '0')}_{kind}.jsonl"), "a") as f:
+        f.write(json.dumps(row) + "\n")
+
+
+def _install_pin_timing():
+    """Time the DataLoader pin-memory thread per batch (it looks pin_memory up as a module global)."""
+    from torch.utils.data._utils import pin_memory as pm
+
+    inner = pm.pin_memory
+    nested = threading.local()  # pin_memory recurses through the same global; time the batch only
+
+    def timed(data, device=None):
+        if getattr(nested, "active", False):
+            return inner(data, device)
+        nested.active = True
+        t0 = time.time()
+        try:
+            out = inner(data, device)
+        finally:
+            nested.active = False
+        first = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+        write_timing_row("pin", {"first_idx": first.get("_mixture_idx"), "start": t0, "end": time.time()})
+        return out
+
+    pm.pin_memory = timed
+
+
+if _SAMPLE_TIMING_DIR:
+    _install_pin_timing()
 
 
 class MixtureDataset(BaseDataset):
@@ -260,6 +295,7 @@ class MixtureDataset(BaseDataset):
         sample = self._datasets[di][si]
         if _SAMPLE_TIMING_DIR:
             _record_sample_time(idx, self._names[di], si, t0)
+            sample["_mixture_idx"] = idx  # batch identity for the collate / pin-memory timing
         expected_shape = self.source_tactile_observation_shapes[di]
         if expected_shape is not None or "tactile_observation_maps" in sample:
             from openwam.dataloader.modality_sampler import batch_tactile_observation_shape

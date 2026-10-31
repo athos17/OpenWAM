@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import time
 
 import torch
 
@@ -271,12 +272,22 @@ def collate_samples_with_video_uint8(samples: list) -> list:
     PIL -> numpy -> stack -> pin copies. Samples whose frames are not uniform RGB
     uint8 are left without it (the backbone then stacks the PIL frames itself).
     """
+    from openwam.dataloader import mixture
     from openwam.model.video_backbone.wan.preprocess import clip_to_uint8
 
+    t0 = time.time()
     for sample in samples:
         video = sample.get("video") if isinstance(sample, dict) else None
         if isinstance(video, (list, tuple)):
             stacked = clip_to_uint8(video)
             if stacked is not None:
                 sample["video_uint8"] = stacked
+    if mixture._SAMPLE_TIMING_DIR and samples and isinstance(samples[0], dict):
+        info = torch.utils.data.get_worker_info()
+        tensor_mb = sum(v.numel() * v.element_size() for s in samples for v in s.values() if torch.is_tensor(v)) / 2**20
+        pil_mb = sum(f.width * f.height * len(f.getbands()) for s in samples for f in (s.get("video") or [])
+                     if hasattr(f, "getbands")) / 2**20
+        mixture.write_timing_row(f"collate_worker{info.id if info else -1}", {
+            "first_idx": samples[0].get("_mixture_idx"), "start": t0, "end": time.time(),
+            "tensor_mb": round(tensor_mb, 1), "pil_mb": round(pil_mb, 1)})
     return list(samples)
