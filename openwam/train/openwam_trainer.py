@@ -551,7 +551,7 @@ class OpenWAMTrainer:
             # video_uint8_in_workers: frames stacked to uint8 in the workers, pinned by
             # the DataLoader (bitwise-identical model input).
             collate_fn=collate_samples_with_video_uint8 if getattr(t, "video_uint8_in_workers", False) else list,
-            pin_memory=True,
+            pin_memory=bool(getattr(t, "dataloader_pin_memory", True)),
         )
         if not shuffle:
             logger.info(

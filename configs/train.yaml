@@ -62,6 +62,7 @@ training:
   max_gpu_memory_gib: null        # cap the CUDA allocator per process (e.g. 79 to emulate an 80 GB A800 on a 96 GB H20)
   loss_log_csv: false             # write <run dir>/debug_loss_history.csv every step (rank 0) outside debug mode
   log_flush_every: 1              # loss_log_csv rows per file append (also flushed before checkpoints / at the end)
+  dataloader_pin_memory: true     # DataLoader pin-memory thread (false: batches stay unpinned and upload synchronously)
   video_uint8_in_workers: false   # DataLoader workers stack the frames to uint8 and the loader pins them; the
                                   # training process only uploads (bitwise-identical input, Wan backbone)
 
