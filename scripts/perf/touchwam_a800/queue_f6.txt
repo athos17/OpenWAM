@@ -1,4 +1,5 @@
 # TAG                CONFIG                               [PROFILE=1] [hydra overrides]
-# Same-day control for f6_pf4 (factor 2, the PyTorch default), then a deeper DataLoader queue against the data stalls.
-f6_pf2r              train_touchwam_a800_f1_20261031      training.stop_after_steps=200 training.step_timing.record_steps=200
+# DataLoader prefetch factor against the data stalls: same day, nothing else on the shared vePFS (f6_pf4 overlapped 4-node runs).
+f6_pf2r              train_touchwam_a800_f1_20261031      training.stop_after_steps=500 training.step_timing.record_steps=500
+f6_pf4r              train_touchwam_a800_f1_20261031      training.stop_after_steps=500 training.step_timing.record_steps=500 training.dataloader_prefetch_factor=4
 f6_pf8               train_touchwam_a800_f1_20261031      training.stop_after_steps=500 training.step_timing.record_steps=500 training.dataloader_prefetch_factor=8
