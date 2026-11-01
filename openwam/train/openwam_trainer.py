@@ -553,6 +553,9 @@ class OpenWAMTrainer:
             collate_fn=collate_samples_with_video_uint8 if getattr(t, "video_uint8_in_workers", False) else list,
             pin_memory=bool(getattr(t, "dataloader_pin_memory", True)),
         )
+        prefetch_factor = getattr(t, "dataloader_prefetch_factor", None)
+        if prefetch_factor and kwargs["num_workers"] > 0:
+            kwargs["prefetch_factor"] = int(prefetch_factor)
         if not shuffle:
             logger.info(
                 "DataLoader shuffle disabled for MixtureDataset; its shuffled index map "
