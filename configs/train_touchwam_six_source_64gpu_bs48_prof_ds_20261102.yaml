@@ -1,0 +1,29 @@
+# 8 x 8 A800 profile, DeepSpeed side: the r2 production recipe plus training.touchwam_p1, so it differs from
+# the HSDP side only in the backend. 20 profiled steps (23-42) on all ranks of node 0 and the first rank of
+# every other node; the rest of the fleet runs untraced. Profiled steps are slower; compare stages, not time.
+defaults:
+  - train_touchwam_six_source_64gpu_bs48_20261030
+  - _self_
+
+training:
+  stop_after_steps: 45
+  save_steps: 0
+  save_full_states_for_resume: false
+  touchwam_p1:
+    deferred_modality_sync: true
+    deferred_blocking_steps: 20
+    input_validation_steps: 20
+    pinned_tactile_h2d: true
+  step_timing:
+    record_steps: 45
+    peak_per_step: true
+  torch_profile:
+    enabled: true
+    wait: 20
+    warmup: 2
+    active: 20
+    ranks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32, 40, 48, 56]
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_64gpu_profile_20261102_ds}
+
+project:
+  name: touchwam-64gpu-profile-ds-20261102

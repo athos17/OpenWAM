@@ -28,6 +28,7 @@ are not counted; the training attention paths here go through ATen SDPA.
 from __future__ import annotations
 
 import contextlib
+import gc
 import json
 import os
 import statistics
@@ -103,6 +104,12 @@ class StepTimer:
         self.last: dict = {}
         # Set by the trainer under training.torch_profile: stages emit stage/<name> ranges.
         self.annotate = False
+        # Python GC pauses inside the step, whichever thread runs the collection (it holds the GIL).
+        self._gc_t0 = None
+        self._gc_pause = 0.0
+        self._gc_gen2 = 0
+        if self.enabled:
+            gc.callbacks.append(self._on_gc)
 
     @classmethod
     def from_cfg(cls, cfg, **kw) -> "StepTimer":
@@ -189,9 +196,18 @@ class StepTimer:
 
         setattr(obj, method, timed)
 
+    def _on_gc(self, phase: str, info: dict) -> None:
+        if phase == "start":
+            self._gc_t0 = time.perf_counter()
+        elif self._gc_t0 is not None:
+            self._gc_pause += time.perf_counter() - self._gc_t0
+            self._gc_gen2 += info["generation"] == 2
+            self._gc_t0 = None
+
     def begin_step(self) -> None:
         if not self.enabled:
             return
+        self._gc_pause, self._gc_gen2 = 0.0, 0
         if self.peak_per_step and self._cuda:
             torch.cuda.reset_peak_memory_stats()
         now = time.perf_counter()
@@ -203,7 +219,8 @@ class StepTimer:
         """Resolve this step's stages into ``{name_cpu_s, name_gpu_s}`` (summed per name)."""
         if not self.enabled:
             return {}
-        out = {"data_wait_cpu_s": self._data_wait, "step_cpu_s": time.perf_counter() - self._step_t0}
+        out = {"data_wait_cpu_s": self._data_wait, "step_cpu_s": time.perf_counter() - self._step_t0,
+               "gc_pause_cpu_s": self._gc_pause, "gc_gen2_count": self._gc_gen2}
         if self._prev_step_t0 is not None:
             out["iteration_cpu_s"] = self._step_t0 - self._prev_step_t0
         if self._pending and self._pending[-1][3] is not None:

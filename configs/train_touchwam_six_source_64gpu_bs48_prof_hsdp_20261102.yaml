@@ -1,0 +1,20 @@
+# 8 x 8 A800 profile, HSDP side: the P5 speed-test config with the profile window of the DeepSpeed side
+# (train_touchwam_six_source_64gpu_bs48_prof_ds_20261102).
+defaults:
+  - train_touchwam_six_source_64gpu_bs48_hsdp_20261102
+  - _self_
+
+training:
+  stop_after_steps: 45
+  step_timing:
+    record_steps: 45
+  torch_profile:
+    enabled: true
+    wait: 20
+    warmup: 2
+    active: 20
+    ranks: [0, 1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 32, 40, 48, 56]
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_64gpu_profile_20261102_hsdp}
+
+project:
+  name: touchwam-64gpu-profile-hsdp-20261102
