@@ -11,7 +11,9 @@ dataloader:
       dataset_dir: /gaozt-test1/lyh/datasets/h20_profile_subset/egodex_300h_video_v1_sub
       weight: 0.4423
     agibot:
-      dataset_dir: /gaozt-test1/lyh/datasets/h20_profile_subset/agibot_pretrain_v1_sub
+      # The h20 subset's stats fail this branch's pooled-contributor check; here every bucket's meta/ is present.
+      dataset_dir: /gaozt-test1/lyh/datasets/touchwam_subset_v1/agibot_pretrain_v1
+      include_buckets: [task_551, task_744]
       weight: 0.2007
     sharpa:
       dataset_dir: /gaozt-test1/lyh/datasets/sharpadex_eef_global_v1/buckets_sub
