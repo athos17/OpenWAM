@@ -1,0 +1,34 @@
+# P5 speed test on 8 x 8 A800: the 64-GPU bs48 production recipe (job-v19j6o92tot0, r2) on FSDP2 / HSDP
+# 8 x 8 with the F1 switches measured on 2 x 8 (configs/train_touchwam_a800_f1_20261031.yaml). Same data,
+# seed, batch and LR schedule as r2 (stop_after_steps keeps the full horizon), so steps compare with its
+# step traces and loss history. No checkpoints.
+defaults:
+  - train_touchwam_six_source_64gpu_bs48_20261030
+  - _self_
+
+training:
+  stop_after_steps: 300
+  save_steps: 0
+  save_full_states_for_resume: false
+  backend: fsdp2
+  fsdp2:
+    replicate: null               # = nnodes
+    param_dtype: bf16
+    reduce_dtype: bf16
+    reshard_after_forward: true
+    forward_prefetch: true
+    local_optimizer: true
+  optimizer_fused: true
+  overlap_param_allgather: false  # DeepSpeed-only
+  touchwam_p1:
+    deferred_modality_sync: true
+    deferred_blocking_steps: 20
+    input_validation_steps: 20
+    pinned_tactile_h2d: true
+  step_timing:
+    record_steps: 300
+    peak_per_step: true
+  output_path: ${oc.env:TOUCHWAM_OUTPUT_ROOT,/mnt/pfs/v89atp/workspace/outputs/touchwam_64gpu_hsdp_speed_20261102}
+
+project:
+  name: touchwam-64gpu-hsdp-speed-20261102
