@@ -1,0 +1,16 @@
+# The no-tactile s9 baseline under FSDP2 / HSDP 2x8 with the F1 switches (train_touchwam_a800_f1_20261031).
+defaults:
+  - train_a800_3src_s9_20261102
+  - _self_
+
+training:
+  backend: fsdp2
+  fsdp2:
+    reduce_dtype: bf16
+    forward_prefetch: true
+    local_optimizer: true
+  optimizer_fused: true
+  overlap_param_allgather: false
+
+project:
+  name: openwam-a800-3src-h1-20261102

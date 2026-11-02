@@ -1,0 +1,56 @@
+# No-tactile OpenWAM baseline on 2x8 A800: the three-source s9 recipe (accel branch train_h20_3src_s9,
+# scripts/perf/a800_3src.sh) under DeepSpeed ZeRO-2, flattened. Same subsets, mix, seed and pretrain checkpoint.
+defaults:
+  - train_action_random_64gpu
+  - _self_
+
+dataloader:
+  weight_strategy: manual
+  datasets:
+    egodex:
+      dataset_dir: /gaozt-test1/lyh/datasets/h20_profile_subset/egodex_300h_video_v1_sub
+      weight: 0.4423
+    agibot:
+      dataset_dir: /gaozt-test1/lyh/datasets/h20_profile_subset/agibot_pretrain_v1_sub
+      weight: 0.2007
+    sharpa:
+      dataset_dir: /gaozt-test1/lyh/datasets/sharpadex_eef_global_v1/buckets_sub
+      weight: 0.3570
+
+training:
+  finetune_ckpt_path: /gaozt-test1/lyh/models/OpenWAM-Alpha-Pretrain-Foundation-Model/checkpoint_step_154000.safetensors
+  num_epochs: null
+  max_steps: 34599
+  stop_after_steps: 300
+  save_steps: 0
+  save_full_states_for_resume: false
+  loss_log_csv: true
+  log_flush_every: 50
+  deepspeed_zero:
+    overlap_comm: true
+    contiguous_gradients: true
+    reduce_bucket_size: 200000000
+    allgather_bucket_size: 500000000
+  text_padding: longest
+  text_dedup: true
+  video_uint8_in_workers: true
+  vae_cudnn_benchmark: true
+  vae_channels_last: true
+  vae_fused_norm: true
+  frame_time_modulation: true
+  dit_block_fusion: true
+  overlap_param_allgather: true
+  gradient_checkpointing_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  step_timing:
+    enabled: true
+    summary_every: 50
+    record_steps: 300
+    peak_per_step: true
+    mfu: false
+
+model:
+  architecture:
+    mot_split_attention: true
+
+project:
+  name: openwam-a800-3src-s9-20261102

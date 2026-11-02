@@ -244,6 +244,9 @@ class FSDP2Accelerator:
                     if view is None:
                         view = views[param] = torch.nn.Parameter(param._local_tensor, requires_grad=param.requires_grad)
                     view.grad = None if param.grad is None else param.grad._local_tensor
+                    # ZeRO-2 steps unused parameters on zero gradients; ModalityAwareAdamW fills its own.
+                    if view.grad is None and "touchwam_active_in_window" not in group:
+                        view.grad = torch.zeros_like(view)
                     opt.state[view] = {k: v._local_tensor if isinstance(v, DTensor) else v
                                        for k, v in opt.state[param].items()}
                     swapped.append(view)
