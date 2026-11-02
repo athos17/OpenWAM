@@ -35,6 +35,7 @@ Helpers:
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import random
@@ -108,6 +109,7 @@ def dataloader_worker_init_fn(worker_id: int) -> None:
     base_seed = info.seed % (2**32 - 1)
     random.seed(base_seed)
     np.random.seed(base_seed)
+    gc.enable()  # forked workers keep automatic GC when training.gc_every_steps disables it
 
 
 def make_dataloader_generator(seed: int, *, rank: int = 0) -> torch.Generator:

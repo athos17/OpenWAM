@@ -22,6 +22,7 @@ Usage:
 """
 
 import contextlib
+import gc
 import itertools
 import logging
 import math
@@ -213,6 +214,7 @@ class OpenWAMTrainer:
             return self._train(num_epochs=num_epochs, max_steps=max_steps)
         finally:
             self._flush_logs()
+            gc.enable()
             if getattr(self, "_owns_deferred_allgather", False):
                 deferred_allgather.uninstall()
                 self._owns_deferred_allgather = False
@@ -389,6 +391,13 @@ class OpenWAMTrainer:
         # different ranks at the same step keep in-batch timestep diversity.
         # Gated on _run_seed so unseeded production runs stay fully stochastic.
         epochs = itertools.count(start_epoch) if num_epochs is None else range(start_epoch, num_epochs)
+        # training.gc_every_steps: no automatic Python GC in the training process (TorchTitan's
+        # GarbageCollection: generation 1 every N steps, at the same step on every rank).
+        gc_every_steps = t.get("gc_every_steps", None)
+        if gc_every_steps:
+            gc.disable()
+            gc.collect(1)
+            logger.info("Automatic Python GC off; generation 1 collection every %d steps", gc_every_steps)
         for epoch in epochs:
             if hasattr(dataloader, "set_epoch"):
                 dataloader.set_epoch(epoch)
@@ -439,6 +448,9 @@ class OpenWAMTrainer:
 
                 with timer.stage("metrics_reduce"):
                     metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
+                if gc_every_steps and global_step % gc_every_steps == 0:
+                    with timer.stage("python_gc"):
+                        gc.collect(1)
                 timer.end_step()
                 timer.record_step(global_step, metrics)
 
